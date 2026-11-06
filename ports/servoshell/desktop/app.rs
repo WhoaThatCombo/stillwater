@@ -20,6 +20,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::window::WindowId;
 
 use super::event_loop::AppEvent;
+use crate::desktop::diagnostics;
 use crate::desktop::event_loop::ServoShellEventLoop;
 use crate::desktop::headed_window::HeadedWindow;
 use crate::desktop::headless_window::HeadlessWindow;
@@ -193,6 +194,30 @@ impl App {
         })
     }
 
+    /// Why the loop is (or isn't) busy, for the diagnostic log.
+    fn busy_reason(&self) -> String {
+        let grace = self
+            .tick_until
+            .map(|until| until.saturating_duration_since(Instant::now()).as_millis())
+            .unwrap_or(0);
+        let AppState::Running(state) = &self.state else {
+            return format!("grace={grace}ms (not running)");
+        };
+        let mut loading = 0;
+        let mut animating = 0;
+        for window in state.windows().iter() {
+            for (_, webview) in window.webviews() {
+                if !matches!(webview.load_status(), LoadStatus::Complete) {
+                    loading += 1;
+                }
+                if webview.animating() {
+                    animating += 1;
+                }
+            }
+        }
+        format!("busy={} grace={grace}ms loading={loading} animating={animating}", self.busy())
+    }
+
     /// Keep the loop alive for at least duration from now.
     fn keep_awake_for(&mut self, duration: std::time::Duration) {
         let until = Instant::now() + duration;
@@ -220,13 +245,23 @@ impl App {
             self.state = AppState::ShuttingDown;
             return false;
         }
+
+        // Don't let a busy event queue starve painting (see HeadedWindow::redraw_if_pending).
+        let windows: Vec<_> = state.windows().iter().cloned().collect();
+        for window in windows {
+            if let Some(headed_window) = window.platform_window().as_headed_window() {
+                headed_window.redraw_if_pending(state.clone(), window.clone());
+            }
+        }
         true
     }
 }
 
 impl ApplicationHandler<AppEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        diagnostics::log("resumed: initialising Servo");
         self.init(Some(event_loop));
+        diagnostics::log("resumed: Servo initialised");
         // Startup creates the window, the sidebar and the first page: stay awake for it.
         self.keep_awake_for(std::time::Duration::from_secs(5));
         event_loop.set_control_flow(self.control_flow());
@@ -236,6 +271,8 @@ impl ApplicationHandler<AppEvent> for App {
         if !matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
             return;
         }
+        diagnostics::count("tick");
+        diagnostics::maybe_summarize(|| self.busy_reason());
         if let AppState::Running(state) = &self.state {
             for window in state.windows().iter() {
                 window.set_needs_repaint();
@@ -253,6 +290,14 @@ impl ApplicationHandler<AppEvent> for App {
         window_id: WindowId,
         window_event: WindowEvent,
     ) {
+        diagnostics::count(window_event_name(&window_event));
+        if let WindowEvent::MouseInput { state, button, .. } = &window_event {
+            diagnostics::log(format!("mouse {button:?} {state:?}"));
+        }
+        if let WindowEvent::Focused(focused) = &window_event {
+            diagnostics::log(format!("window focused={focused}"));
+        }
+        diagnostics::maybe_summarize(|| self.busy_reason());
         // Input can start work (navigation, scrolling, sidebar changes) that needs a few frames.
         if !matches!(window_event, WindowEvent::RedrawRequested) {
             self.keep_awake_for(std::time::Duration::from_millis(750));
@@ -288,6 +333,10 @@ impl ApplicationHandler<AppEvent> for App {
             return;
         };
 
+        diagnostics::count("app_event");
+        if !matches!(app_event, AppEvent::Waker | AppEvent::RequestRepaint(_)) {
+            diagnostics::log(format!("app event: {app_event:?}"));
+        }
         let opened_url = matches!(app_event, AppEvent::OpenUrl(_));
         match app_event {
             AppEvent::Waker => (),
@@ -375,3 +424,24 @@ fn load_userscripts(userscripts_directory: Option<&Path>) -> std::io::Result<Vec
     Ok(userscripts)
 }
 
+
+fn window_event_name(event: &WindowEvent) -> &'static str {
+    match event {
+        WindowEvent::RedrawRequested => "redraw",
+        WindowEvent::CursorMoved { .. } => "cursor_moved",
+        WindowEvent::CursorEntered { .. } => "cursor_entered",
+        WindowEvent::CursorLeft { .. } => "cursor_left",
+        WindowEvent::MouseInput { .. } => "mouse_input",
+        WindowEvent::MouseWheel { .. } => "mouse_wheel",
+        WindowEvent::KeyboardInput { .. } => "keyboard",
+        WindowEvent::ModifiersChanged(..) => "modifiers",
+        WindowEvent::Focused(..) => "focused",
+        WindowEvent::Resized(..) => "resized",
+        WindowEvent::Moved(..) => "moved",
+        WindowEvent::Occluded(..) => "occluded",
+        WindowEvent::ScaleFactorChanged { .. } => "scale_factor",
+        WindowEvent::Ime(..) => "ime",
+        WindowEvent::CloseRequested => "close_requested",
+        _ => "other_window_event",
+    }
+}

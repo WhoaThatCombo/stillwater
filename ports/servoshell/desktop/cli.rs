@@ -6,7 +6,7 @@ use std::{env, panic};
 
 use crate::desktop::app::App;
 use crate::desktop::event_loop::ServoShellEventLoop;
-use crate::desktop::{single_instance, updater};
+use crate::desktop::{diagnostics, single_instance, updater};
 use crate::panic_hook;
 use crate::prefs::{ArgumentParsingResult, parse_command_line_arguments};
 
@@ -53,6 +53,14 @@ pub fn main() {
     {
         return;
     }
+
+    diagnostics::init();
+    diagnostics::log(format!(
+        "Stillwater {} starting: exe={:?} url={:?} single_instance={single_instance}",
+        updater::CURRENT_VERSION,
+        env::current_exe().ok(),
+        servoshell_preferences.url,
+    ));
 
     crate::init_tracing(servoshell_preferences.tracing_filter.as_deref());
 

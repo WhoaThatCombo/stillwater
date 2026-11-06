@@ -315,6 +315,7 @@ impl Gui {
         // Caption buttons and window dragging for the frameless window.
         let winit_window = headed_window.winit_window();
         for action in self.sidebar.take_window_actions() {
+            crate::desktop::diagnostics::log(format!("window action: {action:?}"));
             match action {
                 WindowAction::Minimize => winit_window.set_minimized(true),
                 WindowAction::ToggleMaximize => {
@@ -515,6 +516,7 @@ impl Gui {
         if !self.shown {
             self.shown = true;
             window.set_visible(true);
+            crate::desktop::diagnostics::log("first frame painted; window shown");
         }
     }
 

@@ -43,7 +43,7 @@ const MESSAGE_PREFIX: &str = "__sidebar__";
 const SIDEBAR_URL: &str = "servo:sidebar/index.html";
 
 /// Window operations requested by the sidebar's own caption buttons.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum WindowAction {
     Minimize,
     ToggleMaximize,
@@ -375,6 +375,7 @@ impl Sidebar {
                 "ready" => {
                     self.last_pushed_state = None;
                     self.ready = true;
+                    crate::desktop::diagnostics::log("sidebar page ready");
                 },
                 "go" => {
                     window.queue_user_interface_command(UserInterfaceCommand::Go(argument.into()));

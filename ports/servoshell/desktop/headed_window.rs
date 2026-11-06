@@ -46,6 +46,7 @@ use {
 use super::geometry::{winit_position_to_euclid_point, winit_size_to_euclid_size};
 use super::keyutils::{CMD_OR_ALT, keyboard_event_from_winit};
 use crate::desktop::accelerated_gl_media::setup_gl_accelerated_media;
+use crate::desktop::diagnostics;
 use crate::desktop::dialog::Dialog;
 use crate::desktop::event_loop::{AppEvent, RepaintEventLoopWaker};
 use crate::desktop::gui::Gui;
@@ -108,6 +109,10 @@ pub struct HeadedWindow {
     sidebar_mouse_point: Cell<Option<Point2D<f32, DevicePixel>>>,
     /// The frameless-window edge the mouse is over, if any.
     resize_direction: Cell<Option<winit::window::ResizeDirection>>,
+    /// A repaint was requested and hasn't happened yet (see `redraw_if_pending`).
+    repaint_pending: Cell<bool>,
+    /// When the window was last painted.
+    last_paint: Cell<Option<std::time::Instant>>,
 }
 
 impl HeadedWindow {
@@ -241,11 +246,30 @@ impl HeadedWindow {
             last_mouse_position: Default::default(),
             sidebar_mouse_point: Default::default(),
             resize_direction: Default::default(),
+            repaint_pending: Cell::new(false),
+            last_paint: Cell::new(None),
         })
     }
 
     pub(crate) fn winit_window(&self) -> &winit::window::Window {
         &self.winit_window
+    }
+
+    /// Paint now if a repaint is pending and the window hasn't been painted for a few
+    /// milliseconds. Windows only delivers the paint message (RedrawRequested) once the
+    /// message queue is empty, and Servo can keep the queue busy with wake-ups, so relying
+    /// on it alone can starve painting indefinitely.
+    pub(crate) fn redraw_if_pending(&self, state: Rc<RunningAppState>, window: Rc<ServoShellWindow>) {
+        if !self.repaint_pending.get() {
+            return;
+        }
+        let due = self
+            .last_paint
+            .get()
+            .is_none_or(|last| last.elapsed() >= std::time::Duration::from_millis(8));
+        if due {
+            self.handle_winit_window_event(state, window, WindowEvent::RedrawRequested);
+        }
     }
 
     pub(crate) fn event_loop_proxy(&self) -> EventLoopProxy<AppEvent> {
@@ -611,6 +635,7 @@ impl HeadedWindow {
                     return false;
                 };
                 if *element_state == ElementState::Pressed {
+                    diagnostics::log(format!("click: sidebar at {point:?}"));
                     gui.sidebar.set_focused(true, window);
                 }
                 let mouse_button = match button {
@@ -685,9 +710,16 @@ impl HeadedWindow {
         // If requested to redraw or resized, repaint as soon as possible, so that new buffer
         // contents are available to the window manager.
         if event == WindowEvent::RedrawRequested || resized {
+            let frame_start = std::time::Instant::now();
+            self.repaint_pending.set(false);
+            self.last_paint.set(Some(frame_start));
             let mut gui = self.gui.borrow_mut();
             gui.update(&state, &window, self);
             gui.paint(&self.winit_window);
+            let frame_time = frame_start.elapsed();
+            if frame_time > std::time::Duration::from_millis(50) {
+                diagnostics::log(format!("slow frame: {frame_time:?}"));
+            }
         }
 
         if let WindowEvent::CursorMoved { position, .. } = event {
@@ -737,6 +769,7 @@ impl HeadedWindow {
                     ..
                 } => {
                     if let Some(direction) = self.resize_direction.get() {
+                        diagnostics::log(format!("click: resize edge {direction:?}"));
                         let _ = self.winit_window.drag_resize_window(direction);
                         return;
                     }
@@ -758,6 +791,13 @@ impl HeadedWindow {
                     .on_window_event(&self.winit_window, &event);
             }
             return;
+        }
+
+        if let WindowEvent::MouseInput { state: ElementState::Pressed, .. } = &event {
+            diagnostics::log(format!(
+                "click: not sidebar/edge; dialog_open={dialog_open} egui_area={}",
+                should_forward_mouse_event_to_egui()
+            ));
         }
 
         // Handle the event
@@ -849,6 +889,12 @@ impl HeadedWindow {
                     self.modifiers_state.set(modifiers.state())
                 },
                 WindowEvent::MouseInput { state, button, .. } => {
+                    if state == ElementState::Pressed {
+                        diagnostics::log(format!(
+                            "click: page at {:?}",
+                            self.webview_relative_mouse_point.get()
+                        ));
+                    }
                     self.handle_mouse_button_event(&webview, button, state);
                 },
                 WindowEvent::CursorMoved { position, .. } => {
@@ -1062,6 +1108,7 @@ impl PlatformWindow for HeadedWindow {
     }
 
     fn request_repaint(&self, _: &ServoShellWindow) {
+        self.repaint_pending.set(true);
         self.winit_window.request_redraw();
     }
 
