@@ -73,6 +73,8 @@ enum LazyLoadResumptionSteps {
     #[default]
     None,
     SrcDoc,
+    /// Navigate to the `src` URL (the rest of "process the iframe attributes").
+    Url { first_time: bool },
 }
 
 #[dom_struct]
@@ -99,6 +101,8 @@ pub(crate) struct HTMLIFrameElement {
     /// <https://html.spec.whatwg.org/multipage/#lazy-load-resumption-steps>
     #[no_trace]
     lazy_load_resumption_steps: Cell<LazyLoadResumptionSteps>,
+    /// The lazy load resumption steps are running "process the iframe attributes" again.
+    resuming_lazy_load: Cell<bool>,
     /// Keeping track of whether the iframe will be navigated
     /// outside of the processing of it's attribute(for example: form navigation).
     /// This is necessary to prevent the iframe load event steps
@@ -410,6 +414,34 @@ impl HTMLIFrameElement {
         self.navigate_an_iframe_or_frame(cx, load_data, mode);
     }
 
+    /// Whether this iframe is waiting to come near the viewport before navigating.
+    pub(crate) fn is_waiting_for_lazy_load(&self) -> bool {
+        self.lazy_load_resumption_steps.get() != LazyLoadResumptionSteps::None
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#lazy-load-resumption-steps>
+    pub(crate) fn resume_lazy_load(&self, cx: &mut JSContext) {
+        match self
+            .lazy_load_resumption_steps
+            .replace(LazyLoadResumptionSteps::None)
+        {
+            LazyLoadResumptionSteps::None => (),
+            LazyLoadResumptionSteps::SrcDoc => {
+                self.navigate_to_the_srcdoc_resource(cx, ProcessingMode::NotFirstTime);
+            },
+            LazyLoadResumptionSteps::Url { first_time } => {
+                let mode = if first_time {
+                    ProcessingMode::FirstTime
+                } else {
+                    ProcessingMode::NotFirstTime
+                };
+                self.resuming_lazy_load.set(true);
+                self.process_the_iframe_attributes(cx, mode);
+                self.resuming_lazy_load.set(false);
+            },
+        }
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#the-iframe-element:potentially-delays-the-load-event>
     fn mark_navigation_as_lazy_loaded(&self, cx: &mut JSContext) {
         // > An iframe element whose current navigation was lazy loaded boolean is false potentially delays the load event.
@@ -437,7 +469,7 @@ impl HTMLIFrameElement {
                 // Step 1.2.2. Set element's current navigation was lazy loaded boolean to true.
                 self.mark_navigation_as_lazy_loaded(cx);
                 // Step 1.2.3. Start intersection-observing a lazy loading element for element.
-                // TODO
+                self.owner_document().add_lazy_load_iframe(self);
                 // Step 1.2.4. Return.
                 return;
             }
@@ -462,6 +494,19 @@ impl HTMLIFrameElement {
             // Step 2.3.1. Run the iframe load event steps given element.
             self.run_iframe_load_event_steps(cx);
             // Step 2.3.2. Return.
+            return;
+        }
+
+        // Lazy loading: if the will lazy load element steps return true, set the lazy load
+        // resumption steps to the rest of this algorithm, mark the navigation as lazy loaded,
+        // start intersection-observing a lazy loading element, and return.
+        if !self.resuming_lazy_load.get() && self.will_lazy_load_element_steps() {
+            self.lazy_load_resumption_steps
+                .set(LazyLoadResumptionSteps::Url {
+                    first_time: mode == ProcessingMode::FirstTime,
+                });
+            self.mark_navigation_as_lazy_loaded(cx);
+            self.owner_document().add_lazy_load_iframe(self);
             return;
         }
 
@@ -672,6 +717,7 @@ impl HTMLIFrameElement {
             script_window_proxies: ScriptThread::window_proxies(),
             current_navigation_was_lazy_loaded: Default::default(),
             lazy_load_resumption_steps: Default::default(),
+            resuming_lazy_load: Default::default(),
             pending_navigation: Default::default(),
             frozen_name: Default::default(),
         }
@@ -1170,18 +1216,10 @@ impl VirtualMethods for HTMLIFrameElement {
                 }
 
                 // Step 1. Let resumptionSteps be the iframe element's lazy load resumption steps.
+                // Step 2. If resumptionSteps is null, then return.
                 // Step 3. Set the iframe's lazy load resumption steps to null.
-                let previous_resumption_steps = self
-                    .lazy_load_resumption_steps
-                    .replace(LazyLoadResumptionSteps::None);
-                match previous_resumption_steps {
-                    // Step 2. If resumptionSteps is null, then return.
-                    LazyLoadResumptionSteps::None => (),
-                    LazyLoadResumptionSteps::SrcDoc => {
-                        // Step 4. Invoke resumptionSteps.
-                        self.navigate_to_the_srcdoc_resource(cx, ProcessingMode::NotFirstTime);
-                    },
-                }
+                // Step 4. Invoke resumptionSteps.
+                self.resume_lazy_load(cx);
             },
             _ => {},
         }
