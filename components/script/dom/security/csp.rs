@@ -30,12 +30,54 @@ use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::element::Element;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::htmlscriptelement::HTMLScriptElement;
 use crate::dom::node::{Node, NodeTraits};
 use crate::dom::reporting::reportingobserver::ReportingObserver;
 use crate::dom::security::cspviolationreporttask::CSPViolationReportTask;
 use crate::dom::trustedtypes::trustedscript::TrustedScript;
 use crate::dom::window::Window;
 use crate::tasks::task::TaskOnce;
+
+/// <https://w3c.github.io/webappsec-csp/#match-element-to-source-list> Step 4.1: an inline script
+/// element that is not parser-inserted matches a source list containing 'strict-dynamic'.
+///
+/// The content-security-policy crate predates that step, so for such elements, return a copy of
+/// `csp_list` where the directive that governs inline scripts allows them when it contains
+/// 'strict-dynamic'. Sites such as bing.com load code by inserting inline scripts from their
+/// nonced scripts under a `'nonce-…' 'strict-dynamic'` policy.
+fn allow_script_inserted_inline_scripts(csp_list: &CspList) -> Cow<'_, CspList> {
+    let governing_directive = |policy: &content_security_policy::Policy| {
+        ["script-src-elem", "script-src", "default-src"]
+            .iter()
+            .find_map(|name| {
+                policy
+                    .directive_set
+                    .iter()
+                    .position(|directive| directive.name == *name)
+            })
+    };
+    let has_strict_dynamic = |directive: &content_security_policy::Directive| {
+        directive
+            .value
+            .iter()
+            .any(|expression| expression.eq_ignore_ascii_case("'strict-dynamic'"))
+    };
+    if !csp_list.0.iter().any(|policy| {
+        governing_directive(policy)
+            .is_some_and(|index| has_strict_dynamic(&policy.directive_set[index]))
+    }) {
+        return Cow::Borrowed(csp_list);
+    }
+    let mut csp_list = csp_list.clone();
+    for policy in csp_list.0.iter_mut() {
+        if let Some(index) = governing_directive(policy) &&
+            has_strict_dynamic(&policy.directive_set[index])
+        {
+            policy.directive_set[index].value = vec!["'unsafe-inline'".to_owned()];
+        }
+    }
+    Cow::Owned(csp_list)
+}
 
 pub(crate) trait CspReporting {
     fn is_js_evaluation_allowed(
@@ -268,8 +310,15 @@ impl CspReporting for Option<CspList> {
                 None
             },
         };
-        let (result, violations) =
-            csp_list.should_elements_inline_type_behavior_be_blocked(&element, type_, source);
+        let script_inserted = type_ == InlineCheckType::Script &&
+            el.downcast::<HTMLScriptElement>()
+                .is_some_and(|script| !script.is_parser_inserted());
+        let (result, violations) = if script_inserted {
+            allow_script_inserted_inline_scripts(csp_list)
+                .should_elements_inline_type_behavior_be_blocked(&element, type_, source)
+        } else {
+            csp_list.should_elements_inline_type_behavior_be_blocked(&element, type_, source)
+        };
 
         let source_position = el.compute_source_position(current_line.saturating_sub(2).max(1));
 

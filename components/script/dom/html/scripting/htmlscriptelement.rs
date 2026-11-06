@@ -1156,6 +1156,10 @@ impl HTMLScriptElement {
         self.parser_inserted.set(parser_inserted);
     }
 
+    pub(crate) fn is_parser_inserted(&self) -> bool {
+        self.parser_inserted.get()
+    }
+
     pub(crate) fn set_already_started(&self, already_started: bool) {
         self.already_started.set(already_started);
     }
