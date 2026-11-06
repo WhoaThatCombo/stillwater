@@ -677,5 +677,9 @@ pub fn create_http_client(tls_config: TlsConfig) -> ServoClient {
         // limit controls the maximum idle connections per host, which we still don't want to grow
         // without bound.
         .pool_max_idle_per_host(6)
+        // Stillwater: hyper's default HTTP/2 header-list limit is small, and sites such as
+        // YouTube send larger response headers (policies, cookies). Exceeding it makes the h2
+        // library reset the stream with PROTOCOL_ERROR, so the page fails to load.
+        .http2_max_header_list_size(256 * 1024)
         .build(InstrumentedConnector::from(connector))
 }

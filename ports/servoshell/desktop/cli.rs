@@ -69,9 +69,13 @@ pub fn main() {
         true => ServoShellEventLoop::headless(),
         false => ServoShellEventLoop::headed(),
     };
-    if single_instance && let Some(proxy) = event_loop.event_loop_proxy() {
-        single_instance::listen_for_other_instances(proxy.clone());
-        updater::check_in_background(proxy);
+    if let Some(proxy) = event_loop.event_loop_proxy() {
+        if single_instance {
+            single_instance::listen_for_other_instances(proxy.clone());
+        }
+        if servoshell_preferences.webdriver_port.get().is_none() {
+            updater::check_in_background(proxy);
+        }
     }
 
     {

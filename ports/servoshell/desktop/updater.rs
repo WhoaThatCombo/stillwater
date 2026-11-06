@@ -19,11 +19,12 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use winit::event_loop::EventLoopProxy;
 
+use crate::desktop::diagnostics;
 use crate::desktop::event_loop::AppEvent;
 
 /// This build's Stillwater version. Keep in sync with `support/windows/*.wxs*` and the
 /// `ProductVersion` in `ports/servoshell/Cargo.toml` when releasing.
-pub(crate) const CURRENT_VERSION: &str = "0.2.0";
+pub(crate) const CURRENT_VERSION: &str = "0.2.1";
 
 const RELEASES_API: &str =
     "https://api.github.com/repos/WhoaThatCombo/stillwater/releases?per_page=10";
@@ -147,17 +148,31 @@ pub(crate) fn check_in_background(proxy: EventLoopProxy<AppEvent>) {
         .spawn(move || {
             // Don't compete with the first page load.
             std::thread::sleep(Duration::from_secs(5));
+            diagnostics::log("update check: asking GitHub for releases");
             let releases = match fetch(RELEASES_API)
                 .and_then(|body| serde_json::from_slice::<Value>(&body).map_err(|e| e.to_string()))
             {
                 Ok(releases) => releases,
                 Err(error) => {
                     warn!("Update check failed: {error}");
+                    diagnostics::log(format!("update check failed: {error}"));
                     return;
                 },
             };
-            if let Some(update) = find_update(&releases) {
-                let _ = proxy.send_event(AppEvent::UpdateAvailable(update));
+            let tags: Vec<&str> = releases
+                .as_array()
+                .map(|list| list.iter().filter_map(|r| r["tag_name"].as_str()).collect())
+                .unwrap_or_default();
+            match find_update(&releases) {
+                Some(update) => {
+                    diagnostics::log(format!("update check: found {update:?}"));
+                    let _ = proxy.send_event(AppEvent::UpdateAvailable(update));
+                },
+                None => diagnostics::log(format!(
+                    "update check: no newer release (running {}, pretend {:?}, releases {tags:?})",
+                    CURRENT_VERSION,
+                    std::env::var("STILLWATER_PRETEND_VERSION").ok()
+                )),
             }
         });
 }
@@ -198,9 +213,14 @@ pub(crate) fn install(update: UpdateInfo, proxy: EventLoopProxy<AppEvent>) {
         .name("StillwaterUpdateInstall".into())
         .spawn(move || {
             let _ = proxy.send_event(AppEvent::UpdateStatus(UpdateStatus::Downloading));
+            diagnostics::log(format!("update: downloading {:?}", update.setup_url));
             let setup = match download_and_verify(&update) {
-                Ok(setup) => setup,
+                Ok(setup) => {
+                    diagnostics::log(format!("update: verified {}", setup.display()));
+                    setup
+                },
                 Err(error) => {
+                    diagnostics::log(format!("update failed: {error}"));
                     let _ = proxy.send_event(AppEvent::UpdateStatus(UpdateStatus::Failed(error)));
                     return;
                 },
