@@ -94,6 +94,7 @@ image = { workspace = true }
 keyboard-types = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
+memmap2 = { workspace = true }
 mime_guess = { workspace = true }
 raw-window-handle = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
