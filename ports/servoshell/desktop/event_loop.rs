@@ -32,6 +32,8 @@ pub enum AppEvent {
     UpdateStatus(crate::desktop::updater::UpdateStatus),
     /// The update installer is waiting for Stillwater to quit.
     UpdateReadyToRestart,
+    /// A manual update check finished without finding an update (message for the user).
+    UpdateCheckDone(String),
     #[cfg(feature = "gamepad")]
     Gamepad(Event, String, GamepadIndex),
 }

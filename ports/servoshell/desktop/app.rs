@@ -391,6 +391,14 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             },
             AppEvent::UpdateReadyToRestart => state.schedule_exit(),
+            AppEvent::UpdateCheckDone(message) => {
+                for window in state.windows().iter() {
+                    if let Some(headed_window) = window.platform_window().as_headed_window() {
+                        headed_window.with_sidebar(|sidebar| sidebar.set_update_check(message.clone()));
+                    }
+                    window.set_needs_update();
+                }
+            },
             #[cfg(feature = "gamepad")]
             AppEvent::Gamepad(event, gamepad_name, gamepad_index) => {
                 state.handle_gamepad_events(event, gamepad_name, gamepad_index);

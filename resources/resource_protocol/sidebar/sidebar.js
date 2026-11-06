@@ -95,6 +95,7 @@ function renderWorkspaces() {
   add.textContent = "";
   add.addEventListener("click", () => send("ws-new"));
   $("workspaces").replaceChildren(...strip, add);
+  root.style.setProperty("--sidebar-bg", state.background);
 }
 
 function renderCaption() {
@@ -120,8 +121,28 @@ function renderUpdate() {
   else button.textContent = `Stillwater ${update.version} is available`;
 }
 
+function renderSettings() {
+  const settings = state.settings;
+  if (!settings) return;
+  document.querySelectorAll("#theme-choice button").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.theme === settings.theme));
+  });
+  $("search-choice").replaceChildren(...settings.searchEngines.map((engine) => {
+    const button = document.createElement("button");
+    button.className = "option";
+    button.textContent = engine.name;
+    button.setAttribute("aria-pressed", String(engine.id === settings.searchEngine));
+    button.addEventListener("click", () => send("set-search", engine.id));
+    return button;
+  }));
+  $("compact-toggle").setAttribute("aria-pressed", String(state.compact));
+  $("version-line").textContent = `Stillwater ${settings.version}`;
+  $("update-check").textContent = state.updateCheck || "";
+}
+
 function render() {
   renderCaption();
+  renderSettings();
   renderUpdate();
   if (state.workspaces) renderWorkspaces();
   tabs.replaceChildren(...state.tabs.map(renderTab));
@@ -139,6 +160,9 @@ window.sidebar = {
   setState(newState) {
     state = newState;
     render();
+  },
+  openSettings() {
+    document.getElementById("settings").hidden = false;
   },
   focusUrl() {
     url.focus();
@@ -171,13 +195,26 @@ $("compact").addEventListener("click", () => send("toggle-compact"));
 $("new-tab").addEventListener("click", () => send("new-tab"));
 
 // Frameless window: caption buttons, and dragging/double-clicking empty sidebar space.
-$("update").addEventListener("click", () => send("update"));
+update.addEventListener("click", () => send("update"));
+
+// Settings panel (the gear in the bottom row).
+const settingsPanel = $("settings");
+$("settings-button").addEventListener("click", () => { settingsPanel.hidden = false; });
+$("settings-close").addEventListener("click", () => { settingsPanel.hidden = true; });
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !settingsPanel.hidden) settingsPanel.hidden = true;
+});
+document.querySelectorAll("#theme-choice button").forEach((button) => {
+  button.addEventListener("click", () => send("set-theme", button.dataset.theme));
+});
+$("compact-toggle").addEventListener("click", () => send("toggle-compact"));
+$("check-updates").addEventListener("click", () => send("check-updates"));
 $("win-min").addEventListener("click", () => send("win-min"));
 $("win-max").addEventListener("click", () => send("win-max"));
 $("win-close").addEventListener("click", () => send("win-close"));
 
 const isDragSurface = (target) =>
-  target.matches("[data-drag], body, #tabs, #workspaces, #workspace-header, .spacer");
+  target.matches("[data-drag], body, #tabs, #footer, #workspaces, #workspace-header, .spacer");
 let lastDragDown = 0;
 document.addEventListener("mousedown", (event) => {
   if (event.button !== 0 || !state.frameless || !isDragSurface(event.target)) return;

@@ -18,6 +18,7 @@
       <a href="https://github.com/WhoaThatCombo/stillwater">Stillwater</a>, powered by
       <a href="https://servo.org">Servo</a>
     </footer>
+    <script src="servo:search-engine.js"></script>
     <script>
       // Placeholder overlay (Servo can select an empty field's placeholder text).
       const form = document.querySelector("form");
@@ -29,7 +30,13 @@
       input.addEventListener("keydown", (event) => {
         if (event.key === "Enter" && input.value.trim()) {
           event.preventDefault();
-          form.submit();
+          // Search with the engine chosen in Stillwater's settings (falls back to the form).
+          const template = window.STILLWATER_SEARCH;
+          if (template) {
+            location.href = template.replace("%s", encodeURIComponent(input.value.trim()));
+          } else {
+            form.submit();
+          }
         }
       });
     </script>

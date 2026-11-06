@@ -85,6 +85,13 @@ impl ProtocolHandler for ServoProtocolHandler {
                 json_response(request, format!("[{pref_list}]"))
             },
 
+            // The search URL template chosen in Stillwater's settings, for the New Tab page.
+            "search-engine.js" => {
+                let template = serde_json::to_string(&crate::desktop::settings::search_template())
+                    .unwrap_or_else(|_| "null".into());
+                script_response(request, format!("window.STILLWATER_SEARCH = {template};"))
+            },
+
             "default-user-agent" => {
                 let user_agent = UserAgentPlatform::default().to_user_agent_string();
                 json_response(request, format!("\"{user_agent}\""))
@@ -106,6 +113,21 @@ fn json_response(
         ResourceFetchTiming::new(request.timing_type()),
     );
     response.headers.typed_insert(ContentType::json());
+    *response.body.lock() = ResponseBody::Done(body.into_bytes());
+    Box::pin(std::future::ready(response))
+}
+
+fn script_response(
+    request: &Request,
+    body: String,
+) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+    let mut response = Response::new(
+        request.current_url(),
+        ResourceFetchTiming::new(request.timing_type()),
+    );
+    response
+        .headers
+        .typed_insert(ContentType::from(mime_guess::mime::APPLICATION_JAVASCRIPT_UTF_8));
     *response.body.lock() = ResponseBody::Done(body.into_bytes());
     Box::pin(std::future::ready(response))
 }

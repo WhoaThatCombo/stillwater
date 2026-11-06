@@ -59,6 +59,7 @@ mod from_winit {
                 Self::UserEvent(AppEvent::OpenUrl(..)) => target!("UserEvent(OpenUrl)"),
                 Self::UserEvent(AppEvent::UpdateAvailable(..)) => target!("UserEvent(UpdateAvailable)"),
                 Self::UserEvent(AppEvent::UpdateStatus(..)) => target!("UserEvent(UpdateStatus)"),
+                Self::UserEvent(AppEvent::UpdateCheckDone(..)) => target!("UserEvent(UpdateCheckDone)"),
                 Self::UserEvent(AppEvent::UpdateReadyToRestart) => {
                     target!("UserEvent(UpdateReadyToRestart)")
                 },

@@ -53,7 +53,9 @@ first install.
 - **Rounded content card**: web pages sit in an inset, rounded frame, like Zen.
 - **No title bar**: like Zen, the page runs to the top edge. Minimise, maximise and close sit in the sidebar,
   and dragging empty sidebar space moves the window (`--native-titlebar` brings the Windows title bar back).
-- **Light and dark**: follows the Windows theme.
+- **Settings** (gear at the bottom of the sidebar, or <kbd>Ctrl</kbd>+<kbd>,</kbd>): light, dark or system
+  appearance (websites that support dark mode follow along), your search engine (DuckDuckGo, Google,
+  Bing or Brave Search), compact mode, and checking for updates.
 
 ![Stillwater's default sidebar](.github/assets/stillwater-sidebar.png)
 
@@ -68,6 +70,7 @@ first install.
 | <kbd>Ctrl</kbd>+<kbd>PgUp</kbd> / <kbd>PgDn</kbd> | Previous / next tab in this space |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>9</kbd> | Switch to space *n* |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> | Toggle compact mode |
+| <kbd>Ctrl</kbd>+<kbd>,</kbd> | Open settings |
 | <kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd> | Back / forward |
 | <kbd>Ctrl</kbd>+<kbd>R</kbd> / <kbd>F5</kbd> | Reload |
 

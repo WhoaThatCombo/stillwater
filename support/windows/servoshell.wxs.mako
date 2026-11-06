@@ -6,7 +6,7 @@
            UpgradeCode="603d88ba-b9d4-4932-8667-ecdfc2b94e0e"
            Language="1033"
            Codepage="1252"
-           Version="0.2.1"
+           Version="0.2.2"
            Scope="perUser"
            InstallerVersion="500">
     <SummaryInformation Keywords="Installer"

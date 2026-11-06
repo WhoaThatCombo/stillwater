@@ -25,6 +25,7 @@ use servo::{
 use url::Url;
 
 use crate::desktop::event_loop::RepaintEventLoopWaker;
+use crate::desktop::settings::{Settings, ThemeChoice};
 use crate::desktop::updater::{UpdateInfo, UpdateStatus};
 use crate::desktop::workspaces::Workspaces;
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
@@ -51,6 +52,8 @@ pub(crate) enum WindowAction {
     Drag,
     /// Install the available update (or open its release page for portable copies).
     Update,
+    /// Check GitHub for an update right now (settings panel).
+    CheckForUpdates,
 }
 
 struct SidebarDelegate {
@@ -113,6 +116,9 @@ pub(crate) struct Sidebar {
     update_status: Option<UpdateStatus>,
     /// The sidebar page has loaded and received its first state.
     ready: bool,
+    settings: RefCell<Settings>,
+    /// Result of a manual update check, shown in the settings panel.
+    update_check: Option<String>,
 }
 
 impl Sidebar {
@@ -120,6 +126,7 @@ impl Sidebar {
         rendering_context: Rc<OffscreenRenderingContext>,
         waker: RepaintEventLoopWaker,
     ) -> Self {
+        let settings = Settings::load();
         Self {
             rendering_context,
             webview: None,
@@ -131,7 +138,9 @@ impl Sidebar {
             next_tab_id: 1,
             favicons: Default::default(),
             // STILLWATER_START_COMPACT: start with the sidebar collapsed (used for testing).
-            compact: Cell::new(std::env::var_os("STILLWATER_START_COMPACT").is_some()),
+            compact: Cell::new(
+                settings.compact || std::env::var_os("STILLWATER_START_COMPACT").is_some(),
+            ),
             peek: Cell::new(false),
             focused: Cell::new(false),
             workspaces: Workspaces::load(),
@@ -142,7 +151,20 @@ impl Sidebar {
             update: None,
             update_status: None,
             ready: false,
+            settings: RefCell::new(settings),
+            update_check: None,
         }
+    }
+
+    /// The theme chosen in settings, or None to follow Windows.
+    pub(crate) fn theme_override(&self) -> Option<Theme> {
+        self.settings.borrow().theme.override_theme()
+    }
+
+    /// Show the result of a manual update check in the settings panel.
+    pub(crate) fn set_update_check(&mut self, message: String) {
+        self.update_check = Some(message);
+        self.last_pushed_state = None;
     }
 
     /// Window operations requested since the last call (caption buttons, dragging).
@@ -346,6 +368,7 @@ impl Sidebar {
     pub(crate) fn toggle_compact(&self) {
         self.compact.set(!self.compact.get());
         self.peek.set(false);
+        self.settings.borrow_mut().set_compact(self.compact.get());
     }
 
     pub(crate) fn set_favicon(&mut self, id: WebViewId, data_url: String) {
@@ -376,10 +399,18 @@ impl Sidebar {
                 "ready" => {
                     self.last_pushed_state = None;
                     self.ready = true;
+                    if std::env::var_os("STILLWATER_OPEN_SETTINGS").is_some() {
+                        self.call("openSettings()");
+                    }
                     crate::desktop::diagnostics::log("sidebar page ready");
                 },
                 "go" => {
-                    window.queue_user_interface_command(UserInterfaceCommand::Go(argument.into()));
+                    // Search with the engine chosen in settings.
+                    let template = self.settings.borrow().search_url_template();
+                    let target = crate::parser::location_bar_input_to_url(argument, template)
+                        .map(|url| url.to_string())
+                        .unwrap_or_else(|| argument.to_owned());
+                    window.queue_user_interface_command(UserInterfaceCommand::Go(target));
                     self.set_focused(false, window);
                 },
                 "back" => window.queue_user_interface_command(UserInterfaceCommand::Back),
@@ -431,6 +462,23 @@ impl Sidebar {
                 "win-close" => self.window_actions.push(WindowAction::Close),
                 "win-drag" => self.window_actions.push(WindowAction::Drag),
                 "update" => self.window_actions.push(WindowAction::Update),
+                "open-settings" => {
+                    if self.compact.get() {
+                        self.peek.set(true);
+                    }
+                    self.call("openSettings()");
+                    layout_changed = true;
+                },
+                "check-updates" => {
+                    self.update_check = Some("Checking…".into());
+                    self.window_actions.push(WindowAction::CheckForUpdates);
+                },
+                "set-theme" => {
+                    if let Some(choice) = ThemeChoice::from_id(argument) {
+                        self.settings.borrow_mut().set_theme(choice);
+                    }
+                },
+                "set-search" => self.settings.borrow_mut().set_search_engine(argument),
                 _ => warn!("unknown sidebar message: {message}"),
             }
             window.set_needs_update();
@@ -479,6 +527,8 @@ impl Sidebar {
             "workspaces": self.workspaces.to_json(),
             "background": background,
             "frameless": self.frameless,
+            "settings": self.settings.borrow().to_json(),
+            "updateCheck": self.update_check,
             "maximized": self.maximized,
             "update": self.update.as_ref().map(|update| serde_json::json!({
                 "version": update.version,

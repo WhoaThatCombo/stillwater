@@ -115,6 +115,8 @@ pub struct HeadedWindow {
     last_paint: Cell<Option<std::time::Instant>>,
     /// The last press in the gaps around the page, to detect double-clicks there.
     last_gutter_press: Cell<Option<std::time::Instant>>,
+    /// Light/dark chosen in Stillwater's settings; `None` follows Windows.
+    theme_override: Cell<Option<Theme>>,
 }
 
 impl HeadedWindow {
@@ -251,6 +253,7 @@ impl HeadedWindow {
             repaint_pending: Cell::new(false),
             last_paint: Cell::new(None),
             last_gutter_press: Cell::new(None),
+            theme_override: Cell::new(None),
         })
     }
 
@@ -273,6 +276,18 @@ impl HeadedWindow {
         if due {
             self.handle_winit_window_event(state, window, WindowEvent::RedrawRequested);
         }
+    }
+
+    /// Apply the theme chosen in settings (`None` = follow Windows) to every page.
+    pub(crate) fn set_theme_override(&self, theme: Option<Theme>, window: &ServoShellWindow) {
+        if self.theme_override.replace(theme) == theme {
+            return;
+        }
+        let effective = self.theme();
+        for (_, webview) in window.webviews() {
+            webview.notify_theme_change(effective);
+        }
+        self.winit_window.request_redraw();
     }
 
     pub(crate) fn event_loop_proxy(&self) -> EventLoopProxy<AppEvent> {
@@ -481,6 +496,7 @@ impl HeadedWindow {
                 post("tab-prev")
             })
             .shortcut(CMD_OR_CONTROL, 'T', || post("new-tab"))
+            .shortcut(CMD_OR_CONTROL, ',', || post("open-settings"))
             .shortcut(CMD_OR_CONTROL, 'Q', || state.schedule_exit())
             .shortcut(CMD_OR_CONTROL, 'L', || self.gui.borrow().sidebar.focus_url(window))
             .optional_shortcut(
@@ -990,11 +1006,12 @@ impl HeadedWindow {
                 WindowEvent::CloseRequested => {
                     window.schedule_close();
                 },
-                WindowEvent::ThemeChanged(theme) => {
-                    webview.notify_theme_change(match theme {
-                        winit::window::Theme::Light => Theme::Light,
-                        winit::window::Theme::Dark => Theme::Dark,
-                    });
+                WindowEvent::ThemeChanged(_) => {
+                    // Respect the theme chosen in settings; otherwise follow Windows.
+                    let theme = self.theme();
+                    for (_, webview) in window.webviews() {
+                        webview.notify_theme_change(theme);
+                    }
                 },
                 WindowEvent::Ime(ime) => match ime {
                     Ime::Enabled => {
@@ -1315,6 +1332,9 @@ impl PlatformWindow for HeadedWindow {
     }
 
     fn theme(&self) -> servo::Theme {
+        if let Some(theme) = self.theme_override.get() {
+            return theme;
+        }
         match self.winit_window.theme() {
             Some(winit::window::Theme::Dark) => servo::Theme::Dark,
             Some(winit::window::Theme::Light) | None => servo::Theme::Light,

@@ -1,0 +1,170 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+//! Stillwater's user settings (the sidebar's gear panel), saved as
+//! `<config dir>/stillwater-settings.json` next to `workspaces.json`.
+
+use std::path::PathBuf;
+use std::sync::RwLock;
+
+use log::warn;
+use serde_json::{Value, json};
+use servo::Theme;
+
+/// Search engines offered in settings: (id, name, URL template with `%s` for the query).
+const SEARCH_ENGINES: &[(&str, &str, &str)] = &[
+    ("duckduckgo", "DuckDuckGo", "https://duckduckgo.com/html/?q=%s"),
+    ("google", "Google", "https://www.google.com/search?q=%s"),
+    ("bing", "Bing", "https://www.bing.com/search?q=%s"),
+    ("brave", "Brave Search", "https://search.brave.com/search?q=%s"),
+];
+
+/// The current search URL template, readable from the protocol handler thread so the
+/// New Tab page (`servo:search-engine.js`) searches with the same engine.
+static SEARCH_TEMPLATE: RwLock<String> = RwLock::new(String::new());
+
+pub(crate) fn search_template() -> String {
+    let template = SEARCH_TEMPLATE
+        .read()
+        .map(|template| template.clone())
+        .unwrap_or_default();
+    if template.is_empty() {
+        SEARCH_ENGINES[0].2.to_owned()
+    } else {
+        template
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ThemeChoice {
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeChoice {
+    fn id(self) -> &'static str {
+        match self {
+            ThemeChoice::System => "system",
+            ThemeChoice::Light => "light",
+            ThemeChoice::Dark => "dark",
+        }
+    }
+
+    pub(crate) fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "system" => Some(ThemeChoice::System),
+            "light" => Some(ThemeChoice::Light),
+            "dark" => Some(ThemeChoice::Dark),
+            _ => None,
+        }
+    }
+
+    /// The theme to force, or `None` to follow Windows.
+    pub(crate) fn override_theme(self) -> Option<Theme> {
+        match self {
+            ThemeChoice::System => None,
+            ThemeChoice::Light => Some(Theme::Light),
+            ThemeChoice::Dark => Some(Theme::Dark),
+        }
+    }
+}
+
+pub(crate) struct Settings {
+    pub(crate) theme: ThemeChoice,
+    search_engine: String,
+    pub(crate) compact: bool,
+    path: Option<PathBuf>,
+}
+
+impl Settings {
+    pub(crate) fn load() -> Self {
+        let path = crate::prefs::default_config_dir().map(|dir| dir.join("stillwater-settings.json"));
+        let saved = path
+            .as_ref()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .unwrap_or(Value::Null);
+        let settings = Self {
+            theme: saved["theme"]
+                .as_str()
+                .and_then(ThemeChoice::from_id)
+                .unwrap_or(ThemeChoice::System),
+            search_engine: saved["searchEngine"]
+                .as_str()
+                .filter(|id| SEARCH_ENGINES.iter().any(|(engine, ..)| engine == id))
+                .unwrap_or(SEARCH_ENGINES[0].0)
+                .to_owned(),
+            compact: saved["compact"].as_bool().unwrap_or(false),
+            path,
+        };
+        settings.publish_search_template();
+        settings
+    }
+
+    fn save(&self) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        let data = json!({
+            "theme": self.theme.id(),
+            "searchEngine": self.search_engine,
+            "compact": self.compact,
+        });
+        let result = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|_| std::fs::write(path, data.to_string()));
+        if let Err(error) = result {
+            warn!("Could not save settings to {}: {error}", path.display());
+        }
+    }
+
+    fn publish_search_template(&self) {
+        if let Ok(mut template) = SEARCH_TEMPLATE.write() {
+            *template = self.search_url_template().to_owned();
+        }
+    }
+
+    /// The URL template for searches, with `%s` where the query goes.
+    pub(crate) fn search_url_template(&self) -> &'static str {
+        SEARCH_ENGINES
+            .iter()
+            .find(|(id, ..)| *id == self.search_engine)
+            .map_or(SEARCH_ENGINES[0].2, |(.., template)| template)
+    }
+
+    pub(crate) fn set_theme(&mut self, theme: ThemeChoice) {
+        self.theme = theme;
+        self.save();
+    }
+
+    pub(crate) fn set_search_engine(&mut self, id: &str) {
+        if SEARCH_ENGINES.iter().any(|(engine, ..)| *engine == id) {
+            self.search_engine = id.to_owned();
+            self.publish_search_template();
+            self.save();
+        }
+    }
+
+    pub(crate) fn set_compact(&mut self, compact: bool) {
+        if self.compact != compact {
+            self.compact = compact;
+            self.save();
+        }
+    }
+
+    pub(crate) fn to_json(&self) -> Value {
+        let engines: Vec<Value> = SEARCH_ENGINES
+            .iter()
+            .map(|(id, name, _)| json!({ "id": id, "name": name }))
+            .collect();
+        json!({
+            "theme": self.theme.id(),
+            "searchEngine": self.search_engine,
+            "searchEngines": engines,
+            "version": crate::desktop::updater::CURRENT_VERSION,
+        })
+    }
+}

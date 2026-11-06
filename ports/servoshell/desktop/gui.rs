@@ -306,6 +306,7 @@ impl Gui {
         window: &ServoShellWindow,
         headed_window: &headed_window::HeadedWindow,
     ) {
+        headed_window.set_theme_override(self.sidebar.theme_override(), window);
         let theme = headed_window.theme();
         let hidpi_scale = window.platform_window().hidpi_scale_factor();
         self.sidebar.ensure_webview(state, theme, hidpi_scale);
@@ -324,6 +325,9 @@ impl Gui {
                 WindowAction::Close => window.schedule_close(),
                 WindowAction::Drag => {
                     let _ = winit_window.drag_window();
+                },
+                WindowAction::CheckForUpdates => {
+                    updater::check_now(headed_window.event_loop_proxy());
                 },
                 WindowAction::Update => {
                     let Some(update) = self.sidebar.update().cloned() else {

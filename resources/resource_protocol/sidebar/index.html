@@ -48,7 +48,47 @@
 
   <button id="update" class="update-pill" hidden></button>
 
-  <footer id="workspaces"></footer>
+  <footer id="footer">
+    <button id="settings-button" class="icon footer-button" title="Settings">&#xE713;</button>
+    <div id="workspaces"></div>
+  </footer>
+
+  <section id="settings" hidden aria-label="Settings">
+    <header class="settings-header">
+      <button id="settings-close" class="icon" title="Back">&#xE72B;</button>
+      <h2>Settings</h2>
+    </header>
+
+    <div class="setting-group">
+      <h3>Appearance</h3>
+      <div class="segmented" id="theme-choice" role="group" aria-label="Appearance">
+        <button data-theme="system">System</button>
+        <button data-theme="light">Light</button>
+        <button data-theme="dark">Dark</button>
+      </div>
+    </div>
+
+    <div class="setting-group">
+      <h3>Search engine</h3>
+      <div class="options" id="search-choice" role="group" aria-label="Search engine"></div>
+    </div>
+
+    <div class="setting-group">
+      <h3>Sidebar</h3>
+      <button class="toggle-row" id="compact-toggle">
+        <span>Compact mode</span>
+        <span class="switch" aria-hidden="true"></span>
+      </button>
+      <p class="hint">Ctrl+Alt+C also toggles it. Touch the window's left edge to show the sidebar.</p>
+    </div>
+
+    <div class="setting-group">
+      <h3>Updates</h3>
+      <p id="version-line"></p>
+      <button id="check-updates" class="secondary">Check for updates</button>
+      <p id="update-check" class="hint"></p>
+    </div>
+  </section>
 
   <script src="servo:sidebar/sidebar.js"></script>
 </body>

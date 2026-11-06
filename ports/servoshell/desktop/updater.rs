@@ -24,7 +24,7 @@ use crate::desktop::event_loop::AppEvent;
 
 /// This build's Stillwater version. Keep in sync with `support/windows/*.wxs*` and the
 /// `ProductVersion` in `ports/servoshell/Cargo.toml` when releasing.
-pub(crate) const CURRENT_VERSION: &str = "0.2.1";
+pub(crate) const CURRENT_VERSION: &str = "0.2.2";
 
 const RELEASES_API: &str =
     "https://api.github.com/repos/WhoaThatCombo/stillwater/releases?per_page=10";
@@ -138,16 +138,27 @@ fn find_update(releases: &Value) -> Option<UpdateInfo> {
     })
 }
 
-/// Check GitHub for a newer release in the background; reports via `AppEvent::UpdateAvailable`.
+/// Check GitHub for a newer release in the background after launch; reports via
+/// `AppEvent::UpdateAvailable`.
 pub(crate) fn check_in_background(proxy: EventLoopProxy<AppEvent>) {
     if std::env::var_os("STILLWATER_NO_UPDATE_CHECK").is_some() {
         return;
     }
+    check(proxy, Duration::from_secs(5), false);
+}
+
+/// Check right away (the settings panel's button); also reports "up to date" and failures
+/// via `AppEvent::UpdateCheckDone`.
+pub(crate) fn check_now(proxy: EventLoopProxy<AppEvent>) {
+    check(proxy, Duration::ZERO, true);
+}
+
+fn check(proxy: EventLoopProxy<AppEvent>, delay: Duration, report: bool) {
     let _ = std::thread::Builder::new()
         .name("StillwaterUpdateCheck".into())
         .spawn(move || {
             // Don't compete with the first page load.
-            std::thread::sleep(Duration::from_secs(5));
+            std::thread::sleep(delay);
             diagnostics::log("update check: asking GitHub for releases");
             let releases = match fetch(RELEASES_API)
                 .and_then(|body| serde_json::from_slice::<Value>(&body).map_err(|e| e.to_string()))
@@ -156,6 +167,11 @@ pub(crate) fn check_in_background(proxy: EventLoopProxy<AppEvent>) {
                 Err(error) => {
                     warn!("Update check failed: {error}");
                     diagnostics::log(format!("update check failed: {error}"));
+                    if report {
+                        let _ = proxy.send_event(AppEvent::UpdateCheckDone(format!(
+                            "Couldn't check for updates: {error}"
+                        )));
+                    }
                     return;
                 },
             };
@@ -168,11 +184,18 @@ pub(crate) fn check_in_background(proxy: EventLoopProxy<AppEvent>) {
                     diagnostics::log(format!("update check: found {update:?}"));
                     let _ = proxy.send_event(AppEvent::UpdateAvailable(update));
                 },
-                None => diagnostics::log(format!(
-                    "update check: no newer release (running {}, pretend {:?}, releases {tags:?})",
-                    CURRENT_VERSION,
-                    std::env::var("STILLWATER_PRETEND_VERSION").ok()
-                )),
+                None => {
+                    diagnostics::log(format!(
+                        "update check: no newer release (running {}, pretend {:?}, releases {tags:?})",
+                        CURRENT_VERSION,
+                        std::env::var("STILLWATER_PRETEND_VERSION").ok()
+                    ));
+                    if report {
+                        let _ = proxy.send_event(AppEvent::UpdateCheckDone(format!(
+                            "Stillwater {CURRENT_VERSION} is up to date"
+                        )));
+                    }
+                },
             }
         });
 }
