@@ -44,7 +44,8 @@ interface FontFaceSet : EventTarget {
 
   // return whether all fonts in the fontlist are loaded
   // (does not initiate load if not available)
-  // boolean check(DOMString font, optional DOMString text = " ");
+  [Pref="dom_fontface_enabled", Throws]
+  boolean check(DOMString font, optional DOMString text = " ");
 
   // async notification that font loading and layout operations are done
   readonly attribute Promise<FontFaceSet> ready;

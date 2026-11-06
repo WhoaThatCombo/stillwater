@@ -427,6 +427,33 @@ impl FontFaceSetMethods<crate::DomTypeHolder> for FontFaceSet {
         load_promise
     }
 
+    /// <https://drafts.csswg.org/css-font-loading/#dom-fontfaceset-check>
+    fn Check(&self, cx: &mut JSContext, font: DOMString, text: DOMString) -> Fallible<bool> {
+        let Some(window) = DomRoot::downcast::<Window>(self.global()) else {
+            return Ok(true);
+        };
+        self.flush_author_font_set(cx);
+
+        // Step 2. Find the matching font faces from font face set using the font and text
+        // arguments passed to the function, and including system fonts, let font face list be
+        // the returned list of font faces.
+        // Step 3. If a syntax error was returned, throw a SyntaxError exception and terminate
+        // these steps.
+        let font_faces = self
+            .find_the_matching_font_faces(&window.Document(), &font.str(), &text.str())
+            .map_err(|_| Error::Syntax(Some("Failed to parse font query".into())))?;
+
+        // Step 4. If the font face list contains no font faces whose status is "unloaded" or
+        // "loading", return true. Otherwise, return false.
+        // Note: Like other engines, a query matching no web fonts (only system fonts) is true.
+        Ok(font_faces.iter().all(|font_face| {
+            !matches!(
+                font_face.Status(),
+                FontFaceLoadStatus::Unloaded | FontFaceLoadStatus::Loading
+            )
+        }))
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#customstateset>
     fn Size(&self, cx: &mut JSContext) -> u32 {
         self.size(cx)
