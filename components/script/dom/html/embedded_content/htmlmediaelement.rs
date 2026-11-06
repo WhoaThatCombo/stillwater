@@ -270,7 +270,11 @@ pub(crate) struct HTMLMediaElement {
     #[ignore_malloc_size_of = "Media data"]
     mse_pending: DomRefCell<Option<Vec<u8>>>,
     /// A seek waits for the restarted player to show its first frame or position.
-    mse_seek_pending: Cell<bool>,    /// <https://html.spec.whatwg.org/multipage/#dom-media-played>
+    mse_seek_pending: Cell<bool>,
+    /// Video frames (rendered, dropped) by earlier players since the last load, for
+    /// getVideoPlaybackQuality().
+    frame_counts_before: Cell<(u64, u64)>,
+    /// <https://html.spec.whatwg.org/multipage/#dom-media-played>
     played: DomRefCell<TimeRangesContainer>,
     // https://html.spec.whatwg.org/multipage/#dom-media-audiotracks
     audio_tracks_list: MutNullableDom<AudioTrackList>,
@@ -461,6 +465,7 @@ impl HTMLMediaElement {
             mse_locked: Cell::new(true),
             mse_pending: DomRefCell::new(None),
             mse_seek_pending: Cell::new(false),
+            frame_counts_before: Cell::new((0, 0)),
             played: DomRefCell::new(TimeRangesContainer::default()),
             audio_tracks_list: Default::default(),
             video_tracks_list: Default::default(),
@@ -1880,6 +1885,8 @@ impl HTMLMediaElement {
         // element.
         self.generation_id.set(self.generation_id.get() + 1);
 
+        self.frame_counts_before.set((0, 0));
+
         // Media Source Extensions: a new load detaches the previous MediaSource.
         if let Some(media_source) = self.media_source.take() {
             media_source.detach();
@@ -2424,6 +2431,12 @@ impl HTMLMediaElement {
             id
         };
 
+        if let Some(ref old) = *self.player.borrow() {
+            let (rendered, dropped) = old.lock().unwrap().video_frame_counts();
+            let (before_rendered, before_dropped) = self.frame_counts_before.get();
+            self.frame_counts_before
+                .set((before_rendered + rendered, before_dropped + dropped));
+        }
         *self.player.borrow_mut() = Some(player);
 
         let task_source = self
@@ -2538,6 +2551,18 @@ impl HTMLMediaElement {
                 let _ = player.play();
             }
         }
+    }
+
+    /// Video frames shown and dropped (for being late) since the last load: (total, dropped),
+    /// where total counts both, as getVideoPlaybackQuality() reports them.
+    pub(crate) fn video_frame_counts(&self) -> (u64, u64) {
+        let (mut rendered, mut dropped) = self.frame_counts_before.get();
+        if let Some(ref player) = *self.player.borrow() {
+            let (now_rendered, now_dropped) = player.lock().unwrap().video_frame_counts();
+            rendered += now_rendered;
+            dropped += now_dropped;
+        }
+        (rendered + dropped, dropped)
     }
 
     /// The playback position, for MSE coded frame eviction.
