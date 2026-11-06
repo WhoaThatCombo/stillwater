@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::sync::{Arc, RwLock};
+
 use content_security_policy::Destination;
 use embedder_traits::{GenericEmbedderProxy, WebResourceRequest, WebResourceResponseMsg};
 use log::error;
@@ -9,8 +11,35 @@ use net_traits::http_status::HttpStatus;
 use net_traits::request::Request;
 use net_traits::response::{Response, ResponseBody};
 use net_traits::{NetworkError, ResourceFetchTimingContainer};
+use servo_base::id::WebViewId;
 
 use crate::embedder::NetToEmbedderMsg;
+
+/// What an embedder's [RequestFilter] decided about a request.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RequestDecision {
+    /// Fetch it normally, without asking the embedder's load_web_resource.
+    Allow,
+    /// Fail it with a network error (e.g. an ad or tracker).
+    Block,
+    /// Answer it with this body instead of fetching it (e.g. a harmless stand-in for an ad
+    /// script that a page needs to exist).
+    Respond { content_type: String, body: Vec<u8> },
+    /// Hand it to the embedder's load_web_resource as usual.
+    AskEmbedder,
+}
+
+/// Decides about requests on the network thread, before (and usually instead of) the round trip
+/// to the embedder's main thread. Used by content blockers, which must be fast.
+pub type RequestFilter =
+    Arc<dyn Fn(&WebResourceRequest, Option<WebViewId>) -> RequestDecision + Send + Sync>;
+
+static REQUEST_FILTER: RwLock<Option<RequestFilter>> = RwLock::new(None);
+
+/// Install (or with None, remove) the process-wide request filter.
+pub fn set_request_filter(filter: Option<RequestFilter>) {
+    *REQUEST_FILTER.write().unwrap_or_else(|error| error.into_inner()) = filter;
+}
 
 #[derive(Clone)]
 pub struct RequestInterceptor {
@@ -39,6 +68,33 @@ impl RequestInterceptor {
             is_for_main_frame,
             is_redirect: request.redirect_count > 0,
         };
+
+        let filter = REQUEST_FILTER
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(filter) = filter {
+            match filter(&web_resource_request, request.target_webview_id) {
+                RequestDecision::Allow => return,
+                RequestDecision::Block => {
+                    *response = Some(Response::network_error(NetworkError::LoadCancelled));
+                    return;
+                },
+                RequestDecision::Respond { content_type, body } => {
+                    let mut stand_in = Response::new(request.url(), timing_info.inner().clone());
+                    if let Ok(value) = http::HeaderValue::from_str(&content_type) {
+                        stand_in.headers.insert(http::header::CONTENT_TYPE, value);
+                    }
+                    stand_in.headers.insert(
+                        http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                        http::HeaderValue::from_static("*"),
+                    );
+                    *stand_in.body.lock() = ResponseBody::Done(body);
+                    *response = Some(stand_in);
+                    return;
+                },
+                RequestDecision::AskEmbedder => {},            }
+        }
 
         self.embedder_proxy
             .send(NetToEmbedderMsg::WebResourceRequested(

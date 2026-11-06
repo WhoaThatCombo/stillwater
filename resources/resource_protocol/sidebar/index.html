@@ -26,6 +26,7 @@
       <input id="url" type="text" spellcheck="false" autocomplete="off" aria-label="Search or enter address">
       <span class="placeholder" aria-hidden="true">Search or enter address</span>
     </span>
+    <button id="shield" class="icon" title="Ad blocking" hidden><span class="shield-glyph">&#xEA18;</span><span id="shield-count"></span></button>
   </div>
 
   <!-- Essentials: favicon tiles shared by every space. -->
@@ -92,6 +93,15 @@
         <span class="switch" aria-hidden="true"></span>
       </button>
       <p class="hint">Ctrl+Alt+C also toggles it. Touch the window's left edge to show the sidebar.</p>
+    </div>
+
+    <div class="setting-group">
+      <h3>Ad blocking</h3>
+      <button class="toggle-row" id="adblock-toggle">
+        <span>Block ads and trackers</span>
+        <span class="switch" aria-hidden="true"></span>
+      </button>
+      <p class="hint" id="adblock-hint">Uses uBlock Origin's filter lists. Turn it off for one site with the shield in the address bar.</p>
     </div>
 
     <div class="setting-group">

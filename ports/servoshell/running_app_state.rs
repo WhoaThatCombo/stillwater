@@ -226,6 +226,9 @@ pub(crate) struct RunningAppState {
     pub(crate) user_content_manager: Rc<UserContentManager>,
     /// Each tab's most recent script errors and warnings, for broken-site reports.
     recent_console_errors: RefCell<HashMap<WebViewId, std::collections::VecDeque<String>>>,
+    /// The built-in content blocker.
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    pub(crate) adblock: RefCell<crate::desktop::adblock::Adblock>,
 
     /// Whether or not program exit has been triggered. This means that all windows
     /// will be destroyed and shutdown will start at the end of the current event loop.
@@ -298,6 +301,10 @@ impl RunningAppState {
             servo,
             achieved_stable_image: Default::default(),
             exit_scheduled: Default::default(),
+            #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+            adblock: RefCell::new(crate::desktop::adblock::Adblock::new(
+                user_content_manager.clone(),
+            )),
             user_content_manager,
             recent_console_errors: Default::default(),
             experimental_preferences_enabled,
@@ -765,6 +772,19 @@ impl RunningAppState {
 }
 
 impl WebViewDelegate for RunningAppState {
+    fn load_web_resource(&self, webview: WebView, load: servo::WebResourceLoad) {
+        // Only main pages reach here (see adblock::filter_request): get the site's adblock
+        // scriptlets ready before its document is created. Dropping load lets it proceed.
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        if load.request.is_for_main_frame {
+            self.adblock
+                .borrow_mut()
+                .on_main_frame_request(webview.id(), load.request.url.as_url());
+            self.window_for_webview(&webview).set_needs_update();
+        }
+        let _ = (&webview, &load);
+    }
+
     fn request_navigation(&self, webview: WebView, request: servo::NavigationRequest) {
         // Alt+click on a link opens it in Glance instead of navigating the tab.
         #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -963,6 +983,14 @@ impl WebViewDelegate for RunningAppState {
     }
 
     fn show_console_message(&self, webview: WebView, level: ConsoleLogLevel, message: String) {
+        // Class/id reports from the adblock collector aren't real console output.
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        if let Some(payload) =
+            message.strip_prefix(crate::desktop::adblock::COSMETIC_MESSAGE_PREFIX)
+        {
+            self.adblock.borrow().on_cosmetic_message(&webview, payload);
+            return;
+        }
         if matches!(level, ConsoleLogLevel::Error | ConsoleLogLevel::Warn) {
             let mut errors = self.recent_console_errors.borrow_mut();
             let list = errors.entry(webview.id()).or_default();

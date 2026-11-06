@@ -61,6 +61,10 @@ pub(crate) enum WindowAction {
     OpenPane(PaneKind, url::Url),
     /// Close the split view or Glance pane.
     ClosePane(PaneKind),
+    /// Turn ad blocking off (or back on) for the current page's site, and reload it.
+    AdblockToggleSite,
+    /// Turn ad blocking on or off everywhere.
+    AdblockSetEnabled(bool),
 }
 
 struct SidebarDelegate {
@@ -130,6 +134,8 @@ pub(crate) struct Sidebar {
     pane_focus: Option<WebView>,
     /// (title, url) of the open split and Glance panes.
     panes: (Option<(String, String)>, Option<(String, String)>),
+    /// Ad blocking state for the shield and settings.
+    adblock: serde_json::Value,
 }
 
 impl Sidebar {
@@ -164,6 +170,7 @@ impl Sidebar {
             ready: false,
             pane_focus: None,
             panes: (None, None),
+            adblock: serde_json::Value::Null,
             settings: RefCell::new(settings),
             update_check: None,
         }
@@ -230,6 +237,15 @@ impl Sidebar {
     ) {
         self.pane_focus = focus;
         self.panes = (split, glance);
+    }
+
+    pub(crate) fn set_adblock(&mut self, adblock: serde_json::Value) {
+        self.adblock = adblock;
+    }
+
+    /// The page the URL bar and navigation buttons act on: the focused pane or the active tab.
+    pub(crate) fn navigated_webview(&self, window: &ServoShellWindow) -> Option<WebView> {
+        self.pane_focus.clone().or_else(|| window.active_webview())
     }
 
     /// Queue a command as if the sidebar page had sent it (used by keyboard shortcuts).
@@ -489,6 +505,20 @@ impl Sidebar {
                         self.window_actions.push(WindowAction::OpenPane(PaneKind::Glance, url));
                     }
                 },
+                // Tests: write a value from the sidebar page to the diagnostic log.
+                "debug" => crate::desktop::diagnostics::log(format!("sidebar debug: {argument}")),
+                // Tests: run JavaScript in the current tab and log what it returns.
+                "debug-eval" => {
+                    if let Some(webview) = window.active_webview() {
+                        webview.evaluate_javascript(argument.to_owned(), |result| {
+                            crate::desktop::diagnostics::log(format!("page eval: {result:?}"))
+                        });
+                    }
+                },
+                "adblock-site" => self.window_actions.push(WindowAction::AdblockToggleSite),
+                "adblock-enabled" => self
+                    .window_actions
+                    .push(WindowAction::AdblockSetEnabled(argument == "1")),
                 "split-close" => self.window_actions.push(WindowAction::ClosePane(PaneKind::Split)),
                 "glance-close" => self.window_actions.push(WindowAction::ClosePane(PaneKind::Glance)),
                 "new-tab" => {
@@ -653,6 +683,7 @@ impl Sidebar {
             "split": split,
             "glance": glance,
             "paneFocused": self.pane_focus.is_some(),
+            "adblock": self.adblock,
             "compact": self.compact.get(),
             "workspaces": self.workspaces.to_json(),
             "background": background,

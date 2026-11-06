@@ -445,6 +445,23 @@ impl Gui {
                     if let Some(url) = self.glance.take().and_then(|pane| pane.url()) {
                         self.pane_requests.borrow_mut().push(PaneRequest::Open(PaneKind::Split, url));
                         self.apply_pane_requests(state, window, headed_window);
+        {
+            // The shield shows the page in the URL bar: the focused pane or the active tab.
+            let adblock = state.adblock.borrow();
+            let page = self.sidebar.navigated_webview(window);
+            let url = page.as_ref().and_then(|webview| webview.url());
+            let host = url
+                .as_ref()
+                .filter(|url| matches!(url.scheme(), "http" | "https"))
+                .and_then(|url| url.host_str().map(str::to_owned));
+            self.sidebar.set_adblock(serde_json::json!({
+                "enabled": adblock.enabled(),
+                "ready": adblock.ready(),
+                "host": host,
+                "site": url.as_ref().is_some_and(|url| adblock.enabled_for(url)),
+                "blocked": page.map(|webview| adblock.blocked_count(webview.id())).unwrap_or(0),
+            }));
+        }
                     }
                 },
             }
@@ -507,6 +524,20 @@ impl Gui {
                 },
                 WindowAction::OpenPane(kind, url) => self.request_pane(PaneRequest::Open(kind, url)),
                 WindowAction::ClosePane(kind) => self.request_pane(PaneRequest::Close(kind)),
+                WindowAction::AdblockToggleSite => {
+                    if let Some(webview) = self.sidebar.navigated_webview(window) &&
+                        let Some(url) = webview.url()
+                    {
+                        state.adblock.borrow_mut().toggle_site(&url);
+                        webview.reload();
+                    }
+                },
+                WindowAction::AdblockSetEnabled(enabled) => {
+                    state.adblock.borrow_mut().set_enabled(enabled);
+                    if let Some(webview) = self.sidebar.navigated_webview(window) {
+                        webview.reload();
+                    }
+                },
                 WindowAction::CheckForUpdates => {
                     updater::check_now(headed_window.event_loop_proxy());
                 },
@@ -528,6 +559,23 @@ impl Gui {
             }
         }
         self.apply_pane_requests(state, window, headed_window);
+        {
+            // The shield shows the page in the URL bar: the focused pane or the active tab.
+            let adblock = state.adblock.borrow();
+            let page = self.sidebar.navigated_webview(window);
+            let url = page.as_ref().and_then(|webview| webview.url());
+            let host = url
+                .as_ref()
+                .filter(|url| matches!(url.scheme(), "http" | "https"))
+                .and_then(|url| url.host_str().map(str::to_owned));
+            self.sidebar.set_adblock(serde_json::json!({
+                "enabled": adblock.enabled(),
+                "ready": adblock.ready(),
+                "host": host,
+                "site": url.as_ref().is_some_and(|url| adblock.enabled_for(url)),
+                "blocked": page.map(|webview| adblock.blocked_count(webview.id())).unwrap_or(0),
+            }));
+        }
         self.sidebar
             .set_window_state(!winit_window.is_decorated(), winit_window.is_maximized());
         self.sidebar.push_state(window);

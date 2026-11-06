@@ -360,6 +360,29 @@ function renderUpdate() {
   else button.textContent = `Stillwater ${update.version} is available`;
 }
 
+// The shield in the address bar: how many requests were blocked on this page.
+function renderShield() {
+  const adblock = state.adblock || {};
+  const shield = $("shield");
+  shield.hidden = !adblock.enabled || !adblock.host;
+  shield.classList.toggle("off", !adblock.site);
+  $("shield-count").textContent = adblock.site && adblock.blocked ? String(adblock.blocked) : "";
+  shield.title = adblock.site
+    ? ` blocked on this page`
+    : `Ad blocking is off for ${adblock.host}`;
+}
+
+function shieldMenu() {
+  const adblock = state.adblock || {};
+  return [
+    adblock.site
+      ? { label: "Turn off for this site", run: () => send("adblock-site") }
+      : { label: "Turn back on for this site", run: () => send("adblock-site") },
+    "-",
+    { label: "Ad blocking settings", run: () => send("open-settings") },
+  ];
+}
+
 function renderSettings() {
   const settings = state.settings;
   if (!settings) return;
@@ -375,12 +398,18 @@ function renderSettings() {
     return button;
   }));
   $("compact-toggle").setAttribute("aria-pressed", String(state.compact));
+  const adblock = state.adblock || {};
+  $("adblock-toggle").setAttribute("aria-pressed", String(!!adblock.enabled));
+  $("adblock-hint").textContent = adblock.enabled && !adblock.ready
+    ? "Downloading filter lists…"
+    : "Uses uBlock Origin's filter lists. Turn it off for one site with the shield in the address bar.";
   $("version-line").textContent = `Stillwater ${settings.version}`;
   $("update-check").textContent = state.updateCheck || "";
 }
 
 function render() {
   renderSettings();
+  renderShield();
   renderUpdate();
   if (state.workspaces) renderWorkspaces();
   // Don't rebuild the lists while the user is renaming something in them.
@@ -455,6 +484,12 @@ document.querySelectorAll("#theme-choice button").forEach((button) => {
   button.addEventListener("click", () => send("set-theme", button.dataset.theme));
 });
 $("compact-toggle").addEventListener("click", () => send("toggle-compact"));
+$("adblock-toggle").addEventListener("click", () => send("adblock-enabled", (state.adblock && state.adblock.enabled) ? "0" : "1"));
+$("shield").addEventListener("click", (event) => {
+  event.stopPropagation();
+  const box = $("shield").getBoundingClientRect();
+  openMenu(shieldMenu(), box.left, box.bottom);
+});
 $("check-updates").addEventListener("click", () => send("check-updates"));
 $("report-site").addEventListener("click", () => send("report-site", ""));
 

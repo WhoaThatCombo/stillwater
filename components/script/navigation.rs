@@ -9,6 +9,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use content_security_policy::Destination;
 use content_security_policy::sandboxing_directive::SandboxingFlagSet;
 use crossbeam_channel::Sender;
 use embedder_traits::user_contents::UserContentManagerId;
@@ -243,13 +244,20 @@ impl InProgressLoad {
             network_partition_key: None,
         };
 
+        // A navigation inside a nested browsing context (e.g. an iframe navigated by script) is an
+        // "iframe" fetch, not a top-level "document" one, whatever the load started as.
+        let destination = match self.load_data.destination {
+            Destination::Document if self.parent_info.is_some() => Destination::IFrame,
+            destination => destination,
+        };
+
         let mut request_builder = RequestBuilder::new(
             Some(webview_id),
             UrlWithBlobClaim::from_url_without_having_claimed_blob(self.load_data.url.clone()),
             self.load_data.referrer.clone(),
         )
         .method(self.load_data.method.clone())
-        .destination(self.load_data.destination)
+        .destination(destination)
         .mode(RequestMode::Navigate)
         .credentials_mode(CredentialsMode::Include)
         .use_url_credentials(true)

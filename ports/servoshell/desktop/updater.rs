@@ -24,7 +24,7 @@ use crate::desktop::event_loop::AppEvent;
 
 /// This build's Stillwater version. Keep in sync with `support/windows/*.wxs*` and the
 /// `ProductVersion` in `ports/servoshell/Cargo.toml` when releasing.
-pub(crate) const CURRENT_VERSION: &str = "0.4.0";
+pub(crate) const CURRENT_VERSION: &str = "0.5.0";
 
 const RELEASES_API: &str =
     "https://api.github.com/repos/WhoaThatCombo/stillwater/releases?per_page=10";
