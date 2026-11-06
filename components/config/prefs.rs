@@ -130,6 +130,10 @@ pub struct Preferences {
     // feature: Media Capture and Streams API | #26861 | Web/API/Media_Capture_and_Streams_API
     pub dom_canvas_capture_enabled: bool,
     pub dom_canvas_text_enabled: bool,
+    /// Expose `HTMLCanvasElement.transferControlToOffscreen()`. Off until an OffscreenCanvas with a
+    /// placeholder canvas can be transferred to a worker (#37882): sites such as Google Maps detect
+    /// the method, transfer the canvas to a worker and break instead of rendering on the main thread.
+    pub dom_canvas_transfer_control_to_offscreen_enabled: bool,
     /// Selects canvas backend
     ///
     /// Available values:
@@ -442,6 +446,7 @@ impl Preferences {
             dom_bluetooth_testing_enabled: false,
             dom_canvas_capture_enabled: false,
             dom_canvas_text_enabled: true,
+            dom_canvas_transfer_control_to_offscreen_enabled: false,
             dom_canvas_backend: String::new(),
             dom_canvas_msg_buffer_size: 16,
             dom_composition_event_enabled: false,

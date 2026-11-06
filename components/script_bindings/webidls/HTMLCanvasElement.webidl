@@ -30,7 +30,7 @@ interface HTMLCanvasElement : HTMLElement {
   [Throws]
   undefined toBlob(BlobCallback callback, optional DOMString type = "image/png", optional any quality);
 
-  [Throws]
+  [Throws, Pref="dom_canvas_transfer_control_to_offscreen_enabled"]
   OffscreenCanvas transferControlToOffscreen();
 };
 
