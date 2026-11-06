@@ -20,7 +20,7 @@ use style::values::specified::Quotes;
 use crate::context::LayoutContext;
 use crate::dom::{BoxSlot, LayoutBox, NodeExt};
 use crate::flow::inline::SharedInlineStyles;
-use crate::lists::generate_counter_representation;
+use crate::lists::{generate_counter_representation, list_item_ordinal};
 use crate::quotes::quotes_for_lang;
 use crate::replaced::ReplacedContents;
 use crate::style_ext::{Display, DisplayGeneratingBox, DisplayInside, DisplayOutside};
@@ -385,10 +385,25 @@ pub(crate) fn generate_pseudo_element_content(
                             };
                             maybe_quote.map(PseudoElementContentItem::Text)
                         },
-                        ContentItem::Counter(_, style) | ContentItem::Counters(_, _, style) => {
-                            // TODO: Add support for counters, this assumes a value of 0.
+                        ContentItem::Counter(name, style) |
+                        ContentItem::Counters(name, _, style) => {
+                            // TODO: Add support for counters. Only the list-item counter of a list
+                            // item has a value (its ordinal); the others are assumed to be 0.
+                            let value = if &*name.0 == "list-item" {
+                                #[expect(unsafe_code)]
+                                let originating = unsafe {
+                                    pseudo_element_info
+                                        .node
+                                        .dangerous_flat_tree_parent_considering_pseudos()
+                                };
+                                originating.map_or(0, |originating| {
+                                    list_item_ordinal(context, originating)
+                                })
+                            } else {
+                                0
+                            };
                             Some(PseudoElementContentItem::Text(
-                                generate_counter_representation(style).to_string(),
+                                generate_counter_representation(style, value),
                             ))
                         },
                         ContentItem::NoOpenQuote | ContentItem::NoCloseQuote => None,
