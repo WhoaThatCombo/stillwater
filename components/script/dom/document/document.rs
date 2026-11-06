@@ -4114,9 +4114,7 @@ impl<'dom> LayoutDom<'dom, Document> {
     pub(crate) fn script_animation_declarations_for_layout(
         self,
         node: style::dom::OpaqueNode,
-    ) -> Option<
-        servo_arc::Arc<style::shared_lock::Locked<style::properties::PropertyDeclarationBlock>>,
-    > {
+    ) -> Option<servo_arc::Arc<style::properties::PropertyDeclarationBlock>> {
         self.unsafe_get()
             .animation_manager
             .script_animation_declarations(node)

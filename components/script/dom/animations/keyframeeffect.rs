@@ -515,9 +515,7 @@ pub(crate) fn apply_script_animations_to(cx: &mut JSContext, target: &Element) {
     let declarations = if block.is_empty() {
         None
     } else {
-        Some(servo_arc::Arc::new(
-            document.shared_style_locks().author.wrap(block),
-        ))
+        Some(servo_arc::Arc::new(block))
     };
     let node = target.upcast::<Node>();
     document

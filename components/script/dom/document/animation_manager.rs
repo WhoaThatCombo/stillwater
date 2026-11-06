@@ -32,7 +32,6 @@ use style::animation::{
 use style::dom::OpaqueNode;
 use style::properties::PropertyDeclarationBlock;
 use style::selector_parser::PseudoElement;
-use style::shared_lock::Locked;
 use timers::TimerId;
 
 use crate::dom::NodeFlags;
@@ -96,7 +95,7 @@ pub(crate) struct AnimationManager {
 
 /// Declarations applied by Web Animations API animations, by target node.
 pub(crate) type ScriptAnimationDeclarations =
-    Arc<RwLock<FxHashMap<OpaqueNode, ServoArc<Locked<PropertyDeclarationBlock>>>>>;
+    Arc<RwLock<FxHashMap<OpaqueNode, ServoArc<PropertyDeclarationBlock>>>>;
 
 impl AnimationManager {
     pub(crate) fn new() -> Self {
@@ -118,7 +117,7 @@ impl AnimationManager {
     pub(crate) fn set_script_animation_declarations(
         &self,
         node: &Node,
-        declarations: Option<ServoArc<Locked<PropertyDeclarationBlock>>>,
+        declarations: Option<ServoArc<PropertyDeclarationBlock>>,
     ) {
         let mut map = self.script_animation_declarations.write();
         match declarations {
@@ -136,7 +135,7 @@ impl AnimationManager {
     pub(crate) fn script_animation_declarations(
         &self,
         node: OpaqueNode,
-    ) -> Option<ServoArc<Locked<PropertyDeclarationBlock>>> {
+    ) -> Option<ServoArc<PropertyDeclarationBlock>> {
         let map = self.script_animation_declarations.read();
         if map.is_empty() {
             return None;

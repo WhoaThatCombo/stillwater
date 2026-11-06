@@ -181,27 +181,30 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
     ) -> Option<Arc<StyleLocked<PropertyDeclarationBlock>>> {
         let node = self.as_node();
         let document = node.owner_doc();
-        let css_declarations = context.animations.get_animation_declarations(
-            &AnimationSetKey::new_for_non_pseudo(node.opaque()),
-            context.current_time_for_animations,
-            &document.shared_style_locks().author,
-        );
-        // Stillwater: Web Animations API animations compose above CSS animations.
-        let Some(script_declarations) =
-            document.script_animation_declarations_for_layout(node.opaque())
-        else {
-            return css_declarations;
-        };
-        let Some(css_declarations) = css_declarations else {
-            return Some(script_declarations);
-        };
+        let key = AnimationSetKey::new_for_non_pseudo(node.opaque());
         let lock = &document.shared_style_locks().author;
-        let guard = lock.read();
-        let mut block = css_declarations.read_with(&guard).clone();
-        for (declaration, importance) in script_declarations
-            .read_with(&guard)
-            .declaration_importance_iter()
-        {
+        // Stillwater: Web Animations API animations compose above CSS animations.
+        let Some(script_declarations) = document.script_animation_declarations_for_layout(key.node)
+        else {
+            return context.animations.get_animation_declarations(
+                &key,
+                context.current_time_for_animations,
+                lock,
+            );
+        };
+        // Build the CSS animation values without taking the style lock (the traversal
+        // already holds it), then add the script animation values on top.
+        let mut block = context
+            .animations
+            .sets
+            .read()
+            .get(&key)
+            .and_then(|set| {
+                set.get_value_map_for_active_animations(context.current_time_for_animations)
+            })
+            .map(|map| PropertyDeclarationBlock::from_animation_value_map(&map))
+            .unwrap_or_default();
+        for (declaration, importance) in script_declarations.declaration_importance_iter() {
             block.push(declaration.clone(), importance);
         }
         Some(Arc::new(lock.wrap(block)))
