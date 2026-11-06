@@ -1,91 +1,126 @@
-# The Servo Parallel Browser Engine Project
+<div align="center">
 
-Servo is a prototype web browser engine written in the
-[Rust](https://github.com/rust-lang/rust) language. It is currently developed on
-64-bit macOS, 64-bit Linux, 64-bit Windows, 64-bit OpenHarmony, and Android.
+# Stillwater
 
-Servo welcomes contribution from everyone. Check out:
+**A calm, lightweight browser built on [Servo](https://servo.org) — vertical tabs and workspaces, written in Rust.**
 
-- The [Servo Book](https://book.servo.org) for documentation
-- [servo.org](https://servo.org/) for news and guides
+[Website](https://whoathatcombo.github.io/stillwater/) · [Build it](#build-on-windows) · [How it works](#how-it-works) · [Credits](#credits)
 
-Coordination of Servo development happens:
-- Here in the Github Issues
-- On the [Servo Zulip](https://servo.zulipchat.com/)
-- In video calls advertised in the [Servo Project](https://github.com/servo/project/issues) repo.
+![Stillwater with a blue-tinted "Work" space](.github/assets/stillwater-workspaces.png)
 
-## Getting started
+</div>
 
-For more detailed build instructions, see the Servo Book under [Getting the Code] and [Building Servo].
+> [!WARNING]
+> Stillwater is an experimental hobby project. Servo is still maturing, so some sites will render
+> incorrectly or break. There are no extensions, no DRM video, and no saved sessions yet.
 
-[Getting the Code]: https://book.servo.org/building/getting-the-code.html
-[Building Servo]: https://book.servo.org/building/building.html
+## What it is
 
-### macOS
+Stillwater is a fork of Servo's demo browser, *servoshell*. Its toolbar is replaced with a vertical sidebar
+in the style of [Zen Browser](https://github.com/zen-browser/desktop). Servo, the engine underneath, is
+written entirely in Rust, so there's no Chromium or Gecko inside.
 
-- Download and install [Xcode](https://developer.apple.com/xcode/) and [`brew`](https://brew.sh/).
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+The sidebar itself is an HTML/CSS page that **Servo renders for its own UI**, the same way Firefox
+renders its interface with Gecko.
 
-### Linux
+## Features
 
-- Install `curl`:
-  - Arch: `sudo pacman -S --needed curl`
-  - Debian, Ubuntu: `sudo apt install curl`
-  - Fedora: `sudo dnf install curl`
-  - Gentoo: `sudo emerge net-misc/curl`
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+- **Vertical tabs**: favicons, a close button on hover, middle-click to close.
+- **URL bar in the sidebar**: type an address or a search and press Enter. <kbd>Ctrl</kbd>+<kbd>L</kbd> focuses it.
+- **Workspaces (spaces)**: each tab belongs to one space. Each space has its own name, icon and accent
+  colour, and the colour tints the whole window. Space definitions are saved between launches.
+- **Compact mode**: the sidebar hides and slides back in when your mouse touches the left edge.
+- **Rounded content card**: web pages sit in an inset, rounded frame, like Zen.
+- **Light and dark**: follows the Windows theme.
 
-### Windows
+![Stillwater's default sidebar](.github/assets/stillwater-sidebar.png)
 
-- Download [`uv`](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer), and [`rustup`](https://win.rustup.rs/)
-  - Be sure to select *Quick install via the Visual Studio Community installer*
-- Ensure that [`winget`](https://learn.microsoft.com/en-us/windows/package-manager/winget/) is available. It should be preinstalled on Windows 10 1809+ and Windows 11, otherwise can be [`manually installed`](https://github.com/microsoft/winget-cli#installing-the-client).
-- In the Visual Studio Installer, ensure the following components are installed:
-  - **Windows 10/11 SDK (anything >= 10.0.19041.0)** (`Microsoft.VisualStudio.Component.Windows{10, 11}SDK.{>=19041}`)
-  - **MSVC v143 - VS 2022 C++ x64/x86 build tools (Latest)** (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`)
-  - **C++ ATL for latest v143 build tools (x86 & x64)** (`Microsoft.VisualStudio.Component.VC.ATL`)
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `.\mach bootstrap`
-- Build servoshell: `.\mach build`
+## Keyboard shortcuts
 
-### Android
+| Shortcut | Action |
+|---|---|
+| <kbd>Ctrl</kbd>+<kbd>L</kbd> / <kbd>Alt</kbd>+<kbd>D</kbd> | Focus the URL bar |
+| <kbd>Ctrl</kbd>+<kbd>T</kbd> | New tab in the current space |
+| <kbd>Ctrl</kbd>+<kbd>W</kbd> | Close tab (stays in the current space) |
+| <kbd>Ctrl</kbd>+<kbd>1</kbd>–<kbd>8</kbd>, <kbd>Ctrl</kbd>+<kbd>9</kbd> | Go to tab *n* / the last tab in this space |
+| <kbd>Ctrl</kbd>+<kbd>PgUp</kbd> / <kbd>PgDn</kbd> | Previous / next tab in this space |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>9</kbd> | Switch to space *n* |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> | Toggle compact mode |
+| <kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd> | Back / forward |
+| <kbd>Ctrl</kbd>+<kbd>R</kbd> / <kbd>F5</kbd> | Reload |
 
-- Ensure that the following environment variables are set:
-  - `ANDROID_SDK_ROOT`
-  - `ANDROID_NDK_ROOT`: `$ANDROID_SDK_ROOT/ndk/28.2.13676358/`
- `ANDROID_SDK_ROOT` can be any directory (such as `~/android-sdk`).
-  All of the Android build dependencies will be installed there.
-- Install the latest version of the [Android command-line
-  tools](https://developer.android.com/studio#command-tools) to
-  `$ANDROID_SDK_ROOT/cmdline-tools/latest`.
-- Run the following command to install the necessary components:
-  ```shell
-  sudo $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install \
-   "build-tools;36.0.0" \
-   "emulator" \
-   "ndk;29.0.14206865" \
-   "platform-tools" \
-   "platforms;android-37" \
-   "system-images;android-37;google_apis;x86_64"
-  ```
-- Follow the instructions above for the platform you are building on
+In the sidebar's space header, click the **icon** to change it, the **name** to rename the space, and the
+**dot** to change its colour. The trash icon (click twice) deletes a space and closes its tabs.
 
-### OpenHarmony
+## Build on Windows
 
-- Follow the instructions above for the platform you are building on to prepare the environment.
-- Depending on the target distribution (e.g. `HarmonyOS NEXT` vs pure `OpenHarmony`) the build configuration will differ slightly.
-- Ensure that the following environment variables are set
-  - `DEVECO_SDK_HOME` (Required when targeting `HarmonyOS NEXT`)
-  - `OHOS_BASE_SDK_HOME` (Required when targeting `OpenHarmony`)
-  - `OHOS_SDK_NATIVE` (e.g. `${DEVECO_SDK_HOME}/default/openharmony/native` or `${OHOS_BASE_SDK_HOME}/${API_VERSION}/native`)
-  - `SERVO_OHOS_SIGNING_CONFIG`: Path to json file containing a valid signing configuration for the demo app.
-- Review the detailed instructions at [Building for OpenHarmony].
-- The target distribution can be modified by passing `--flavor=<default|harmonyos>` to `mach <build|package|install>`.
+Stillwater builds the same way as Servo. The full guide is in the
+[Servo book](https://book.servo.org/building/building.html).
+
+**You need:** Git, [Rust via rustup](https://rustup.rs), [uv](https://docs.astral.sh/uv/), and Visual
+Studio (2022 or newer) with the *Desktop development with C++* workload.
+
+```powershell
+git clone https://github.com/WhoaThatCombo/stillwater.git
+cd stillwater
+.\mach bootstrap          # installs LLVM, CMake, ninja, GStreamer, ...
+.\mach build --release    # first build is long; rebuilds are quick
+.\target\release\servoshell.exe https://servo.org
+```
+
+**Common problems:**
+- **Wrong Rust toolchain:** Servo needs the **MSVC** toolchain on Windows. If your default is `*-windows-gnu`,
+  run `rustup set default-host x86_64-pc-windows-msvc`, or add a directory override in the repo.
+- **MinGW on your PATH:** if MinGW's `gcc` is on your `PATH`, remove it for the build so the MSVC
+  compiler is used.
+
+## How it works
+
+```
+┌────────────── winit window (egui composites the pieces) ──────────────┐
+│ ┌── sidebar WebView ──┐  ┌──────── active tab WebView ───────────────┐ │
+│ │ servo:sidebar/      │  │                                           │ │
+│ │  index.html         │  │       the web page, as a rounded card     │ │
+│ │  zen-sidebar.css    │  │                                           │ │
+│ │  sidebar.js         │  │                                           │ │
+│ └─────────────────────┘  └───────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+- **Sidebar rendering:** the sidebar is a second Servo `WebView` with its own offscreen rendering
+  context. egui only places the sidebar and the page in the window and draws native dialogs.
+- **Page → Rust:** the sidebar page sends `console.log("__sidebar__<command>\t<arg>")`.
+- **Rust → page:** Rust calls `webview.evaluate_javascript("window.sidebar.setState({...})")` with
+  the tab list, navigation state and spaces.
+- **Input:** mouse input over the sidebar goes to the sidebar. Keyboard input goes to whichever side
+  was clicked last.
+
+| File | Role |
+|---|---|
+| [`ports/servoshell/desktop/sidebar.rs`](ports/servoshell/desktop/sidebar.rs) | Sidebar WebView, messaging, layout, compact mode |
+| [`ports/servoshell/desktop/workspaces.rs`](ports/servoshell/desktop/workspaces.rs) | Spaces: tab ownership, switching, colours, persistence |
+| [`ports/servoshell/desktop/gui.rs`](ports/servoshell/desktop/gui.rs) | Compositing the sidebar and content |
+| [`ports/servoshell/desktop/headed_window.rs`](ports/servoshell/desktop/headed_window.rs) | Input routing and shortcuts |
+| [`resources/resource_protocol/sidebar/`](resources/resource_protocol/sidebar/) | The sidebar's HTML, CSS and JS |
+
+## Roadmap
+
+- [ ] Split view (two pages side by side)
+- [ ] Session restore
+- [ ] Drag tabs between spaces, pinned tabs, folders
+- [ ] Command palette
+- [ ] Prebuilt Windows downloads
+
+## Credits
+
+- **[Servo](https://github.com/servo/servo)**: the engine and the servoshell base, © The Servo Project
+  Developers, [MPL-2.0](LICENSE). Servo's original README is in [`SERVO_README.md`](SERVO_README.md).
+- **[Zen Browser](https://github.com/zen-browser/desktop)**: Stillwater's colours, radii and tab
+  styling are adapted from Zen's MPL-2.0 stylesheets (credited in
+  [`zen-sidebar.css`](resources/resource_protocol/sidebar/zen-sidebar.css)).
+
+Stillwater is not affiliated with or endorsed by the Servo project or Zen Browser.
+
+## License
+
+[Mozilla Public License 2.0](LICENSE), the same as Servo and Zen.
