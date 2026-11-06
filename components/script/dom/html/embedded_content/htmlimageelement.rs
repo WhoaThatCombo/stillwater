@@ -133,6 +133,10 @@ pub(crate) struct HTMLImageElement {
     line_number: u64,
     image_request: Cell<ImageRequestPhase>,
     generation: Cell<u32>,
+    /// The image waiting to be fetched until the element comes near the viewport
+    /// (`loading=lazy`). See <https://html.spec.whatwg.org/multipage/#lazy-load-resumption-steps>.
+    #[no_trace]
+    lazy_load_url: DomRefCell<Option<ServoUrl>>,
 }
 
 impl HTMLImageElement {
@@ -756,7 +760,48 @@ impl HTMLImageElement {
             },
         }
 
+        // Step 23. If the will lazy load element steps given the img return true, then set the
+        // img's lazy load resumption steps to the rest of this algorithm starting with the step
+        // labeled fetch the image, start intersection-observing a lazy loading element for the
+        // img element, and return. (The document checks pending lazy images against the
+        // viewport each time it updates the rendering.)
+        if self.will_lazy_load_element_steps() {
+            // Until it is fetched, a lazy image doesn't delay the document's load event.
+            LoadBlocker::terminate(cx, &self.current_request.borrow().blocker);
+            if let Some(pending_request) = self.pending_request.borrow().as_ref() {
+                LoadBlocker::terminate(cx, &pending_request.blocker);
+            }
+            *self.lazy_load_url.borrow_mut() = Some(image_url.clone());
+            self.owner_document().add_lazy_load_image(self);
+            return;
+        }
+        *self.lazy_load_url.borrow_mut() = None;
+
         self.fetch_image(cx, image_url);
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#will-lazy-load-element-steps>
+    fn will_lazy_load_element_steps(&self) -> bool {
+        // Step 1. If scripting is disabled for element, then return false.
+        // Step 2. If element's lazy loading attribute is in the Lazy state, then return true.
+        // Step 3. Return false.
+        self.owner_document().scripting_enabled() &&
+            self.upcast::<Element>()
+                .get_string_attribute(&local_name!("loading"))
+                .eq_ignore_ascii_case("lazy")
+    }
+
+    /// Whether this image is waiting to come near the viewport before it is fetched.
+    pub(crate) fn is_waiting_for_lazy_load(&self) -> bool {
+        self.lazy_load_url.borrow().is_some()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#lazy-load-resumption-steps>: fetch the image.
+    pub(crate) fn resume_lazy_load(&self, cx: &mut JSContext) {
+        let url = self.lazy_load_url.borrow_mut().take();
+        if let Some(url) = url {
+            self.fetch_image(cx, &url);
+        }
     }
 
     /// <https://html.spec.whatwg.org/multipage/#update-the-image-data>
@@ -1307,6 +1352,7 @@ impl HTMLImageElement {
             last_selected_source: DomRefCell::new(None),
             image_decode_promises: DomRefCell::new(vec![]),
             line_number: creator.return_line_number(),
+            lazy_load_url: DomRefCell::new(None),
         }
     }
 
@@ -1889,6 +1935,12 @@ impl VirtualMethods for HTMLImageElement {
             //   <https://github.com/whatwg/html/pull/5900>
             &local_name!("src") | &local_name!("srcset") | &local_name!("sizes") => {
                 self.update_the_image_data(cx);
+            },
+            // An image that is no longer lazy loads right away.
+            &local_name!("loading") => {
+                if self.is_waiting_for_lazy_load() && !self.will_lazy_load_element_steps() {
+                    self.resume_lazy_load(cx);
+                }
             },
             &local_name!("crossorigin") => {
                 // <https://html.spec.whatwg.org/multipage/#reacting-to-dom-mutations>
