@@ -601,7 +601,9 @@ impl Preferences {
             network_use_webpki_roots: false,
             network_max_content_length: 5 * 1024 * 1024,
             perf_thread_boost_enabled: true,
-            session_history_max_length: 20,
+            // Every page kept for back/forward navigation stays fully alive (DOM, JS, layout),
+            // so keep only one step back and forward; older entries reload when visited.
+            session_history_max_length: 1,
             shell_background_color_rgba: [1.0, 1.0, 1.0, 1.0],
             log_filter: String::new(),
             thread_pool_workers_max: 4,
