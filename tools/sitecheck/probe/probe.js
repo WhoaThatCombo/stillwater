@@ -8,6 +8,8 @@
 
 (function () {
   "use strict";
+  // Keep our own reference: some sites (duolingo.com) replace console.log to silence it.
+  const log = console.log.bind(console);
   if (window.top !== window) return; // main frame only
 
   // Text that anti-bot / "unsupported browser" pages show.
@@ -51,9 +53,9 @@
           "PerformanceObserver", "AbortController", "TextDecoder", "crypto",
         ].filter((name) => typeof window[name] === "undefined"),
       };
-      console.log("__sitecheck__" + JSON.stringify(data));
+      log("__sitecheck__" + JSON.stringify(data));
     } catch (error) {
-      console.log("__sitecheck__" + JSON.stringify({ phase, probeError: String(error) }));
+      log("__sitecheck__" + JSON.stringify({ phase, probeError: String(error) }));
     }
   }
 
