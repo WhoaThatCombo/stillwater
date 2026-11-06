@@ -248,6 +248,12 @@ impl HeadedWindow {
         &self.winit_window
     }
 
+    /// Restore and focus the window (e.g. when another launch handed us a link).
+    pub(crate) fn bring_to_front(&self) {
+        self.winit_window.set_minimized(false);
+        self.winit_window.focus_window();
+    }
+
     fn handle_keyboard_input(
         &self,
         state: Rc<RunningAppState>,

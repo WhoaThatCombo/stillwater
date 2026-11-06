@@ -583,7 +583,7 @@ struct CmdArgs {
     zealous_gc: bool,
 
     /// The url we should load.
-    #[bpaf(positional("URL"), fallback(String::from("https://www.servo.org")))]
+    #[bpaf(positional("URL"), fallback(String::from("servo:newtab")))]
     url: String,
 }
 

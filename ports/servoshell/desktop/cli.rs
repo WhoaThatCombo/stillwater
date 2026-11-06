@@ -6,6 +6,7 @@ use std::{env, panic};
 
 use crate::desktop::app::App;
 use crate::desktop::event_loop::ServoShellEventLoop;
+use crate::desktop::single_instance;
 use crate::panic_hook;
 use crate::prefs::{ArgumentParsingResult, parse_command_line_arguments};
 
@@ -40,6 +41,17 @@ pub fn main() {
         },
     };
 
+    // Like a normal browser, hand the URL to an already-running Stillwater and exit.
+    let single_instance = !servoshell_preferences.headless &&
+        servoshell_preferences.webdriver_port.get().is_none();
+    if single_instance &&
+        single_instance::forward_to_running_instance(
+            servoshell_preferences.url.as_deref().unwrap_or_default(),
+        )
+    {
+        return;
+    }
+
     crate::init_tracing(servoshell_preferences.tracing_filter.as_deref());
 
     let clean_shutdown = servoshell_preferences.clean_shutdown;
@@ -47,6 +59,9 @@ pub fn main() {
         true => ServoShellEventLoop::headless(),
         false => ServoShellEventLoop::headed(),
     };
+    if single_instance && let Some(proxy) = event_loop.event_loop_proxy() {
+        single_instance::listen_for_other_instances(proxy);
+    }
 
     {
         let mut app = App::new(opts, preferences, servoshell_preferences, &event_loop);

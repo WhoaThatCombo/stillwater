@@ -56,6 +56,7 @@ mod from_winit {
                 Self::UserEvent(AppEvent::RequestRepaint(..)) => {
                     target!("UserEvent(RequestRepaint)")
                 },
+                Self::UserEvent(AppEvent::OpenUrl(..)) => target!("UserEvent(OpenUrl)"),
                 #[cfg(feature = "gamepad")]
                 Self::UserEvent(AppEvent::Gamepad(..)) => target!("UserEvent(Gamepad)"),
                 Self::Suspended => target!("Suspended"),

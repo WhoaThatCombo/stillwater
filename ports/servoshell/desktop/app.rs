@@ -48,6 +48,9 @@ pub struct App {
     t_start: Instant,
     t: Instant,
     state: AppState,
+    /// Keep the event loop ticking until this time, e.g. after another launch handed us a URL:
+    /// on Windows the window otherwise may not repaint until it receives its next message.
+    tick_until: Option<Instant>,
 }
 
 impl App {
@@ -75,6 +78,7 @@ impl App {
             t_start: t,
             t,
             state: AppState::Initializing,
+            tick_until: None,
         }
     }
 
@@ -169,6 +173,15 @@ impl App {
         )
     }
 
+    fn control_flow(&self) -> ControlFlow {
+        match self.tick_until {
+            Some(until) if Instant::now() < until => {
+                ControlFlow::WaitUntil(Instant::now() + std::time::Duration::from_millis(30))
+            },
+            _ => ControlFlow::Wait,
+        }
+    }
+
     pub fn pump_servo_event_loop(&mut self, active_event_loop: Option<&ActiveEventLoop>) -> bool {
         let AppState::Running(state) = &self.state else {
             return false;
@@ -186,6 +199,21 @@ impl App {
 impl ApplicationHandler<AppEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.init(Some(event_loop));
+    }
+
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+        if !matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
+            return;
+        }
+        if let AppState::Running(state) = &self.state {
+            for window in state.windows().iter() {
+                window.set_needs_repaint();
+            }
+        }
+        if !self.pump_servo_event_loop(event_loop.into()) {
+            event_loop.exit();
+        }
+        event_loop.set_control_flow(self.control_flow());
     }
 
     fn window_event(
@@ -217,7 +245,7 @@ impl ApplicationHandler<AppEvent> for App {
             event_loop.exit();
         }
         // Block until the window gets an event
-        event_loop.set_control_flow(ControlFlow::Wait);
+        event_loop.set_control_flow(self.control_flow());
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, app_event: AppEvent) {
@@ -225,6 +253,7 @@ impl ApplicationHandler<AppEvent> for App {
             return;
         };
 
+        let opened_url = matches!(app_event, AppEvent::OpenUrl(_));
         match app_event {
             AppEvent::Waker => (),
             AppEvent::Accessibility(ref event) => {
@@ -240,18 +269,42 @@ impl ApplicationHandler<AppEvent> for App {
                     window.set_needs_repaint();
                 }
             },
+            AppEvent::OpenUrl(input) => {
+                let window = state
+                    .focused_window()
+                    .or_else(|| state.windows().first().cloned());
+                if let Some(window) = window {
+                    let url = crate::parser::location_bar_input_to_url(
+                        &input,
+                        &state.servoshell_preferences.searchpage,
+                    );
+                    if let Some(url) = url.filter(|_| !input.is_empty()) {
+                        window.create_and_activate_toplevel_webview(
+                            state.clone(),
+                            TopLevelWebViewCreationRequest::WithUrl(url.into_url()),
+                        );
+                    }
+                    if let Some(headed_window) = window.platform_window().as_headed_window()
+                    {
+                        headed_window.bring_to_front();
+                    }
+                }
+            },
             #[cfg(feature = "gamepad")]
             AppEvent::Gamepad(event, gamepad_name, gamepad_index) => {
                 state.handle_gamepad_events(event, gamepad_name, gamepad_index);
             },
         }
 
+        if opened_url {
+            self.tick_until = Some(Instant::now() + std::time::Duration::from_secs(3));
+        }
         if !self.pump_servo_event_loop(event_loop.into()) {
             event_loop.exit();
         }
 
         // Block until the window gets an event
-        event_loop.set_control_flow(ControlFlow::Wait);
+        event_loop.set_control_flow(self.control_flow());
     }
 }
 

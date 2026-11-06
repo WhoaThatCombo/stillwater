@@ -24,6 +24,8 @@ pub enum AppEvent {
     Waker,
     Accessibility(egui_winit::accesskit_winit::Event),
     RequestRepaint(ServoShellWindowId),
+    /// A later launch of Stillwater asked this instance to open a URL (or just come forward).
+    OpenUrl(String),
     #[cfg(feature = "gamepad")]
     Gamepad(Event, String, GamepadIndex),
 }
