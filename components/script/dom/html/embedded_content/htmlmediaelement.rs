@@ -2544,6 +2544,9 @@ impl HTMLMediaElement {
         if let Some(ref player) = *self.player.borrow() {
             let player = player.lock().unwrap();
             let _ = player.set_seekable(false);
+            // The stream starts at a keyframe at or before `time`: decode from there, but only
+            // show what's from `time` on.
+            let _ = player.set_start_offset(time - base);
             let _ = player.set_mute(self.is_muted());
             let _ = player.set_volume(self.volume.get());
             if !self.paused.get() {
@@ -2731,6 +2734,17 @@ impl HTMLMediaElement {
     fn playback_end(&self, cx: &mut JSContext) {
         // Abort the following steps of the end of playback if seeking is in progress.
         if self.seeking.get() {
+            return;
+        }
+
+        // Media Source Extensions: the stream ended where a variant with another codec begins;
+        // carry on from there with a new pipeline.
+        if let Some(time) = self
+            .media_source
+            .get()
+            .and_then(|media_source| media_source.take_pending_switch())
+        {
+            self.mse_restart(time);
             return;
         }
 

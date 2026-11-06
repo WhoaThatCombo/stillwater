@@ -214,12 +214,34 @@ impl TrackBuffer {
             .find(|fragment| fragment.end > time + EPSILON)
     }
 
-    /// Where playback restarted at `time` must begin: the start of the fragment holding `time`.
+    /// The variant (initialization segment generation) playing at `time`: that of the fragment
+    /// starting last at or before it, else of the first one after it.
+    pub(crate) fn generation_at(&self, time: f64) -> Option<u32> {
+        let mut generation = None;
+        for fragment in self.fragments.values() {
+            if fragment.start > time + EPSILON {
+                return generation.or(Some(fragment.generation));
+            }
+            generation = Some(fragment.generation);
+        }
+        generation
+    }
+
+    /// Where playback restarted at `time` must begin: the start of the last fragment at or
+    /// before `time` that starts with a keyframe (or the first fragment after `time`).
     pub(crate) fn fragment_start_at(&self, time: f64) -> Option<f64> {
-        self.fragments
-            .values()
-            .find(|fragment| fragment.end > time + EPSILON)
-            .map(|fragment| fragment.start.min(time))
+        let mut start = None;
+        for fragment in self.fragments.values() {
+            if fragment.start > time + EPSILON {
+                break;
+            }
+            if fragment.keyframe {
+                start = Some(fragment.start);
+            }
+        }
+        start
+            .or_else(|| self.fragment_after(time).map(|fragment| fragment.start))
+            .map(|start| start.min(time))
     }
 
     /// Buffered time ranges (fragments merged when they touch).

@@ -303,9 +303,19 @@ impl MediaSource {
             .max(0.0);
         *self.feed.borrow_mut() = Feed {
             base,
+            start: time,
             ..Feed::default()
         };
         base
+    }
+
+    /// The stream ended at a codec switch: where playback must restart, if so.
+    pub(crate) fn take_pending_switch(&self) -> Option<f64> {
+        let mut feed = self.feed.borrow_mut();
+        if !feed.end_of_stream_sent {
+            return None;
+        }
+        feed.switch_at.take()
     }
 
     /// The next piece of the merged stream for the player, if one is ready.
@@ -321,10 +331,7 @@ impl MediaSource {
             // Start with the variant of each buffer's first fragment to play.
             let mut generations = vec![];
             for track in &tracks {
-                let generation = track
-                    .fragment_after(feed.base)
-                    .map(|fragment| fragment.generation)
-                    .unwrap_or(track.generation);
+                let generation = track.generation_at(feed.start).unwrap_or(track.generation);
                 track.init(generation)?;
                 generations.push(generation);
             }
@@ -352,11 +359,54 @@ impl MediaSource {
             if !feed.queues[index].is_empty() {
                 continue;
             }
-            let Some(fragment) = track.fragment_after(feed.next[index]) else {
+            let fragment = loop {
+                match track.fragment_after(feed.next[index]) {
+                    // Another variant's media from before the point playback restarted at
+                    // (e.g. the end of the old quality, overlapping the new one): skip it.
+                    Some(fragment)
+                        if fragment.generation != feed.generations[index] &&
+                            fragment.start < feed.start - EPSILON =>
+                    {
+                        feed.next[index] = fragment.end;
+                    },
+                    other => break other,
+                }
+            };
+            let Some(fragment) = fragment else {
                 continue;
             };
+            if feed
+                .switch_at
+                .is_some_and(|at| fragment.start >= at - EPSILON)
+            {
+                continue;
+            }
             if fragment.generation != feed.generations[index] {
-                return Some(MseChunk::Restart(fragment.start.max(feed.next[index])));
+                // A new variant (usually another quality). With the same codec the demuxer
+                // takes a new initialization segment in stride.
+                let same_codec = match (
+                    track.init(feed.generations[index]),
+                    track.init(fragment.generation),
+                ) {
+                    (Some((_, old)), Some((_, new))) => old.codec == new.codec,
+                    _ => false,
+                };
+                let mut generations = feed.generations.clone();
+                generations[index] = fragment.generation;
+                let inits: Vec<(&InitSegment, &TrackInfo)> = tracks
+                    .iter()
+                    .zip(&generations)
+                    .filter_map(|(track, generation)| track.init(*generation))
+                    .collect();
+                if !same_codec || inits.len() != tracks.len() {
+                    // Otherwise play out what's fed and start over with a new pipeline there.
+                    let at = fragment.start.max(feed.next[index]);
+                    feed.switch_at = Some(feed.switch_at.map_or(at, |other| other.min(at)));
+                    continue;
+                }
+                let init = combined_init_segment(&inits);
+                feed.generations = generations;
+                return Some(MseChunk::Data(init));
             }
             let end = fragment.end;
             let Some((_, info)) = track.init(fragment.generation) else {
@@ -382,22 +432,25 @@ impl MediaSource {
         }
 
         // Feed pieces in time order across buffers, never running ahead of a buffer that has
-        // nothing yet (unless the stream has ended).
+        // nothing yet (unless the stream has ended, or ends at a codec switch).
         let ended = self.state.get() == State::Ended;
+        let switch_at = feed.switch_at;
         let mut best: Option<(usize, f64)> = None;
         for index in 0..tracks.len() {
             match feed.queues[index].front() {
+                Some((start, _)) if switch_at.is_some_and(|at| *start >= at - EPSILON) => {},
                 Some((start, _)) => {
                     if best.is_none_or(|(_, earliest)| *start < earliest) {
                         best = Some((index, *start));
                     }
                 },
-                None if !ended => return None,
-                None => {},
+                None if ended => {},
+                None if switch_at.is_some_and(|at| feed.next[index] >= at - EPSILON) => {},
+                None => return None,
             }
         }
         let Some((index, _)) = best else {
-            if ended && !feed.end_of_stream_sent {
+            if (ended || switch_at.is_some()) && !feed.end_of_stream_sent {
                 feed.end_of_stream_sent = true;
                 return Some(MseChunk::EndOfStream);
             }
