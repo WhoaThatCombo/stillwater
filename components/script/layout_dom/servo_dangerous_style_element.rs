@@ -181,11 +181,30 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
     ) -> Option<Arc<StyleLocked<PropertyDeclarationBlock>>> {
         let node = self.as_node();
         let document = node.owner_doc();
-        context.animations.get_animation_declarations(
+        let css_declarations = context.animations.get_animation_declarations(
             &AnimationSetKey::new_for_non_pseudo(node.opaque()),
             context.current_time_for_animations,
             &document.shared_style_locks().author,
-        )
+        );
+        // Stillwater: Web Animations API animations compose above CSS animations.
+        let Some(script_declarations) =
+            document.script_animation_declarations_for_layout(node.opaque())
+        else {
+            return css_declarations;
+        };
+        let Some(css_declarations) = css_declarations else {
+            return Some(script_declarations);
+        };
+        let lock = &document.shared_style_locks().author;
+        let guard = lock.read();
+        let mut block = css_declarations.read_with(&guard).clone();
+        for (declaration, importance) in script_declarations
+            .read_with(&guard)
+            .declaration_importance_iter()
+        {
+            block.push(declaration.clone(), importance);
+        }
+        Some(Arc::new(lock.wrap(block)))
     }
 
     fn transition_rule(
@@ -367,9 +386,13 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
         // This is not used for pseudo elements currently so we can use the non-pseudo key.
         let key = AnimationSetKey::new_for_non_pseudo(self.as_node().opaque());
         self.may_have_animations() &&
-            context
+            (context
                 .animations
-                .has_active_animations_or_transitions(&key)
+                .has_active_animations_or_transitions(&key) ||
+                self.as_node()
+                    .owner_doc()
+                    .script_animation_declarations_for_layout(key.node)
+                    .is_some())
     }
 
     fn has_css_animations(

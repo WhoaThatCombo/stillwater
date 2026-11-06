@@ -90,6 +90,16 @@ impl<'dom> ServoDangerousStyleDocument<'dom> {
         self.document.shared_style_locks()
     }
 
+    /// The declarations that Web Animations API animations apply to `node`, if any.
+    pub(crate) fn script_animation_declarations_for_layout(
+        &self,
+        node: style::dom::OpaqueNode,
+    ) -> Option<
+        servo_arc::Arc<style::shared_lock::Locked<style::properties::PropertyDeclarationBlock>>,
+    > {
+        self.document.script_animation_declarations_for_layout(node)
+    }
+
     /// The encoding that was used to decode the document.
     pub fn encoding(&self) -> &'static Encoding {
         self.document.encoding_for_layout()

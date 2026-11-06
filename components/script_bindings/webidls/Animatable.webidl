@@ -5,10 +5,11 @@
 // https://drafts.csswg.org/web-animations-1/#the-animatable-interface-mixin
 
 interface mixin Animatable {
-    [Pref="dom_web_animations_enabled"]
+    [Pref="dom_web_animations_enabled", Throws]
     Animation           animate(object? keyframes ,
                                 optional (unrestricted double or KeyframeAnimationOptions) options = {});
-    // sequence<Animation> getAnimations(optional GetAnimationsOptions options = {});
+    [Pref="dom_web_animations_enabled"]
+    sequence<Animation> getAnimations(optional GetAnimationsOptions options = {});
 };
 
 dictionary KeyframeAnimationOptions : KeyframeEffectOptions {

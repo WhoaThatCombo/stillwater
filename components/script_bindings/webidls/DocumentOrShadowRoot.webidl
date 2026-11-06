@@ -18,6 +18,11 @@ interface mixin DocumentOrShadowRoot {
   readonly attribute CustomElementRegistry? customElementRegistry;
 };
 
+// https://drafts.csswg.org/web-animations-1/#extensions-to-the-documentorshadowroot-interface-mixin
+partial interface mixin DocumentOrShadowRoot {
+  [Pref="dom_web_animations_enabled"] sequence<Animation> getAnimations();
+};
+
 partial interface mixin DocumentOrShadowRoot {
   [Pref="dom_adoptedstylesheet_enabled", SetterThrows]
   attribute ObservableArray<CSSStyleSheet> adoptedStyleSheets;
