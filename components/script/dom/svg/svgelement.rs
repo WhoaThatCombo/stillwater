@@ -18,6 +18,7 @@ use style::values::specified;
 use style_traits::ParsingMode;
 use stylo_dom::ElementState;
 
+use crate::dom::attributes::domstringmap::DOMStringMap;
 use crate::dom::bindings::codegen::Bindings::HTMLOrSVGOrMathMLElementBinding::FocusOptions;
 use crate::dom::bindings::codegen::Bindings::SVGElementBinding::SVGElementMethods;
 use crate::dom::bindings::inheritance::Castable;
@@ -44,6 +45,7 @@ use crate::dom::window::scrolling_box::{ScrollAxisState, ScrollRequirement};
 pub(crate) struct SVGElement {
     element: Element,
     style_decl: MutNullableDom<CSSStyleDeclaration>,
+    dataset: MutNullableDom<DOMStringMap>,
 }
 
 impl SVGElement {
@@ -64,6 +66,7 @@ impl SVGElement {
         SVGElement {
             element: Element::new_inherited_with_state(state, tag_name, ns!(svg), prefix, document),
             style_decl: Default::default(),
+            dataset: Default::default(),
         }
     }
 
@@ -167,6 +170,27 @@ impl SVGElementMethods<crate::DomTypeHolder> for SVGElement {
     // https://html.spec.whatwg.org/multipage/#globaleventhandlers
     global_event_handlers!();
 
+    /// <https://html.spec.whatwg.org/multipage/#dom-dataset>
+    fn Dataset(&self, cx: &mut JSContext) -> DomRoot<DOMStringMap> {
+        self.dataset
+            .or_init(|| DOMStringMap::new(cx, self.upcast()))
+    }
+
+    /// <https://svgwg.org/svg2-draft/types.html#__svg__SVGElement__ownerSVGElement>
+    fn GetOwnerSVGElement(&self) -> Option<DomRoot<SVGSVGElement>> {
+        // The nearest ancestor 'svg' element; null for the outermost one.
+        self.upcast::<Node>()
+            .ancestors()
+            .take_while(|ancestor| ancestor.is::<SVGElement>())
+            .find_map(DomRoot::downcast::<SVGSVGElement>)
+    }
+
+    /// <https://svgwg.org/svg2-draft/types.html#__svg__SVGElement__viewportElement>
+    fn GetViewportElement(&self) -> Option<DomRoot<SVGElement>> {
+        // Only 'svg' elements establish viewports here ('symbol' only does once
+        // instantiated by 'use', which we render as a copy).
+        self.GetOwnerSVGElement().map(DomRoot::upcast)
+    }
     /// <https://html.spec.whatwg.org/multipage/#dom-noncedelement-nonce>
     fn Nonce(&self) -> DOMString {
         self.as_element().nonce_value().into()

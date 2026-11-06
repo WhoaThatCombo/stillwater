@@ -24,20 +24,30 @@ interface SVGSVGElement : SVGGraphicsElement {
   //SVGNumber createSVGNumber();
   //SVGLength createSVGLength();
   //SVGAngle createSVGAngle();
-  //DOMPoint createSVGPoint();
-  //DOMMatrix createSVGMatrix();
-  //DOMRect createSVGRect();
+  DOMPoint createSVGPoint();
+  DOMMatrix createSVGMatrix();
+  DOMRect createSVGRect();
   //SVGTransform createSVGTransform();
   //SVGTransform createSVGTransformFromMatrix(DOMMatrixReadOnly matrix);
 
-  //Element getElementById(DOMString elementId);
+  Element? getElementById(DOMString elementId);
 
   // Deprecated methods that have no effect when called,
   // but which are kept for compatibility reasons.
-  //unsigned long suspendRedraw(unsigned long maxWaitMilliseconds);
-  //void unsuspendRedraw(unsigned long suspendHandleID);
-  //void unsuspendRedrawAll();
-  //void forceRedraw();
+  unsigned long suspendRedraw(unsigned long maxWaitMilliseconds);
+  undefined unsuspendRedraw(unsigned long suspendHandleID);
+  undefined unsuspendRedrawAll();
+  undefined forceRedraw();
+};
+
+// The document time container methods from SVG 1.1, still exposed by every engine.
+// https://www.w3.org/TR/SVG11/struct.html#InterfaceSVGSVGElement
+partial interface SVGSVGElement {
+  undefined pauseAnimations();
+  undefined unpauseAnimations();
+  boolean animationsPaused();
+  float getCurrentTime();
+  undefined setCurrentTime(float seconds);
 };
 
 //SVGSVGElement includes SVGFitToViewBox;
