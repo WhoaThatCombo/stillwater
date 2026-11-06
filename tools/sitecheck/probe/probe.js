@@ -9,6 +9,8 @@
 (function () {
   "use strict";
   if (window.top !== window) return; // main frame only
+  // Keep our own reference: some sites (apnews.com) replace console.log with a no-op.
+  const log = console.log.bind(console);
 
   // Text that anti-bot / "unsupported browser" pages show.
   const BLOCK_PHRASES = [
@@ -23,7 +25,10 @@
     if (errors.length < 30) errors.push(String(event.message || event.error || "error"));
   });
   window.addEventListener("unhandledrejection", (event) => {
-    if (errors.length < 30) errors.push("unhandled rejection: " + String(event.reason && (event.reason.message || event.reason)));
+    const reason = event.reason;
+    // Rejections carry no location in Stillwater's output, so keep where the reason was created.
+    const where = reason && typeof reason.stack === "string" ? reason.stack.split("\n")[0] : "";
+    if (errors.length < 30) errors.push("unhandled rejection: " + String(reason && (reason.message || reason)) + (where ? " @ " + where : ""));
   });
 
   function report(phase) {
@@ -51,9 +56,9 @@
           "PerformanceObserver", "AbortController", "TextDecoder", "crypto",
         ].filter((name) => typeof window[name] === "undefined"),
       };
-      console.log("__sitecheck__" + JSON.stringify(data));
+      log("__sitecheck__" + JSON.stringify(data));
     } catch (error) {
-      console.log("__sitecheck__" + JSON.stringify({ phase, probeError: String(error) }));
+      log("__sitecheck__" + JSON.stringify({ phase, probeError: String(error) }));
     }
   }
 
