@@ -4674,19 +4674,55 @@ impl Document {
             "domContentLoadedEventEnd" => {
                 self.navigation_timing().dom_content_loaded_event_end.get()
             },
+            "domLoading" => self.navigation_timing().dom_loading.get(),
             "domComplete" => self.navigation_timing().dom_complete.get(),
             "loadEventStart" => self.navigation_timing().load_event_start.get(),
             "loadEventEnd" => self.navigation_timing().load_event_end.get(),
-            "redirectStart" | "redirectEnd" | "secureConnectionStart" | "responseEnd" => self
-                .resource_fetch_timing()
-                .as_ref()
-                .and_then(|resource_fetch_timing| match name {
-                    "redirectStart" => resource_fetch_timing.redirect_start,
-                    "redirectEnd" => resource_fetch_timing.redirect_end,
-                    "secureConnectionStart" => resource_fetch_timing.secure_connection_start,
-                    "responseEnd" => resource_fetch_timing.response_end,
-                    _ => None,
+            "redirectStart" |
+            "redirectEnd" |
+            "fetchStart" |
+            "domainLookupStart" |
+            "domainLookupEnd" |
+            "connectStart" |
+            "connectEnd" |
+            "secureConnectionStart" |
+            "requestStart" |
+            "responseStart" |
+            "responseEnd" => match self.resource_fetch_timing().as_ref() {
+                // The document's timing is only recorded once its response has been received
+                // entirely, but scripts that run while it loads can already ask for when the
+                // fetch started: that is when the navigation started.
+                None if matches!(
+                    name,
+                    "fetchStart" |
+                        "domainLookupStart" |
+                        "domainLookupEnd" |
+                        "connectStart" |
+                        "connectEnd"
+                ) =>
+                {
+                    Some(self.window().navigation_start())
+                },
+                timing => timing.and_then(|timing| {
+                    // Without DNS or connection timing (a reused connection or the cache), these
+                    // fall back to the preceding phase, like PerformanceTiming's attributes.
+                    let domain_lookup = timing.domain_lookup_start.or(timing.fetch_start);
+                    let connect_start = timing.connect_start.or(domain_lookup);
+                    match name {
+                        "redirectStart" => timing.redirect_start,
+                        "redirectEnd" => timing.redirect_end,
+                        "fetchStart" => timing.fetch_start,
+                        "domainLookupStart" | "domainLookupEnd" => domain_lookup,
+                        "connectStart" => connect_start,
+                        "connectEnd" => timing.connect_end.or(connect_start),
+                        "secureConnectionStart" => timing.secure_connection_start,
+                        "requestStart" => timing.request_start,
+                        "responseStart" => timing.response_start,
+                        "responseEnd" => timing.response_end,
+                        _ => None,
+                    }
                 }),
+            },
             _ => {
                 return Err(Error::Operation(Some(format!(
                     "{name} hasn't been implemented."
