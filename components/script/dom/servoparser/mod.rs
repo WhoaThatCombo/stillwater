@@ -448,7 +448,7 @@ impl ServoParser {
         // There is no pending parsing blocking script, so all previous calls
         // to document.write() should have seen their entire input tokenized
         // and process, with nothing pushed to the parser script input.
-        assert!(self.script_input.is_empty());
+        debug_assert!(self.script_input.is_empty());
 
         let input = BufferQueue::default();
         input.push_back(String::from(text).into());
@@ -478,7 +478,18 @@ impl ServoParser {
             return;
         }
 
-        assert!(input.is_empty());
+        // A script run while tokenizing can abort the parser (e.g. by navigating or calling
+        // document.open()), which stops the tokenizer with input left over; that input is moot.
+        // This used to be an assertion and crashed weather.com's tab.
+        if !input.is_empty() {
+            if self.aborted.get() {
+                return;
+            }
+            log::warn!("document.write(): tokenizer stopped with input left; keeping it");
+            while let Some(chunk) = input.pop_front() {
+                self.script_input.push_back(chunk);
+            }
+        }
     }
 
     /// Steps 4-6 of <https://html.spec.whatwg.org/multipage/#dom-document-close>
