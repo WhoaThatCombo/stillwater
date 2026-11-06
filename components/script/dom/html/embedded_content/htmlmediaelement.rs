@@ -1417,7 +1417,10 @@ impl HTMLMediaElement {
         // type (including any codecs described by the codecs parameter, for types that define that
         // parameter), represents a type that the user agent knows it cannot render, then end the
         // synchronous section, and jump down to the failed with elements step below.
+        // An empty type (e.g. Shaka Player's `<source type="">` for MediaSource URLs) names no
+        // type at all, as in other browsers.
         if let Some(type_) = element.get_attribute_string_value(&local_name!("type")) &&
+            !type_.trim().is_empty() &&
             ServoMedia::get().can_play_type(&type_) == SupportsMediaType::No
         {
             self.load_from_source_child_failure_steps(cx, source);

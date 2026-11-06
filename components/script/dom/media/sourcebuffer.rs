@@ -61,6 +61,14 @@ pub(crate) struct Fragment {
     pub(crate) keyframe: bool,
 }
 
+impl Fragment {
+    /// How far apart two of its times may be and still count as the same: [`EPSILON`], or less
+    /// for very short fragments (low-latency streams append a single 16 ms frame at a time).
+    fn tolerance(&self) -> f64 {
+        EPSILON.min((self.end - self.start) / 4.0)
+    }
+}
+
 /// What a `SourceBuffer` holds: its initialization segments and parsed media segments.
 #[derive(Default)]
 pub(crate) struct TrackBuffer {
@@ -185,7 +193,10 @@ impl TrackBuffer {
         let overlapping: Vec<u64> = self
             .fragments
             .iter()
-            .filter(|(_, other)| other.start < end - EPSILON && other.end > start + EPSILON)
+            .filter(|(_, other)| {
+                let tolerance = other.tolerance().min(EPSILON.min((end - start) / 4.0));
+                other.start < end - tolerance && other.end > start + tolerance
+            })
             .map(|(key, _)| *key)
             .collect();
         for key in overlapping {
@@ -211,7 +222,7 @@ impl TrackBuffer {
     pub(crate) fn fragment_after(&self, time: f64) -> Option<&Fragment> {
         self.fragments
             .values()
-            .find(|fragment| fragment.end > time + EPSILON)
+            .find(|fragment| fragment.end > time + fragment.tolerance())
     }
 
     /// The variant (initialization segment generation) playing at `time`: that of the fragment
@@ -488,7 +499,14 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         {
             let mut track = self.track.borrow_mut();
             let now = self.parent.current_time();
-            if now > BACK_BUFFER_SECONDS {
+            // Only while playing through buffered media: during startup or a seek the playhead
+            // may be far from what's buffered (e.g. Twitch plays at stream time 25000 s before
+            // re-basing its timestamps), and everything would look "played".
+            let playing_buffered = track
+                .ranges()
+                .iter()
+                .any(|(start, end)| now >= start - 1.0 && now <= end + 1.0);
+            if playing_buffered && now > BACK_BUFFER_SECONDS {
                 track.remove(0.0, now - BACK_BUFFER_SECONDS);
             }
             let quota = match track.track().map(|info| info.kind) {
