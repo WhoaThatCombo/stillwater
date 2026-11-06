@@ -554,14 +554,16 @@ impl Preferences {
             // See https://github.com/servo/servo/issues/47577
             js_mem_gc_compacting_enabled: false,
             js_mem_gc_empty_chunk_count_min: 1,
-            js_mem_gc_high_frequency_heap_growth_max: 300,
-            js_mem_gc_high_frequency_heap_growth_min: 150,
+            // Let JS heaps grow less between collections than SpiderMonkey's defaults (3x/1.5x/
+            // 1.5x): every site gets its own runtime here, so slack multiplies.
+            js_mem_gc_high_frequency_heap_growth_max: 150,
+            js_mem_gc_high_frequency_heap_growth_min: 120,
             js_mem_gc_high_frequency_high_limit_mb: 500,
             js_mem_gc_high_frequency_low_limit_mb: 100,
             js_mem_gc_high_frequency_time_limit_ms: 1000,
             js_mem_gc_incremental_enabled: false,
             js_mem_gc_incremental_slice_ms: 10,
-            js_mem_gc_low_frequency_heap_growth: 150,
+            js_mem_gc_low_frequency_heap_growth: 120,
             js_mem_gc_malloc_threshold_base_mb: 38,
             js_mem_gc_per_zone_enabled: false,
             js_mem_gc_urgent_threshold_mb: 16,
@@ -606,7 +608,9 @@ impl Preferences {
             network_use_webpki_roots: false,
             network_max_content_length: 5 * 1024 * 1024,
             perf_thread_boost_enabled: true,
-            session_history_max_length: 20,
+            // Every page kept for back/forward navigation stays fully alive (DOM, JS, layout),
+            // so keep only one step back and forward; older entries reload when visited.
+            session_history_max_length: 1,
             shell_background_color_rgba: [1.0, 1.0, 1.0, 1.0],
             log_filter: String::new(),
             thread_pool_workers_max: 4,

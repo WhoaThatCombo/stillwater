@@ -10020,6 +10020,7 @@ dependencies = [
  "libc",
  "log",
  "mach2",
+ "memmap2",
  "mime_guess",
  "napi-derive-ohos",
  "napi-ohos",

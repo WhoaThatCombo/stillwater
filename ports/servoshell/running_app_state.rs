@@ -5,8 +5,8 @@
 //! Shared state and methods for desktop and EGL implementations.
 
 use std::cell::{Cell, Ref, RefCell};
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -229,6 +229,11 @@ pub(crate) struct RunningAppState {
     /// The built-in content blocker.
     #[cfg(not(any(target_os = "android", target_env = "ohos")))]
     pub(crate) adblock: RefCell<crate::desktop::adblock::Adblock>,
+    /// Tabs with audio or video playing, which the tab unloader leaves alone.
+    playing_media: RefCell<HashMap<WebViewId, std::time::Instant>>,
+    /// When to run an idle garbage collection: a few seconds after pages finish loading or
+    /// close, once things have settled.
+    gc_due: Cell<Option<std::time::Instant>>,
 
     /// Whether or not program exit has been triggered. This means that all windows
     /// will be destroyed and shutdown will start at the end of the current event loop.
@@ -307,6 +312,8 @@ impl RunningAppState {
             )),
             user_content_manager,
             recent_console_errors: Default::default(),
+            playing_media: Default::default(),
+            gc_due: Default::default(),
             experimental_preferences_enabled,
             accessibility_active: Cell::new(false),
         }
@@ -769,7 +776,43 @@ impl RunningAppState {
     pub(crate) fn accessibility_active(&self) -> bool {
         self.accessibility_active.get()
     }
+
+    /// Tabs that are currently playing audio or video (reported progress in the last 10 s).
+    pub(crate) fn playing_media(&self) -> HashSet<WebViewId> {
+        let mut playing = self.playing_media.borrow_mut();
+        playing.retain(|_, last| last.elapsed() < std::time::Duration::from_secs(10));
+        playing.keys().copied().collect()
+    }
+
+    /// Collect garbage once activity settles: pages allocate a lot while loading, and without
+    /// this the memory is only reclaimed when some page next allocates enough to trigger a GC.
+    fn schedule_idle_gc(&self) {
+        self.gc_due
+            .set(Some(std::time::Instant::now() + IDLE_GC_DELAY));
+    }
+
+    /// When the next idle garbage collection is due, if one is scheduled.
+    pub(crate) fn idle_gc_due(&self) -> Option<std::time::Instant> {
+        self.gc_due.get()
+    }
+
+    /// Run the scheduled idle garbage collection if it's due.
+    pub(crate) fn maybe_collect_garbage(&self) {
+        if self
+            .gc_due
+            .get()
+            .is_some_and(|due| std::time::Instant::now() >= due)
+        {
+            self.gc_due.set(None);
+            #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+            crate::desktop::diagnostics::log("idle garbage collection");
+            self.servo.collect_garbage();
+        }
+    }
 }
+
+/// How long after the last page load (or tab close) to collect garbage.
+const IDLE_GC_DELAY: std::time::Duration = std::time::Duration::from_secs(8);
 
 impl WebViewDelegate for RunningAppState {
     fn load_web_resource(&self, webview: WebView, load: servo::WebResourceLoad) {
@@ -863,8 +906,28 @@ impl WebViewDelegate for RunningAppState {
         window.activate_webview(webview.id());
     }
 
+    fn notify_media_session_event(&self, webview: WebView, event: servo::MediaSessionEvent) {
+        // Pages often have several media elements (YouTube pauses its spare players while the
+        // main one plays), so a "paused" event doesn't mean the tab went quiet. Instead, a tab
+        // counts as playing while it keeps reporting progress (about twice a second).
+        let playing = match event {
+            servo::MediaSessionEvent::PlaybackStateChange(state) => {
+                matches!(state, servo::MediaSessionPlaybackState::Playing)
+            },
+            servo::MediaSessionEvent::SetPositionState(state) => state.playback_rate != 0.0,
+            servo::MediaSessionEvent::SetMetadata(_) => false,
+        };
+        if playing {
+            self.playing_media
+                .borrow_mut()
+                .insert(webview.id(), std::time::Instant::now());
+        }
+    }
+
     fn notify_closed(&self, webview: WebView) {
         let webview_id = webview.id();
+        self.playing_media.borrow_mut().remove(&webview_id);
+        self.schedule_idle_gc();
         self.pending_webdriver_events
             .borrow_mut()
             .retain(|_, (pending_webview_id, _)| *pending_webview_id != webview_id);
@@ -895,6 +958,13 @@ impl WebViewDelegate for RunningAppState {
             webview.url().map(|url| url.to_string()).unwrap_or_default()
         ));
         self.window_for_webview(&webview).set_needs_update();
+        // A new page has no media playing yet.
+        if status == LoadStatus::Started {
+            self.playing_media.borrow_mut().remove(&webview.id());
+        }
+        if status == LoadStatus::Complete {
+            self.schedule_idle_gc();
+        }
 
         let webdriver_status = match status {
             LoadStatus::Complete => WebDriverLoadStatus::Complete,

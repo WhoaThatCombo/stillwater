@@ -6,8 +6,9 @@
 //! only lists the current workspace's tabs, and each workspace has its own icon and accent
 //! colour. Workspace definitions (not their tabs) persist in `<config dir>/workspaces.json`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use log::warn;
 use serde_json::{Value, json};
@@ -102,6 +103,27 @@ impl Pin {
     }
 }
 
+/// An ordinary tab whose page was unloaded to free memory (Zen's tab unloader). It keeps its
+/// place, title and icon in the sidebar and loads its page again when activated.
+struct UnloadedTab {
+    /// The sidebar's id for the tab, kept so the row stays the same while it's unloaded.
+    key: u32,
+    url: String,
+    title: String,
+    custom_title: Option<String>,
+    favicon: Option<String>,
+    space: u32,
+    order: u64,
+}
+
+/// A tab in the sidebar's tab list: open, or unloaded.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TabEntry {
+    Live(WebViewId),
+    /// The sidebar key of an unloaded tab.
+    Unloaded(u32),
+}
+
 /// A folder of pinned tabs inside a space.
 struct Folder {
     id: u32,
@@ -140,6 +162,18 @@ pub(crate) struct Workspaces {
     /// (old) active tab into another workspace.
     awaiting_new_tab: bool,
     path: Option<PathBuf>,
+    /// Position of each open tab in its list (tabs loaded again after unloading keep their place).
+    tab_order: HashMap<WebViewId, u64>,
+    next_order: u64,
+    /// When each open tab was last the active one (or was opened).
+    last_used: HashMap<WebViewId, Instant>,
+    /// Ordinary tabs whose pages were unloaded.
+    unloaded: Vec<UnloadedTab>,
+    /// An unloaded tab is being loaded again; the next new `WebView` belongs to it.
+    pending_restore: Option<u32>,
+    /// Tabs that were loaded again since the sidebar last asked: (new WebView, sidebar key,
+    /// favicon), so the sidebar keeps showing the same row.
+    restored: Vec<(WebViewId, u32, Option<String>)>,
 }
 
 impl Workspaces {
@@ -190,6 +224,12 @@ impl Workspaces {
             last_active: Default::default(),
             awaiting_new_tab: false,
             path,
+            tab_order: Default::default(),
+            next_order: 0,
+            last_used: Default::default(),
+            unloaded: Vec::new(),
+            pending_restore: None,
+            restored: Vec::new(),
         }
     }
 
@@ -238,17 +278,45 @@ impl Workspaces {
         self.list.iter().find(|workspace| workspace.id == self.current)
     }
 
-    /// Tabs belonging to `workspace`, in creation order.
+    /// Open tabs belonging to `workspace`, in sidebar order.
     fn tabs_in(&self, window: &ServoShellWindow, workspace: u32) -> Vec<WebViewId> {
-        window
+        let mut tabs: Vec<WebViewId> = window
             .webview_ids()
             .into_iter()
             .filter(|id| self.tab_workspace.get(id) == Some(&workspace))
-            .collect()
+            .collect();
+        tabs.sort_by_key(|id| self.order_of(*id));
+        tabs
     }
 
-    pub(crate) fn current_tabs(&self, window: &ServoShellWindow) -> Vec<WebViewId> {
-        self.tabs_in(window, self.current)
+    fn order_of(&self, webview: WebViewId) -> u64 {
+        self.tab_order.get(&webview).copied().unwrap_or(u64::MAX)
+    }
+
+    /// Open and unloaded tabs of `workspace`, in sidebar order. Open pinned tabs are included
+    /// (as before); unloaded pins live in `pins`, not here.
+    fn entries_in(&self, window: &ServoShellWindow, workspace: u32) -> Vec<TabEntry> {
+        let mut entries: Vec<(u64, TabEntry)> = self
+            .tabs_in(window, workspace)
+            .into_iter()
+            .map(|id| (self.order_of(id), TabEntry::Live(id)))
+            .collect();
+        entries.extend(
+            self.unloaded
+                .iter()
+                .filter(|tab| tab.space == workspace)
+                .map(|tab| (tab.order, TabEntry::Unloaded(tab.key))),
+        );
+        entries.sort_by_key(|(order, _)| *order);
+        entries.into_iter().map(|(_, entry)| entry).collect()
+    }
+
+    /// Show a tab, loading it again first if it was unloaded.
+    pub(crate) fn activate_entry(&mut self, window: &ServoShellWindow, entry: TabEntry) {
+        match entry {
+            TabEntry::Live(id) => window.activate_webview(id),
+            TabEntry::Unloaded(key) => self.restore_tab(window, key),
+        }
     }
 
     /// Assign new tabs to the current workspace, forget closed ones, and follow the active tab
@@ -256,6 +324,8 @@ impl Workspaces {
     pub(crate) fn sync(&mut self, window: &ServoShellWindow) {
         let ids = window.webview_ids();
         self.tab_workspace.retain(|id, _| ids.contains(id));
+        self.tab_order.retain(|id, _| ids.contains(id));
+        self.last_used.retain(|id, _| ids.contains(id));
         self.last_active.retain(|_, id| ids.contains(id));
         self.custom_titles.retain(|id, _| ids.contains(id));
         // A closed pinned tab is unloaded, not removed.
@@ -264,25 +334,46 @@ impl Workspaces {
                 pin.webview = None;
             }
         }
+        let now = Instant::now();
         for id in &ids {
             if !self.tab_workspace.contains_key(id) {
-                // The tab a pinned tab asked for, or an ordinary new tab.
-                let pin = self
-                    .pending_pin
-                    .take()
-                    .and_then(|pin_id| self.pins.iter_mut().find(|pin| pin.id == pin_id));
-                let space = match pin {
-                    Some(pin) => {
-                        pin.webview = Some(*id);
-                        pin.space
-                    },
-                    None => self.current,
+                // An unloaded tab loading again, the tab a pinned tab asked for, or an
+                // ordinary new tab.
+                let restored = self.pending_restore.take().and_then(|key| {
+                    let position = self.unloaded.iter().position(|tab| tab.key == key)?;
+                    Some(self.unloaded.remove(position))
+                });
+                let space = if let Some(tab) = restored {
+                    self.tab_order.insert(*id, tab.order);
+                    if let Some(title) = tab.custom_title {
+                        self.custom_titles.insert(*id, title);
+                    }
+                    self.restored.push((*id, tab.key, tab.favicon));
+                    tab.space
+                } else {
+                    let pin = self
+                        .pending_pin
+                        .take()
+                        .and_then(|pin_id| self.pins.iter_mut().find(|pin| pin.id == pin_id));
+                    match pin {
+                        Some(pin) => {
+                            pin.webview = Some(*id);
+                            pin.space
+                        },
+                        None => self.current,
+                    }
                 };
                 self.tab_workspace.insert(*id, space);
+                if !self.tab_order.contains_key(id) {
+                    self.next_order += 1;
+                    self.tab_order.insert(*id, self.next_order);
+                }
+                self.last_used.insert(*id, now);
                 self.awaiting_new_tab = false;
             }
         }
         if let Some(active) = window.active_webview().map(|webview| webview.id()) {
+            self.last_used.insert(active, now);
             let workspace = self.tab_workspace[&active];
             // Essentials belong to every space, so they never switch spaces.
             if workspace != self.current && workspace != ESSENTIALS && !self.awaiting_new_tab {
@@ -306,12 +397,12 @@ impl Workspaces {
             let workspace = self.tab_workspace.get(&id).copied().unwrap_or(self.current);
             let workspace = if workspace == ESSENTIALS { self.current } else { workspace };
             let siblings: Vec<_> = self
-                .tabs_in(window, workspace)
+                .entries_in(window, workspace)
                 .into_iter()
-                .filter(|other| *other != id)
+                .filter(|other| *other != TabEntry::Live(id))
                 .collect();
             match siblings.last() {
-                Some(sibling) => window.activate_webview(*sibling),
+                Some(sibling) => self.activate_entry(window, *sibling),
                 None => self.open_tab(window),
             }
         }
@@ -319,23 +410,23 @@ impl Workspaces {
     }
 
     /// Activate the `index`-th tab of the current workspace (`usize::MAX` = last).
-    pub(crate) fn activate_tab_index(&self, window: &ServoShellWindow, index: usize) {
-        let tabs = self.current_tabs(window);
+    pub(crate) fn activate_tab_index(&mut self, window: &ServoShellWindow, index: usize) {
+        let tabs = self.entries_in(window, self.current);
         let tab = if index == usize::MAX { tabs.last() } else { tabs.get(index) };
-        if let Some(tab) = tab {
-            window.activate_webview(*tab);
+        if let Some(tab) = tab.copied() {
+            self.activate_entry(window, tab);
         }
     }
 
     /// Activate the next (`delta` = 1) or previous (`delta` = -1) tab in the current workspace.
-    pub(crate) fn cycle_tab(&self, window: &ServoShellWindow, delta: isize) {
-        let tabs = self.current_tabs(window);
+    pub(crate) fn cycle_tab(&mut self, window: &ServoShellWindow, delta: isize) {
+        let tabs = self.entries_in(window, self.current);
         let Some(active) = window.active_webview().map(|webview| webview.id()) else {
             return;
         };
-        if let Some(position) = tabs.iter().position(|id| *id == active) {
+        if let Some(position) = tabs.iter().position(|entry| *entry == TabEntry::Live(active)) {
             let next = (position as isize + delta).rem_euclid(tabs.len() as isize);
-            window.activate_webview(tabs[next as usize]);
+            self.activate_entry(window, tabs[next as usize]);
         }
     }
 
@@ -353,7 +444,11 @@ impl Workspaces {
             .or(tabs.last().copied());
         match target {
             Some(id) => window.activate_webview(id),
-            None => self.open_tab(window),
+            // Only unloaded tabs left: load the last one rather than opening a new tab.
+            None => match self.entries_in(window, workspace).last().copied() {
+                Some(entry) => self.activate_entry(window, entry),
+                None => self.open_tab(window),
+            },
         }
     }
 
@@ -416,8 +511,9 @@ impl Workspaces {
         }
         self.list.remove(position);
         self.last_active.remove(&id);
-        // The space's pinned tabs and folders go with it.
+        // The space's pinned tabs, folders and unloaded tabs go with it.
         self.pins.retain(|pin| pin.space != id);
+        self.unloaded.retain(|tab| tab.space != id);
         self.folders.retain(|folder| folder.space != id);
         self.save();
         for tab in doomed {
@@ -477,11 +573,14 @@ impl Workspaces {
         id
     }
 
-    /// The current space's ordinary (unpinned) tabs, in creation order.
-    pub(crate) fn regular_tabs(&self, window: &ServoShellWindow) -> Vec<WebViewId> {
-        self.current_tabs(window)
+    /// The current space's ordinary (unpinned) tabs, open or unloaded, in sidebar order.
+    pub(crate) fn regular_entries(&self, window: &ServoShellWindow) -> Vec<TabEntry> {
+        self.entries_in(window, self.current)
             .into_iter()
-            .filter(|id| self.pin_for_webview(*id).is_none())
+            .filter(|entry| match entry {
+                TabEntry::Live(id) => self.pin_for_webview(*id).is_none(),
+                TabEntry::Unloaded(_) => true,
+            })
             .collect()
     }
 
@@ -788,5 +887,156 @@ impl Workspaces {
             .map(|pin| self.pin_json(pin, window, active))
             .collect();
         json!({ "folders": folders, "pins": loose })
+    }
+}
+
+/// Unloading tabs to save memory, like Zen's tab unloader.
+impl Workspaces {
+    /// Unload an open tab: its `WebView` is closed (freeing the page's memory) but the tab
+    /// stays in the sidebar. Pinned tabs and Essentials just lose their page, as when the
+    /// user unloads them. Never unloads the active tab. Returns whether it was unloaded.
+    pub(crate) fn unload_tab(
+        &mut self,
+        window: &ServoShellWindow,
+        webview: WebViewId,
+        key: u32,
+        favicon: Option<String>,
+    ) -> bool {
+        if window.active_webview().map(|view| view.id()) == Some(webview) || self.is_unloaded(key) {
+            return false;
+        }
+        let Some(view) = window.webview_by_id(webview) else {
+            return false;
+        };
+        if self.pin_for_webview(webview).is_none() {
+            let Some(url) = view.url() else {
+                return false;
+            };
+            self.unloaded.push(UnloadedTab {
+                key,
+                url: url.to_string(),
+                title: view.page_title().unwrap_or_default(),
+                custom_title: self.custom_titles.remove(&webview),
+                favicon,
+                space: self.tab_workspace.get(&webview).copied().unwrap_or(self.current),
+                order: self.order_of(webview),
+            });
+        }
+        crate::desktop::diagnostics::log(format!("unloading tab {webview:?}"));
+        window.queue_user_interface_command(UserInterfaceCommand::CloseWebView(webview));
+        true
+    }
+
+    /// Load an unloaded tab again (it becomes the active tab).
+    pub(crate) fn restore_tab(&mut self, window: &ServoShellWindow, key: u32) {
+        let Some(tab) = self.unloaded.iter().find(|tab| tab.key == key) else {
+            return;
+        };
+        let Ok(url) = url::Url::parse(&tab.url) else {
+            return;
+        };
+        crate::desktop::diagnostics::log(format!("reloading unloaded tab {}", tab.url));
+        // Show the tab's space (it may be another one, e.g. when cycling tabs).
+        self.current = tab.space;
+        self.pending_restore = Some(key);
+        self.awaiting_new_tab = true;
+        window.queue_user_interface_command(UserInterfaceCommand::NewWebViewWithUrl(url));
+    }
+
+    /// Tabs that were loaded again since the last call: (WebView, sidebar key, favicon).
+    pub(crate) fn take_restored(&mut self) -> Vec<(WebViewId, u32, Option<String>)> {
+        std::mem::take(&mut self.restored)
+    }
+
+    pub(crate) fn is_unloaded(&self, key: u32) -> bool {
+        self.unloaded.iter().any(|tab| tab.key == key)
+    }
+
+    /// Forget an unloaded tab (the user closed it).
+    pub(crate) fn close_unloaded(&mut self, key: u32) {
+        self.unloaded.retain(|tab| tab.key != key);
+    }
+
+    pub(crate) fn rename_unloaded(&mut self, key: u32, title: &str) {
+        let title = title.trim();
+        if let Some(tab) = self.unloaded.iter_mut().find(|tab| tab.key == key) {
+            tab.custom_title = (!title.is_empty()).then(|| title.chars().take(80).collect());
+        }
+    }
+
+    pub(crate) fn move_unloaded_to_space(&mut self, key: u32, space: u32) {
+        if !self.list.iter().any(|workspace| workspace.id == space) {
+            return;
+        }
+        if let Some(tab) = self.unloaded.iter_mut().find(|tab| tab.key == key) {
+            tab.space = space;
+        }
+    }
+
+    /// The page of an unloaded tab, removing it from the list (it's being opened elsewhere,
+    /// e.g. in split view).
+    pub(crate) fn take_unloaded_url(&mut self, key: u32) -> Option<url::Url> {
+        let position = self.unloaded.iter().position(|tab| tab.key == key)?;
+        let tab = self.unloaded.remove(position);
+        url::Url::parse(&tab.url).ok()
+    }
+
+    /// Pin an unloaded tab (to the current space or Essentials); it stays unloaded.
+    pub(crate) fn pin_unloaded(&mut self, key: u32, essential: bool) {
+        let Some(position) = self.unloaded.iter().position(|tab| tab.key == key) else {
+            return;
+        };
+        let tab = self.unloaded.remove(position);
+        let id = self.next_id();
+        self.pins.push(Pin {
+            id,
+            url: tab.url,
+            title: tab.title,
+            custom_title: tab.custom_title,
+            favicon: tab.favicon,
+            space: if essential { ESSENTIALS } else { self.current },
+            folder: None,
+            webview: None,
+        });
+        self.save();
+    }
+
+    /// The sidebar row of an unloaded tab.
+    pub(crate) fn unloaded_json(&self, key: u32) -> Option<Value> {
+        let tab = self.unloaded.iter().find(|tab| tab.key == key)?;
+        let title = tab.custom_title.clone().unwrap_or_else(|| {
+            if tab.title.is_empty() { tab.url.clone() } else { tab.title.clone() }
+        });
+        Some(json!({
+            "id": tab.key,
+            "title": title,
+            "url": tab.url,
+            "active": false,
+            "loading": self.pending_restore == Some(tab.key),
+            "favicon": tab.favicon,
+            "loaded": false,
+        }))
+    }
+
+    /// Open tabs (in any space) that may be unloaded, least recently used first, with how long
+    /// ago each was last used. Never the active tab or one in `keep` (e.g. playing media).
+    pub(crate) fn unload_candidates(
+        &self,
+        window: &ServoShellWindow,
+        keep: &HashSet<WebViewId>,
+    ) -> Vec<(WebViewId, Duration)> {
+        let active = window.active_webview().map(|view| view.id());
+        let now = Instant::now();
+        let mut candidates: Vec<(WebViewId, Duration)> = window
+            .webview_ids()
+            .into_iter()
+            .filter(|id| Some(*id) != active && !keep.contains(id))
+            .filter_map(|id| {
+                let used = self.last_used.get(&id)?;
+                Some((id, now.saturating_duration_since(*used)))
+            })
+            .collect();
+        candidates.sort_by_key(|(_, idle)| std::cmp::Reverse(*idle));
+        candidates
     }
 }

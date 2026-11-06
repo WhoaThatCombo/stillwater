@@ -52,6 +52,12 @@ use crate::dom::workerglobalscope::WorkerGlobalScope;
 
 /// The maximum object depth logged by console methods.
 const MAX_LOG_DEPTH: usize = 10;
+/// How deep the object previews sent to devtools go (prototypes count as a level).
+#[cfg(feature = "devtools")]
+const MAX_PREVIEW_DEPTH: usize = 3;
+/// How many properties of each object the devtools previews include.
+#[cfg(feature = "devtools")]
+const MAX_PREVIEW_PROPERTIES: usize = 32;
 /// The maximum elements in an object logged by console methods.
 const MAX_LOG_CHILDREN: usize = 15;
 
@@ -100,7 +106,7 @@ impl Console {
             let remaining = &messages[consumed..];
 
             #[cfg(feature = "devtools")]
-            {
+            if global.devtools_chan().is_some() {
                 let mut arguments: Vec<DebuggerValue> =
                     vec![DebuggerValue::StringValue(formatted.clone())];
                 for msg in remaining {
@@ -111,6 +117,8 @@ impl Console {
                     ));
                 }
                 devtools_arguments = arguments;
+            } else {
+                devtools_arguments = Vec::new();
             }
 
             let embedder_msg = if remaining.is_empty() {
@@ -123,20 +131,24 @@ impl Console {
         } else {
             #[cfg(feature = "devtools")]
             {
-                let arguments: Vec<DebuggerValue> = messages
-                    .iter()
-                    .map(|msg| {
-                        devtools::console_argument_from_handle_value(cx, *msg, &mut Vec::new())
-                    })
-                    .collect();
-                devtools_arguments = arguments;
+                // Previews are only useful (and can be costly to build) with devtools attached.
+                devtools_arguments = if global.devtools_chan().is_some() {
+                    messages
+                        .iter()
+                        .map(|msg| {
+                            devtools::console_argument_from_handle_value(cx, *msg, &mut Vec::new())
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
             }
 
             stringify_handle_values(cx, &messages)
         };
 
         #[cfg(feature = "devtools")]
-        {
+        if global.devtools_chan().is_some() {
             let stacktrace =
                 (include_stacktrace == IncludeStackTrace::Yes).then_some(get_js_stack(cx));
             Console::send_to_devtools(
@@ -251,6 +263,12 @@ mod devtools {
                     // FIXME: Handle this properly
                     return Ok(DebuggerValue::StringValue("[circular]".into()));
                 }
+                // Shared (non-circular) references are visited again from every path that
+                // reaches them, so an unbounded preview of a large object graph grows
+                // exponentially (Twitch's bot-check script logged one and used >500 MB/s).
+                if seen.len() >= MAX_PREVIEW_DEPTH {
+                    return Ok(DebuggerValue::StringValue("[object]".into()));
+                }
 
                 seen.push(handle_value.asBits_);
                 rooted!(&in(cx) let object = handle_value.to_object());
@@ -337,6 +355,9 @@ mod devtools {
 
         let mut entries = Vec::new();
         for_of(cx, iterator.handle(), |cx, entry| {
+            if entries.len() >= MAX_PREVIEW_PROPERTIES {
+                return Ok(std::ops::ControlFlow::Break(()));
+            }
             if !entry.is_object() {
                 return Err(().into());
             }
@@ -413,7 +434,7 @@ mod devtools {
             return None;
         }
 
-        for id in ids.iter() {
+        for id in ids.iter().take(MAX_PREVIEW_PROPERTIES) {
             rooted!(&in(cx) let id = *id);
             rooted!(&in(cx) let mut descriptor = PropertyDescriptor::default());
 
@@ -1134,7 +1155,7 @@ impl consoleMethods<crate::DomTypeHolder> for Console {
         };
 
         #[cfg(feature = "devtools")]
-        {
+        if global.devtools_chan().is_some() {
             let data =
                 devtools::console_argument_from_handle_value(cx, tabular_data, &mut Vec::new());
 

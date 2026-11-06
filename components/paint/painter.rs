@@ -840,6 +840,11 @@ impl Painter {
         self.pending_frames.set(self.pending_frames.get() - 1);
     }
 
+    /// Drop WebRender's caches (textures, glyphs, rasterized images); they are rebuilt as needed.
+    pub(crate) fn notify_memory_pressure(&self) {
+        self.webrender_api.notify_memory_pressure();
+    }
+
     pub(crate) fn report_memory(&self) -> MemoryReport {
         self.webrender_api
             .report_memory(MallocSizeOfOps::new(servo_allocator::usable_size, None))

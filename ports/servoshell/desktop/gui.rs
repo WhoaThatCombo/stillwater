@@ -121,6 +121,22 @@ pub struct Gui {
     target_os = "freebsd",
     target_os = "macos"
 ))]
+/// Map a font file into memory for the life of the process. The CJK fallback fonts are big
+/// (msyh.ttc alone is ~19 MB); reading them made two private copies (egui clones owned font
+/// data), while mapped pages are shared with the file cache and only loaded when used.
+fn map_font_file(path: &Path) -> std::io::Result<&'static [u8]> {
+    let file = fs::File::open(path)?;
+    // SAFETY: system font files aren't modified while they're in use.
+    let map = unsafe { memmap2::Mmap::map(&file)? };
+    Ok(Box::leak(Box::new(map)))
+}
+
+#[cfg(any(
+    target_os = "windows",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+))]
 fn load_cjk_fonts(font_candidates: &[(&str, &str)]) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     let mut loaded_font_names = Vec::new();
@@ -128,12 +144,12 @@ fn load_cjk_fonts(font_candidates: &[(&str, &str)]) -> FontDefinitions {
     for (path_str, font_name) in font_candidates.iter() {
         let font_path = Path::new(path_str);
         if font_path.exists() {
-            match fs::read(font_path) {
+            match map_font_file(font_path) {
                 Ok(bytes) => {
                     if !fonts.font_data.contains_key(*font_name) {
                         fonts
                             .font_data
-                            .insert(font_name.to_string(), Arc::new(FontData::from_owned(bytes)));
+                            .insert(font_name.to_string(), Arc::new(FontData::from_static(bytes)));
                         loaded_font_names.push(font_name.to_string());
                         info!("Loaded font: {}", font_name);
                     }

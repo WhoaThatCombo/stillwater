@@ -150,6 +150,7 @@ function tabMenu(tab, label) {
     ...otherSpaces().map((space) => ({ label: `Move to ${space.name}`, run: () => send("tab-move-space", `${tab.id}\t${space.id}`) })),
     { label: "Report site isn't working", run: () => send("report-site", tab.id) },
     "-",
+    ...(tab.loaded && !tab.active ? [{ label: "Unload (free memory)", run: () => send("tab-unload", tab.id) }] : []),
     { label: "Close tab", run: () => send("close", tab.id) },
   ];
 }
@@ -191,7 +192,7 @@ function renderRow(item, isPin) {
   row.className = "tab" +
     (item.active ? " selected" : "") +
     (item.loading ? " loading" : "") +
-    (isPin && !item.loaded ? " unloaded" : "");
+    (item.loaded === false ? " unloaded" : "");
   row.title = item.url;
 
   const label = document.createElement("span");
@@ -398,6 +399,15 @@ function renderSettings() {
     return button;
   }));
   $("compact-toggle").setAttribute("aria-pressed", String(state.compact));
+  $("unload-choice").replaceChildren(...(settings.tabUnloadChoices || []).map((minutes) => {
+    const button = document.createElement("button");
+    button.textContent = minutes === 0 ? "Off" : minutes < 60 ? `${minutes}m` : `${minutes / 60}h`;
+    button.title = minutes === 0 ? "Never unload tabs on a timer" : `After ${minutes} minutes`;
+    button.setAttribute("aria-pressed", String(minutes === settings.tabUnloadMinutes));
+    button.addEventListener("click", () => send("set-tab-unload", minutes));
+    return button;
+  }));
+  $("lowmem-toggle").setAttribute("aria-pressed", String(!!settings.unloadOnLowMemory));
   const adblock = state.adblock || {};
   $("adblock-toggle").setAttribute("aria-pressed", String(!!adblock.enabled));
   $("adblock-hint").textContent = adblock.enabled && !adblock.ready
@@ -484,6 +494,7 @@ document.querySelectorAll("#theme-choice button").forEach((button) => {
   button.addEventListener("click", () => send("set-theme", button.dataset.theme));
 });
 $("compact-toggle").addEventListener("click", () => send("toggle-compact"));
+$("lowmem-toggle").addEventListener("click", () => send("set-unload-low-memory", state.settings && state.settings.unloadOnLowMemory ? "0" : "1"));
 $("adblock-toggle").addEventListener("click", () => send("adblock-enabled", (state.adblock && state.adblock.enabled) ? "0" : "1"));
 $("shield").addEventListener("click", (event) => {
   event.stopPropagation();

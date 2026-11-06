@@ -79,10 +79,19 @@ impl ThemeChoice {
     }
 }
 
+/// Choices for "Unload inactive tabs after", in minutes (0 = never).
+const TAB_UNLOAD_CHOICES: &[u32] = &[0, 10, 30, 60, 120];
+/// Like Zen's tab unloader, background tabs are unloaded after this long by default.
+const DEFAULT_TAB_UNLOAD_MINUTES: u32 = 30;
+
 pub(crate) struct Settings {
     pub(crate) theme: ThemeChoice,
     search_engine: String,
     pub(crate) compact: bool,
+    /// Unload background tabs that haven't been used for this many minutes (0 = never).
+    pub(crate) tab_unload_minutes: u32,
+    /// Unload the least recently used background tabs when Windows runs low on memory.
+    pub(crate) unload_on_low_memory: bool,
     path: Option<PathBuf>,
 }
 
@@ -105,6 +114,12 @@ impl Settings {
                 .unwrap_or(SEARCH_ENGINES[0].0)
                 .to_owned(),
             compact: saved["compact"].as_bool().unwrap_or(false),
+            tab_unload_minutes: saved["tabUnloadMinutes"]
+                .as_u64()
+                .map(|minutes| minutes as u32)
+                .filter(|minutes| TAB_UNLOAD_CHOICES.contains(minutes))
+                .unwrap_or(DEFAULT_TAB_UNLOAD_MINUTES),
+            unload_on_low_memory: saved["unloadOnLowMemory"].as_bool().unwrap_or(true),
             path,
         };
         settings.publish_search_template();
@@ -119,6 +134,8 @@ impl Settings {
             "theme": self.theme.id(),
             "searchEngine": self.search_engine,
             "compact": self.compact,
+            "tabUnloadMinutes": self.tab_unload_minutes,
+            "unloadOnLowMemory": self.unload_on_low_memory,
         });
         let result = path
             .parent()
@@ -163,6 +180,18 @@ impl Settings {
         }
     }
 
+    pub(crate) fn set_tab_unload_minutes(&mut self, minutes: u32) {
+        if TAB_UNLOAD_CHOICES.contains(&minutes) {
+            self.tab_unload_minutes = minutes;
+            self.save();
+        }
+    }
+
+    pub(crate) fn set_unload_on_low_memory(&mut self, enabled: bool) {
+        self.unload_on_low_memory = enabled;
+        self.save();
+    }
+
     pub(crate) fn to_json(&self) -> Value {
         let engines: Vec<Value> = SEARCH_ENGINES
             .iter()
@@ -172,6 +201,9 @@ impl Settings {
             "theme": self.theme.id(),
             "searchEngine": self.search_engine,
             "searchEngines": engines,
+            "tabUnloadMinutes": self.tab_unload_minutes,
+            "tabUnloadChoices": TAB_UNLOAD_CHOICES,
+            "unloadOnLowMemory": self.unload_on_low_memory,
             "version": crate::desktop::updater::CURRENT_VERSION,
         })
     }

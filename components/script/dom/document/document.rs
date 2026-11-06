@@ -687,6 +687,10 @@ pub(crate) struct Document {
     /// The lifetime of an intersection observer is specified at
     /// <https://github.com/w3c/IntersectionObserver/issues/525>.
     intersection_observers: DomRefCell<Vec<Dom<IntersectionObserver>>>,
+    /// Images with `loading=lazy` that are waiting to come near the viewport to be fetched.
+    lazy_load_images: DomRefCell<Vec<Dom<HTMLImageElement>>>,
+    /// Iframes with `loading=lazy` that are waiting to come near the viewport to navigate.
+    lazy_load_iframes: DomRefCell<Vec<Dom<HTMLIFrameElement>>>,
     /// The node that is currently highlighted by the devtools
     highlighted_dom_node: MutNullableDom<Node>,
     /// Resolved LCP candidate elements, keyed by their [LCPCandidateID].
@@ -3661,12 +3665,95 @@ impl Document {
             .retain(|observer| *observer != intersection_observer)
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#start-intersection-observing-a-lazy-loading-element>
+    pub(crate) fn add_lazy_load_image(&self, image: &HTMLImageElement) {
+        let mut images = self.lazy_load_images.borrow_mut();
+        if !images.iter().any(|other| *other == image) {
+            images.push(Dom::from_ref(image));
+        }
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#start-intersection-observing-a-lazy-loading-element>
+    pub(crate) fn add_lazy_load_iframe(&self, iframe: &HTMLIFrameElement) {
+        let mut iframes = self.lazy_load_iframes.borrow_mut();
+        if !iframes.iter().any(|other| *other == iframe) {
+            iframes.push(Dom::from_ref(iframe));
+        }
+    }
+
+    /// Fetch the lazy-loading images (and navigate the lazy iframes) that have come within the lazy load root margin of the
+    /// viewport (what the spec's lazy load intersection observer does). Images without a box,
+    /// e.g. inside `display: none`, wait. This keeps pages with long feeds of `loading=lazy`
+    /// images from downloading and decoding all of them up front.
+    fn update_lazy_load_images(&self, cx: &mut JSContext) {
+        // Drop images that were loaded another way (e.g. their `loading` attribute changed).
+        self.lazy_load_images
+            .borrow_mut()
+            .retain(|image| image.is_waiting_for_lazy_load());
+        self.lazy_load_iframes.borrow_mut().retain(|iframe| {
+            iframe.is_waiting_for_lazy_load() && iframe.upcast::<Node>().is_connected()
+        });
+        if self.lazy_load_images.borrow().is_empty() && self.lazy_load_iframes.borrow().is_empty()
+        {
+            return;
+        }
+        self.window()
+            .reflow_for_non_flushing_update_the_rendering_queries(cx);
+
+        // The "lazy load root margin" is implementation-defined; Chrome uses 1250px or more.
+        let margin = app_units::Au::from_f32_px(1250.);
+        let viewport = self.window().viewport_details().size;
+        let root = euclid::Rect::new(
+            euclid::Point2D::new(-margin, -margin),
+            euclid::Size2D::new(
+                app_units::Au::from_f32_px(viewport.width) + margin * 2,
+                app_units::Au::from_f32_px(viewport.height) + margin * 2,
+            ),
+        );
+        let near_viewport = |node: &Node| {
+            node.border_box_without_reflow().is_some_and(|rect| {
+                root.intersects(&rect) || (rect.is_empty() && root.contains(rect.origin))
+            })
+        };
+        let ready: Vec<DomRoot<HTMLImageElement>> = {
+            let mut images = self.lazy_load_images.borrow_mut();
+            let mut ready = vec![];
+            images.retain(|image| {
+                let near = near_viewport(image.upcast::<Node>());
+                if near {
+                    ready.push(DomRoot::from_ref(&**image));
+                }
+                !near
+            });
+            ready
+        };
+        let ready_iframes: Vec<DomRoot<HTMLIFrameElement>> = {
+            let mut iframes = self.lazy_load_iframes.borrow_mut();
+            let mut ready = vec![];
+            iframes.retain(|iframe| {
+                let near = near_viewport(iframe.upcast::<Node>());
+                if near {
+                    ready.push(DomRoot::from_ref(&**iframe));
+                }
+                !near
+            });
+            ready
+        };
+        for image in ready {
+            image.resume_lazy_load(cx);
+        }
+        for iframe in ready_iframes {
+            iframe.resume_lazy_load(cx);
+        }
+    }
+
     /// <https://w3c.github.io/IntersectionObserver/#update-intersection-observations-algo>
     pub(crate) fn update_intersection_observer_steps(
         &self,
         cx: &mut JSContext,
         time: CrossProcessInstant,
     ) {
+        self.update_lazy_load_images(cx);
         if self.intersection_observers.borrow().is_empty() {
             return;
         }
@@ -4383,6 +4470,8 @@ impl Document {
             has_trustworthy_ancestor_origin: Cell::new(has_trustworthy_ancestor_origin),
             intersection_observer_task_queued: Cell::new(false),
             intersection_observers: Default::default(),
+            lazy_load_images: Default::default(),
+            lazy_load_iframes: Default::default(),
             highlighted_dom_node: Default::default(),
             lcp_candidates: DomRefCell::new(Default::default()),
             paint_timing_info: Cell::new(PaintTimingInfo::now()),

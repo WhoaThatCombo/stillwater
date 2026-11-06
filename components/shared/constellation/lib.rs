@@ -103,6 +103,8 @@ pub enum EmbedderToConstellationMessage {
     EvaluateJavaScript(WebViewId, JavaScriptEvaluationId, String),
     /// Create a memory report and return it via the [`GenericCallback`]
     CreateMemoryReport(GenericCallback<MemoryReportResult>),
+    /// Run a full, shrinking JavaScript garbage collection in every script thread.
+    CollectGarbage,
     /// Sends the generated image key to the image cache associated with this pipeline.
     SendImageKeysForPipeline(PipelineId, Vec<ImageKey>),
     /// A set of preferences were updated with the given new values.

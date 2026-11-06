@@ -71,6 +71,7 @@ mod from_embedder {
                 Self::PaintMetric(..) => target!("PaintMetric"),
                 Self::EvaluateJavaScript(..) => target!("EvaluateJavaScript"),
                 Self::CreateMemoryReport(..) => target!("CreateMemoryReport"),
+                Self::CollectGarbage => target!("CollectGarbage"),
                 Self::SendImageKeysForPipeline(..) => target!("SendImageKeysForPipeline"),
                 Self::PreferencesUpdated(..) => target!("PreferencesUpdated"),
                 Self::NoLongerWaitingOnAsynchronousImageUpdates(..) => {
