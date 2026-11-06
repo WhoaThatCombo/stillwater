@@ -147,6 +147,7 @@ function tabMenu(tab, label) {
     { label: "Add to Essentials", run: () => send("essential", tab.id) },
     { label: "Rename", run: () => startRename(label, tabLabel(tab), (title) => send("tab-rename", `${tab.id}\t${title}`)) },
     ...otherSpaces().map((space) => ({ label: `Move to ${space.name}`, run: () => send("tab-move-space", `${tab.id}\t${space.id}`) })),
+    { label: "Report site isn't working", run: () => send("report-site", tab.id) },
     "-",
     { label: "Close tab", run: () => send("close", tab.id) },
   ];
@@ -178,6 +179,7 @@ function pinMenu(pin, label, essential) {
     run: () => send("pin-essential", pin.pinId),
   });
   items.push({ label: "Unpin", run: () => send("unpin", pin.pinId) });
+  if (pin.loaded) items.push({ label: "Report site isn't working", run: () => send("report-site", "") });
   return items;
 }
 
@@ -319,13 +321,6 @@ function renderWorkspaces() {
   root.style.setProperty("--sidebar-bg", state.background);
 }
 
-function renderCaption() {
-  $("caption").hidden = !state.frameless;
-  const max = $("win-max");
-  max.textContent = state.maximized ? "" : "";
-  max.title = state.maximized ? "Restore" : "Maximise";
-}
-
 function renderUpdate() {
   const button = $("update");
   const update = state.update;
@@ -367,7 +362,6 @@ function renderSettings() {
 }
 
 function render() {
-  renderCaption();
   renderSettings();
   renderUpdate();
   if (state.workspaces) renderWorkspaces();
@@ -432,6 +426,7 @@ update.addEventListener("click", () => send("update"));
 // Settings panel (the gear in the bottom row).
 const settingsPanel = $("settings");
 $("settings-button").addEventListener("click", () => { settingsPanel.hidden = false; });
+$("main-menu").addEventListener("click", () => { settingsPanel.hidden = false; });
 $("settings-close").addEventListener("click", () => { settingsPanel.hidden = true; });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !settingsPanel.hidden) settingsPanel.hidden = true;
@@ -441,9 +436,7 @@ document.querySelectorAll("#theme-choice button").forEach((button) => {
 });
 $("compact-toggle").addEventListener("click", () => send("toggle-compact"));
 $("check-updates").addEventListener("click", () => send("check-updates"));
-$("win-min").addEventListener("click", () => send("win-min"));
-$("win-max").addEventListener("click", () => send("win-max"));
-$("win-close").addEventListener("click", () => send("win-close"));
+$("report-site").addEventListener("click", () => send("report-site", ""));
 
 const isDragSurface = (target) =>
   target.matches("[data-drag], body, #tab-area, #tabs, #pinned, #essentials, #footer, #workspaces, #workspace-header, .spacer");

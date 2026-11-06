@@ -57,8 +57,12 @@ first install.
   colour, and the colour tints the whole window. Space definitions are saved between launches.
 - **Compact mode**: the sidebar hides and slides back in when your mouse touches the left edge.
 - **Rounded content card**: web pages sit in an inset, rounded frame, like Zen.
-- **No title bar**: like Zen, the page runs to the top edge. Minimise, maximise and close sit in the sidebar,
-  and dragging empty sidebar space moves the window (`--native-titlebar` brings the Windows title bar back).
+- **No title bar**: like Zen, the page runs to the top edge. Touch the top of the window and a slim bar with
+  minimise, maximise and close slides in; drag it (or empty sidebar space) to move the window
+  (`--native-titlebar` brings the Windows title bar back).
+- **Site compatibility**: Servo's experimental web features are on, small built-in shims fill web APIs Servo
+  lacks (`ports/servoshell/desktop/compat.js`), and a disk cache speeds up revisits. **Report site isn't working**
+  in a tab's menu opens a pre-filled GitHub issue; `tools/sitecheck` sweeps sites and diagnoses failures.
 - **Settings** (gear at the bottom of the sidebar, or <kbd>Ctrl</kbd>+<kbd>,</kbd>): light, dark or system
   appearance (websites that support dark mode follow along), your search engine (DuckDuckGo, Google,
   Bing or Brave Search), compact mode, and checking for updates.

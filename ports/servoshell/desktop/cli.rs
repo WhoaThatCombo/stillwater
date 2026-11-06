@@ -20,7 +20,7 @@ pub fn main() {
 
     // Skip the first argument, which is the binary name.
     let args: Vec<String> = env::args().skip(1).collect();
-    let (opts, preferences, servoshell_preferences) = match parse_command_line_arguments(&*args) {
+    let (opts, mut preferences, servoshell_preferences) = match parse_command_line_arguments(&*args) {
         #[cfg(not(feature = "multiprocess"))]
         ArgumentParsingResult::ContentProcess(_) => {
             log::error!("IPC not enabled, cannot use contentprocesses");
@@ -52,6 +52,23 @@ pub fn main() {
         )
     {
         return;
+    }
+
+    // Turn on Servo's experimental web features: in tools/sitecheck they took usable sites
+    // from 65 to 71 of 81 and fixed blank pages. STILLWATER_NO_EXPERIMENTAL opts out.
+    if env::var_os("STILLWATER_NO_EXPERIMENTAL").is_none() {
+        for name in crate::prefs::EXPERIMENTAL_PREFS {
+            preferences.set_value(name, servo::PrefValue::Bool(true));
+        }
+    }
+
+    // Keep a disk cache so revisiting sites doesn't re-download everything. Servo only
+    // enables its HTTP disk cache when it's given a folder.
+    if preferences.network_http_disk_cache.is_empty() &&
+        let Some(dir) = dirs::data_local_dir()
+    {
+        preferences.network_http_disk_cache =
+            dir.join("Stillwater").join("cache").to_string_lossy().into_owned();
     }
 
     diagnostics::init();

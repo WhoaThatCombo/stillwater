@@ -9,17 +9,15 @@
   <link rel="stylesheet" href="servo:sidebar/zen-sidebar.css">
 </head>
 <body>
+  <!-- Zen's top row: menu and sidebar toggle on the left, navigation on the right.
+       The window buttons live in the hover-reveal top bar over the page. -->
   <header id="toolbar" data-drag>
+    <button id="main-menu" class="icon" title="Menu and settings (Ctrl+,)">&#xE712;</button>
     <button id="compact" class="icon" title="Toggle compact mode (Ctrl+Alt+C)">&#xE89F;</button>
+    <span class="spacer" data-drag></span>
     <button id="back" class="icon" title="Back">&#xE72B;</button>
     <button id="forward" class="icon" title="Forward">&#xE72A;</button>
     <button id="reload" class="icon" title="Reload">&#xE72C;</button>
-    <span class="spacer" data-drag></span>
-    <span id="caption" hidden>
-      <button id="win-min" class="icon caption" title="Minimise">&#xE921;</button>
-      <button id="win-max" class="icon caption" title="Maximise">&#xE922;</button>
-      <button id="win-close" class="icon caption close" title="Close">&#xE8BB;</button>
-    </span>
   </header>
 
   <div id="urlbar">
@@ -94,6 +92,12 @@
         <span class="switch" aria-hidden="true"></span>
       </button>
       <p class="hint">Ctrl+Alt+C also toggles it. Touch the window's left edge to show the sidebar.</p>
+    </div>
+
+    <div class="setting-group">
+      <h3>Help</h3>
+      <button id="report-site" class="secondary">Report a broken site</button>
+      <p class="hint">Opens a pre-filled GitHub issue for the current page in another browser. You can review it before sending.</p>
     </div>
 
     <div class="setting-group">

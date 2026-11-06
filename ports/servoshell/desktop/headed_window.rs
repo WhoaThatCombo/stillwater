@@ -753,7 +753,10 @@ impl HeadedWindow {
             // Otherwise, if the cursor is over the egui interface, forward the event.
             self.last_mouse_position
                 .get()
-                .is_none_or(|point| self.gui.borrow().is_outside_content_rect(point))
+                .is_none_or(|point| {
+                    let gui = self.gui.borrow();
+                    gui.is_outside_content_rect(point) || gui.top_bar_contains(point)
+                })
         };
 
         // Compact mode: the hidden sidebar slides out when the mouse touches the left edge.
@@ -781,6 +784,8 @@ impl HeadedWindow {
                     let previous = self.resize_direction.replace(direction);
                     if let Some(direction) = direction {
                         self.winit_window.set_cursor(resize_cursor(direction));
+                        // egui still needs the pointer position to reveal the top bar.
+                        let _ = self.gui.borrow_mut().on_window_event(&self.winit_window, &event);
                         return;
                     }
                     if previous.is_some() {
@@ -830,7 +835,11 @@ impl HeadedWindow {
                     ..
                 }
             ) &&
-            should_forward_mouse_event_to_egui()
+            should_forward_mouse_event_to_egui() &&
+            !self
+                .last_mouse_position
+                .get()
+                .is_some_and(|point| self.gui.borrow().top_bar_contains(point))
         {
             let now = std::time::Instant::now();
             let double = self

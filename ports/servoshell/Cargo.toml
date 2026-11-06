@@ -31,7 +31,7 @@ FileDescription = "Stillwater"
 LegalCopyright = "© The Servo Project Developers and Stillwater contributors"
 OriginalFilename = "Stillwater.exe"
 ProductName = "Stillwater"
-ProductVersion = "0.3.0"
+ProductVersion = "0.3.1"
 
 [features]
 # Don't add new features to `default` directly. Add to `default_base` instead.
@@ -162,7 +162,7 @@ signal-hook-registry = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 servo = { workspace = true, features = ["no-wgl"] }
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Pipes", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Pipes", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mach2 = { workspace = true }

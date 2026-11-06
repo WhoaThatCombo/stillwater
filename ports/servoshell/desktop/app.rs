@@ -118,6 +118,11 @@ impl App {
         servo.setup_logging();
 
         let user_content_manager = Rc::new(UserContentManager::new(&servo));
+        // Stillwater's compatibility shims for web APIs Servo doesn't have yet (see compat.js).
+        user_content_manager.add_script(Rc::new(UserScript::new(
+            include_str!("compat.js").to_owned(),
+            None,
+        )));
         for script in load_userscripts(self.servoshell_preferences.userscripts_directory.as_deref())
             .expect("Loading userscripts failed")
         {

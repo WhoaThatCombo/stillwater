@@ -54,6 +54,7 @@ use winit::window::Window;
 use crate::desktop::event_loop::AppEvent;
 use crate::desktop::headed_window;
 use crate::desktop::sidebar::{CONTENT_RADIUS, Sidebar, WindowAction, png_data_url};
+use crate::desktop::report;
 use crate::desktop::updater::{self, UpdateStatus};
 use crate::running_app_state::RunningAppState;
 use crate::window::{PlatformWindow, ServoShellWindow};
@@ -82,6 +83,9 @@ pub struct Gui {
 
     /// Whether the window has been shown yet (it stays hidden until its first frame).
     shown: bool,
+
+    /// Zen's hover-reveal top bar with the window buttons, while it's showing.
+    top_bar_rect: Option<egui::Rect>,
 
     /// Tabs whose page has drawn at least once (their surfaces start out white).
     painted_webviews: HashSet<WebViewId>,
@@ -246,6 +250,7 @@ impl Gui {
             status_text: None,
             pending_accesskit_updates: vec![],
             shown: false,
+            top_bar_rect: None,
             painted_webviews: HashSet::new(),
         }
     }
@@ -290,6 +295,12 @@ impl Gui {
     }
 
     /// If `position` is over the visible sidebar, return it relative to the sidebar's origin.
+    /// Whether `position` is over the top bar (window buttons), while it's showing.
+    pub(crate) fn top_bar_contains(&self, position: Point2D<f32, DeviceIndependentPixel>) -> bool {
+        self.top_bar_rect
+            .is_some_and(|rect| rect.contains(pos2(position.x, position.y)))
+    }
+
     pub(crate) fn sidebar_relative_point(
         &self,
         position: Point2D<f32, DeviceIndependentPixel>,
@@ -326,6 +337,17 @@ impl Gui {
                 WindowAction::Drag => {
                     let _ = winit_window.drag_window();
                 },
+                WindowAction::ReportSite(tab) => {
+                    let webview = tab
+                        .and_then(|id| window.webview_by_id(id))
+                        .or_else(|| window.active_webview());
+                    if let Some(webview) = webview &&
+                        let Some(url) = webview.url()
+                    {
+                        let errors = state.recent_console_errors(webview.id());
+                        report::open_externally(&report::issue_url(&url, &errors));
+                    }
+                },
                 WindowAction::CheckForUpdates => {
                     updater::check_now(headed_window.event_loop_proxy());
                 },
@@ -360,6 +382,7 @@ impl Gui {
             sidebar_rect,
             content_rect,
             painted_webviews,
+            top_bar_rect,
             ..
         } = self;
 
@@ -466,6 +489,26 @@ impl Gui {
                         Stroke::new(thickness, background),
                         StrokeKind::Middle,
                     );
+            }
+
+            // Zen's top bar: the window buttons slide in when the mouse touches the top edge
+            // and hide again when it leaves. Its empty part drags the window.
+            {
+                let winit_window = headed_window.winit_window();
+                let frameless = !winit_window.is_decorated() && !headed_window.is_fullscreen_from_document();
+                let bar = egui::Rect::from_min_max(
+                    pos2(new_content_rect.min.x, full_rect.min.y),
+                    pos2(full_rect.max.x, full_rect.min.y + TOP_BAR_HEIGHT),
+                );
+                let pointer = ctx.input(|input| input.pointer.hover_pos());
+                let reveal = pointer.is_some_and(|p| p.y <= full_rect.min.y + 8.0 && p.x >= bar.min.x);
+                let keep = top_bar_rect.is_some() && pointer.is_some_and(|p| bar.expand(4.0).contains(p));
+                // STILLWATER_SHOW_TOP_BAR keeps it visible (for screenshots in tests).
+                let forced = std::env::var_os("STILLWATER_SHOW_TOP_BAR").is_some();
+                *top_bar_rect = (frameless && (reveal || keep || forced)).then_some(bar);
+            }
+            if let Some(bar) = *top_bar_rect {
+                draw_top_bar(ctx, bar, background, theme, headed_window, window);
             }
 
             // Paint the sidebar's surface every frame, even while it's collapsed in compact
@@ -633,4 +676,95 @@ fn load_pending_favicons(window: &ServoShellWindow, sidebar: &mut Sidebar) {
             sidebar.set_favicon(id, data_url);
         }
     }
+}
+
+/// Height of Zen's hover-reveal top bar.
+const TOP_BAR_HEIGHT: f32 = 36.0;
+
+/// Draw the top bar's background and Windows-style caption buttons, and act on clicks.
+fn draw_top_bar(
+    ctx: &egui::Context,
+    bar: egui::Rect,
+    background: Color32,
+    theme: servo::Theme,
+    headed_window: &headed_window::HeadedWindow,
+    window: &ServoShellWindow,
+) {
+    let foreground = match theme {
+        servo::Theme::Dark => Color32::from_rgba_unmultiplied(255, 255, 255, 210),
+        servo::Theme::Light => Color32::from_rgba_unmultiplied(0, 0, 0, 200),
+    };
+    let hover = match theme {
+        servo::Theme::Dark => Color32::from_rgba_unmultiplied(255, 255, 255, 22),
+        servo::Theme::Light => Color32::from_rgba_unmultiplied(0, 0, 0, 18),
+    };
+    let winit_window = headed_window.winit_window();
+    egui::Area::new(Id::new("top-bar"))
+        .order(Order::Foreground)
+        .fixed_pos(bar.min)
+        .show(ctx, |ui| {
+            let painter = ui.painter().clone();
+            painter.rect_filled(bar, CornerRadius::ZERO, background);
+
+            // The empty part of the bar moves the window; double-click maximises.
+            let drag = ui.interact(bar, Id::new("top-bar-drag"), egui::Sense::click_and_drag());
+            if drag.double_clicked() {
+                winit_window.set_maximized(!winit_window.is_maximized());
+            } else if drag.drag_started() {
+                let _ = winit_window.drag_window();
+            }
+
+            let width = 46.0;
+            let buttons = ["close", "maximize", "minimize"];
+            for (index, name) in buttons.iter().enumerate() {
+                let rect = egui::Rect::from_min_size(
+                    pos2(bar.max.x - width * (index as f32 + 1.0), bar.min.y),
+                    egui::vec2(width, bar.height()),
+                );
+                let response = ui.interact(rect, Id::new(("caption", *name)), egui::Sense::click());
+                let is_close = *name == "close";
+                if response.hovered() {
+                    let fill = if is_close { Color32::from_rgb(196, 43, 28) } else { hover };
+                    painter.rect_filled(rect, CornerRadius::ZERO, fill);
+                }
+                let color = if is_close && response.hovered() { Color32::WHITE } else { foreground };
+                let stroke = Stroke::new(1.0_f32, color);
+                let c = rect.center();
+                match *name {
+                    "minimize" => {
+                        painter.line_segment([pos2(c.x - 5.0, c.y), pos2(c.x + 5.0, c.y)], stroke);
+                    },
+                    "maximize" if winit_window.is_maximized() => {
+                        // Restore: two overlapping squares.
+                        painter.rect_stroke(
+                            egui::Rect::from_min_max(pos2(c.x - 5.0, c.y - 3.0), pos2(c.x + 3.0, c.y + 5.0)),
+                            CornerRadius::ZERO,
+                            stroke,
+                            StrokeKind::Middle,
+                        );
+                        painter.line_segment([pos2(c.x - 3.0, c.y - 5.0), pos2(c.x + 5.0, c.y - 5.0)], stroke);
+                        painter.line_segment([pos2(c.x + 5.0, c.y - 5.0), pos2(c.x + 5.0, c.y + 3.0)], stroke);
+                    },
+                    "maximize" => {
+                        painter.rect_stroke(
+                            egui::Rect::from_center_size(c, egui::vec2(10.0, 10.0)),
+                            CornerRadius::ZERO,
+                            stroke,
+                            StrokeKind::Middle,
+                        );
+                    },
+                    _ => {
+                        painter.line_segment([pos2(c.x - 5.0, c.y - 5.0), pos2(c.x + 5.0, c.y + 5.0)], stroke);
+                        painter.line_segment([pos2(c.x - 5.0, c.y + 5.0), pos2(c.x + 5.0, c.y - 5.0)], stroke);
+                    },
+                }
+                if response.clicked() {
+                    match *name {
+                        "minimize" => winit_window.set_minimized(true),
+                        "maximize" => winit_window.set_maximized(!winit_window.is_maximized()),
+                        _ => window.schedule_close(),
+                    }
+                }
+            }
+        });
 }

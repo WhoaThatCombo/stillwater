@@ -54,6 +54,8 @@ pub(crate) enum WindowAction {
     Update,
     /// Check GitHub for an update right now (settings panel).
     CheckForUpdates,
+    /// Report a tab (or the active one) as a broken site.
+    ReportSite(Option<WebViewId>),
 }
 
 struct SidebarDelegate {
@@ -512,6 +514,10 @@ impl Sidebar {
                     }
                     self.call("openSettings()");
                     layout_changed = true;
+                },
+                "report-site" => {
+                    let tab = self.webview_for_tab(window, argument);
+                    self.window_actions.push(WindowAction::ReportSite(tab));
                 },
                 "check-updates" => {
                     self.update_check = Some("Checking…".into());

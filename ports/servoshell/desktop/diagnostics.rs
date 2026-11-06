@@ -31,7 +31,11 @@ pub(crate) fn init() {
         return;
     };
     let _ = std::fs::create_dir_all(&dir);
-    let Ok(file) = File::create(dir.join("stillwater.log")) else {
+    // STILLWATER_LOG_FILE lets test copies log elsewhere instead of overwriting the user's log.
+    let path = std::env::var_os("STILLWATER_LOG_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| dir.join("stillwater.log"));
+    let Ok(file) = File::create(path) else {
         return;
     };
     let mut guard = LOG.lock().unwrap_or_else(|poison| poison.into_inner());

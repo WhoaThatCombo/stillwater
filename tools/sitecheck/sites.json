@@ -1,0 +1,14 @@
+{
+  "search": ["https://www.google.com/", "https://www.bing.com/", "https://duckduckgo.com/", "https://search.brave.com/", "https://www.startpage.com/"],
+  "video": ["https://www.youtube.com/", "https://www.twitch.tv/", "https://vimeo.com/", "https://www.dailymotion.com/", "https://www.netflix.com/", "https://www.crunchyroll.com/"],
+  "social": ["https://www.reddit.com/", "https://x.com/", "https://www.facebook.com/", "https://www.instagram.com/", "https://www.tiktok.com/", "https://www.linkedin.com/", "https://www.pinterest.com/", "https://bsky.app/", "https://www.tumblr.com/", "https://mastodon.social/explore"],
+  "chat": ["https://discord.com/", "https://web.whatsapp.com/", "https://web.telegram.org/", "https://slack.com/"],
+  "shopping": ["https://www.amazon.com/", "https://www.ebay.com/", "https://www.etsy.com/", "https://www.walmart.com/", "https://www.bestbuy.com/", "https://www.aliexpress.com/", "https://www.target.com/"],
+  "news": ["https://www.bbc.com/", "https://www.nytimes.com/", "https://www.cnn.com/", "https://www.theguardian.com/international", "https://www.reuters.com/", "https://apnews.com/", "https://www.theverge.com/", "https://arstechnica.com/", "https://news.ycombinator.com/"],
+  "reference": ["https://en.wikipedia.org/wiki/Rust_(programming_language)", "https://www.wikihow.com/Main-Page", "https://www.britannica.com/", "https://www.imdb.com/", "https://www.merriam-webster.com/"],
+  "dev": ["https://github.com/", "https://stackoverflow.com/questions", "https://developer.mozilla.org/en-US/", "https://docs.rs/", "https://crates.io/", "https://www.npmjs.com/", "https://gitlab.com/", "https://codepen.io/"],
+  "tech": ["https://www.microsoft.com/", "https://www.apple.com/", "https://www.google.com/maps", "https://store.steampowered.com/", "https://www.epicgames.com/store/", "https://www.speedtest.net/"],
+  "music": ["https://open.spotify.com/", "https://soundcloud.com/", "https://bandcamp.com/", "https://music.apple.com/"],
+  "productivity": ["https://www.notion.so/", "https://trello.com/", "https://www.figma.com/", "https://www.canva.com/", "https://docs.google.com/", "https://outlook.live.com/", "https://mail.google.com/"],
+  "other": ["https://www.weather.com/", "https://www.booking.com/", "https://www.airbnb.com/", "https://www.paypal.com/", "https://www.craigslist.org/", "https://www.fandom.com/", "https://archive.org/", "https://www.roblox.com/", "https://www.chess.com/", "https://www.duolingo.com/"]
+}

@@ -18,6 +18,7 @@ pub(crate) mod headed_window;
 mod headless_window;
 mod keyutils;
 mod protocols;
+mod report;
 mod settings;
 mod sidebar;
 mod single_instance;

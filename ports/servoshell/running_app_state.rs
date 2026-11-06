@@ -224,6 +224,8 @@ pub(crate) struct RunningAppState {
 
     /// The [`UserContentManager`] for all `WebView`s created.
     pub(crate) user_content_manager: Rc<UserContentManager>,
+    /// Each tab's most recent script errors and warnings, for broken-site reports.
+    recent_console_errors: RefCell<HashMap<WebViewId, std::collections::VecDeque<String>>>,
 
     /// Whether or not program exit has been triggered. This means that all windows
     /// will be destroyed and shutdown will start at the end of the current event loop.
@@ -297,6 +299,7 @@ impl RunningAppState {
             achieved_stable_image: Default::default(),
             exit_scheduled: Default::default(),
             user_content_manager,
+            recent_console_errors: Default::default(),
             experimental_preferences_enabled,
             accessibility_active: Cell::new(false),
         }
@@ -747,6 +750,15 @@ impl RunningAppState {
         }
     }
 
+    /// A tab's recent script errors and warnings (oldest first), for broken-site reports.
+    pub(crate) fn recent_console_errors(&self, webview: WebViewId) -> Vec<String> {
+        self.recent_console_errors
+            .borrow()
+            .get(&webview)
+            .map(|list| list.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn accessibility_active(&self) -> bool {
         self.accessibility_active.get()
     }
@@ -846,6 +858,11 @@ impl WebViewDelegate for RunningAppState {
     }
 
     fn notify_load_status_changed(&self, webview: WebView, status: LoadStatus) {
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        crate::desktop::diagnostics::log(format!(
+            "page load {status:?}: {}",
+            webview.url().map(|url| url.to_string()).unwrap_or_default()
+        ));
         self.window_for_webview(&webview).set_needs_update();
 
         let webdriver_status = match status {
@@ -935,6 +952,14 @@ impl WebViewDelegate for RunningAppState {
     }
 
     fn show_console_message(&self, webview: WebView, level: ConsoleLogLevel, message: String) {
+        if matches!(level, ConsoleLogLevel::Error | ConsoleLogLevel::Warn) {
+            let mut errors = self.recent_console_errors.borrow_mut();
+            let list = errors.entry(webview.id()).or_default();
+            if list.len() >= 20 {
+                list.pop_front();
+            }
+            list.push_back(message.clone());
+        }
         self.platform_window_for_webview(&webview)
             .show_console_message(level, &message);
     }
