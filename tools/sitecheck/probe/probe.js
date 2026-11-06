@@ -8,11 +8,9 @@
 
 (function () {
   "use strict";
-  // Keep our own reference: some sites (duolingo.com) replace console.log to silence it.
+  // Keep our own reference: some sites (apnews.com, duolingo.com) replace console.log to silence it.
   const log = console.log.bind(console);
   if (window.top !== window) return; // main frame only
-  // Keep our own reference: some sites (apnews.com) replace console.log with a no-op.
-  const log = console.log.bind(console);
 
   // Text that anti-bot / "unsupported browser" pages show.
   const BLOCK_PHRASES = [
