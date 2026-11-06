@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stillwater — a calm browser built on Servo</title>
+  <meta name="description" content="Stillwater is a lightweight browser built on Servo, with vertical tabs and colour-tinted spaces. Written in Rust.">
+  <meta property="og:title" content="Stillwater">
+  <meta property="og:description" content="A calm, lightweight browser built on Servo, with vertical tabs and colour-tinted spaces.">
+  <meta property="og:image" content="https://whoathatcombo.github.io/stillwater/assets/stillwater-workspaces.png">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%2313202A'/%3E%3Cpath d='M7 17c3-2 6-2 9 0s6 2 9 0' stroke='%236473FF' stroke-width='2.4' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Newsreader:opsz,wght@6..72,300;6..72,400;6..72,500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --lake: #13202a;
+      --shallows: #1c2f3b;
+      --mist: #dce6e4;
+      --reed: #8ea5a7;
+      --edge: rgba(220, 230, 228, 0.12);
+      --tint: #6473ff; /* the current space colour; the hero mock changes it */
+
+      --serif: "Newsreader", Georgia, serif;
+      --sans: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+      --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+
+      --measure: 64ch;
+      --gutter: clamp(20px, 5vw, 64px);
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      background: var(--lake);
+      color-scheme: dark;
+    }
+
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      font-size: 1.0625rem;
+      line-height: 1.6;
+      color: var(--mist);
+      background:
+        radial-gradient(120% 70% at 85% -10%, color-mix(in srgb, var(--tint) 22%, transparent), transparent 60%),
+        var(--lake);
+      background-attachment: fixed;
+      transition: background-color 0.9s ease;
+    }
+
+    a { color: inherit; text-decoration-color: color-mix(in srgb, var(--tint) 70%, var(--mist)); text-underline-offset: 0.2em; }
+    a:hover { text-decoration-thickness: 2px; }
+
+    :focus-visible {
+      outline: 2px solid var(--mist);
+      outline-offset: 3px;
+      border-radius: 4px;
+    }
+
+    .wrap {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 0 var(--gutter);
+    }
+
+    /* ---------- Top bar ---------- */
+    .top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-block: 28px;
+    }
+
+    .mark {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-family: var(--serif);
+      font-size: 1.25rem;
+      text-decoration: none;
+    }
+
+    .mark svg { width: 28px; height: 28px; }
+
+    .top nav { display: flex; gap: 24px; font-size: 0.95rem; color: var(--reed); }
+    .top nav a { text-decoration: none; }
+    .top nav a:hover { color: var(--mist); }
+
+    /* ---------- Hero ---------- */
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+      gap: clamp(32px, 5vw, 72px);
+      align-items: center;
+      padding-block: clamp(32px, 7vw, 96px) clamp(56px, 9vw, 120px);
+    }
+
+    h1 {
+      font-family: var(--serif);
+      font-weight: 300;
+      font-size: clamp(3.4rem, 8vw, 6.4rem);
+      line-height: 0.95;
+      letter-spacing: -0.02em;
+      margin: 0 0 28px;
+    }
+
+    .lede {
+      font-size: 1.2rem;
+      line-height: 1.55;
+      max-width: 34ch;
+      margin: 0 0 32px;
+      color: var(--mist);
+    }
+
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 20px;
+      border-radius: 999px;
+      font-weight: 700;
+      font-size: 0.98rem;
+      text-decoration: none;
+      border: 1px solid var(--edge);
+    }
+
+    .button.primary {
+      background: var(--mist);
+      color: var(--lake);
+      border-color: var(--mist);
+    }
+
+    .button.primary:hover { background: #fff; }
+    .button.quiet:hover { background: rgba(220, 230, 228, 0.07); }
+    .button svg { width: 18px; height: 18px; }
+
+    .hint {
+      margin: 22px 0 0;
+      font-size: 0.92rem;
+      color: var(--reed);
+    }
+
+    /* ---------- Interactive browser mock ---------- */
+    .mock {
+      --bg: color-mix(in srgb, var(--tint) 16%, #1b1b1b);
+      display: grid;
+      grid-template-columns: 188px 1fr;
+      height: 400px;
+      border-radius: 16px;
+      background: var(--bg);
+      box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.7), 0 0 0 1px var(--edge);
+      overflow: hidden;
+      font-size: 13px;
+      color: rgba(255, 255, 255, 0.82);
+      transition: background-color 0.9s ease;
+    }
+
+    .mock-side {
+      display: flex;
+      flex-direction: column;
+      padding: 10px 8px;
+      min-width: 0;
+    }
+
+    .mock-nav { display: flex; gap: 4px; padding: 2px 4px 8px; opacity: 0.6; }
+    .mock-nav span { width: 18px; height: 18px; border-radius: 5px; background: rgba(255, 255, 255, 0.1); }
+
+    .mock-url {
+      height: 30px;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.06);
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      color: rgba(255, 255, 255, 0.55);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .mock-space {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 8px 0 6px;
+      padding: 8px 6px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      font-weight: 700;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--tint);
+      transition: background-color 0.9s ease;
+    }
+
+    .mock-tabs { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+
+    .mock-tab {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      height: 30px;
+      padding: 0 8px;
+      border-radius: 9px;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .mock-tab:hover { background: rgba(255, 255, 255, 0.06); }
+    .mock-tab[aria-current="true"] { background: rgba(255, 255, 255, 0.11); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3); }
+
+    .favicon {
+      width: 14px;
+      height: 14px;
+      border-radius: 4px;
+      flex-shrink: 0;
+      background: color-mix(in srgb, var(--tint) 55%, #fff 10%);
+    }
+
+    .mock-tab span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .mock-spaces { display: flex; gap: 6px; justify-content: center; padding-top: 8px; }
+
+    .space-btn {
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      border: 0;
+      background: transparent;
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      opacity: 0.5;
+    }
+
+    .space-btn:hover { opacity: 0.85; background: rgba(255, 255, 255, 0.06); }
+    .space-btn[aria-pressed="true"] { opacity: 1; background: rgba(255, 255, 255, 0.08); }
+    .space-btn i { width: 12px; height: 12px; border-radius: 50%; background: var(--c); display: block; }
+
+    .mock-page {
+      margin: 8px 8px 8px 0;
+      border-radius: 9px;
+      background: #f7f8f7;
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      overflow: hidden;
+    }
+
+    .mock-page h3 {
+      margin: 0 0 4px;
+      font-family: var(--serif);
+      font-weight: 500;
+      font-size: 22px;
+      color: #1d2528;
+    }
+
+    .line { height: 9px; border-radius: 5px; background: #dfe3e2; }
+    .block { height: 96px; border-radius: 8px; margin-top: 8px; background: color-mix(in srgb, var(--tint) 18%, #e9ecea); transition: background-color 0.9s ease; }
+
+    /* ---------- Sections ---------- */
+    section { padding-block: clamp(56px, 8vw, 104px); border-top: 1px solid var(--edge); }
+
+    h2 {
+      font-family: var(--serif);
+      font-weight: 400;
+      font-size: clamp(2rem, 4vw, 2.9rem);
+      line-height: 1.1;
+      letter-spacing: -0.01em;
+      margin: 0 0 20px;
+      max-width: 22ch;
+    }
+
+    .prose { max-width: var(--measure); color: var(--mist); }
+    .prose p { margin: 0 0 1em; }
+    .muted { color: var(--reed); }
+
+    figure { margin: 40px 0 0; }
+
+    figure img {
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: 12px;
+      box-shadow: 0 0 0 1px var(--edge), 0 24px 60px -24px rgba(0, 0, 0, 0.6);
+    }
+
+    figcaption { margin-top: 14px; font-size: 0.92rem; color: var(--reed); max-width: var(--measure); }
+
+    .features {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0 clamp(32px, 5vw, 72px);
+      margin: 32px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .features li { padding: 22px 0; border-top: 1px solid var(--edge); max-width: 52ch; }
+    .features strong { display: block; font-family: var(--serif); font-weight: 500; font-size: 1.35rem; margin-bottom: 6px; }
+    .features p { margin: 0; color: var(--reed); }
+
+    kbd {
+      font-family: var(--sans);
+      font-size: 0.85em;
+      padding: 1px 7px;
+      border-radius: 5px;
+      border: 1px solid var(--edge);
+      background: rgba(220, 230, 228, 0.06);
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+      gap: clamp(32px, 5vw, 72px);
+      align-items: start;
+    }
+
+    pre {
+      margin: 0;
+      padding: 22px 24px;
+      border-radius: 12px;
+      background: var(--shallows);
+      border: 1px solid var(--edge);
+      overflow-x: auto;
+      font-family: var(--mono);
+      font-size: 0.9rem;
+      line-height: 1.65;
+    }
+
+    .c { color: var(--reed); }
+
+    ol.steps { margin: 28px 0 0; padding: 0; list-style: none; counter-reset: step; max-width: var(--measure); }
+    ol.steps li { counter-increment: step; display: grid; grid-template-columns: 40px 1fr; padding: 14px 0; border-top: 1px solid var(--edge); }
+    ol.steps li::before { content: counter(step); font-family: var(--serif); font-size: 1.4rem; line-height: 1.2; color: var(--reed); }
+    ol.steps code, .prose code { font-family: var(--mono); font-size: 0.9em; background: rgba(220, 230, 228, 0.07); padding: 1px 6px; border-radius: 5px; }
+
+    footer { padding-block: 48px 64px; border-top: 1px solid var(--edge); color: var(--reed); font-size: 0.95rem; }
+    footer p { max-width: var(--measure); margin: 0 0 10px; }
+
+    /* ---------- Small screens ---------- */
+    @media (max-width: 880px) {
+      .hero, .split { grid-template-columns: 1fr; }
+      .features { grid-template-columns: 1fr; }
+      .top nav { display: none; }
+    }
+
+    @media (max-width: 520px) {
+      .mock { grid-template-columns: 150px 1fr; height: 360px; font-size: 12px; }
+      .mock-page { padding: 18px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <a class="mark" href="#">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14" fill="#1c2f3b"/><path d="M7 17c3-2 6-2 9 0s6 2 9 0" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" style="color: var(--tint)"/></svg>
+        Stillwater
+      </a>
+      <nav aria-label="Page">
+        <a href="#features">Features</a>
+        <a href="#build">Build it</a>
+        <a href="https://github.com/WhoaThatCombo/stillwater">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <div class="hero">
+        <div>
+          <h1>Stillwater</h1>
+          <p class="lede">A calm, lightweight browser built on Servo. Vertical tabs, spaces that each have their own colour, and a Rust engine underneath.</p>
+          <div class="actions">
+            <a class="button primary" href="https://github.com/WhoaThatCombo/stillwater">
+              <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.33c-2.23.48-2.7-1.07-2.7-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.06-.49.06-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.34.66.07-.52.28-.87.5-1.07-1.78-.2-3.65-.89-3.65-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 8 0Z"/></svg>
+              View on GitHub
+            </a>
+            <a class="button quiet" href="#build">Build it yourself</a>
+          </div>
+          <p class="hint">The browser on the right is a live mock of the sidebar. Click the coloured dots to switch spaces.</p>
+        </div>
+
+        <div class="mock" aria-label="Interactive mock of the Stillwater sidebar">
+          <div class="mock-side">
+            <div class="mock-nav" aria-hidden="true"><span></span><span></span><span></span></div>
+            <div class="mock-url" id="mock-url">github.com/servo/servo</div>
+            <div class="mock-space"><span class="dot"></span><span id="mock-space-name">Work</span></div>
+            <div class="mock-tabs" id="mock-tabs" role="list"></div>
+            <div class="mock-spaces" role="group" aria-label="Spaces">
+              <button class="space-btn" data-space="0" aria-pressed="true" aria-label="Work space" style="--c: #6473ff"><i></i></button>
+              <button class="space-btn" data-space="1" aria-pressed="false" aria-label="Home space" style="--c: #3cbe78"><i></i></button>
+              <button class="space-btn" data-space="2" aria-pressed="false" aria-label="Gaming space" style="--c: #ff5aa0"><i></i></button>
+            </div>
+          </div>
+          <div class="mock-page" aria-hidden="true">
+            <h3 id="mock-title">Pull requests</h3>
+            <div class="line" style="width: 82%"></div>
+            <div class="line" style="width: 64%"></div>
+            <div class="line" style="width: 73%"></div>
+            <div class="block"></div>
+            <div class="line" style="width: 58%"></div>
+            <div class="line" style="width: 70%"></div>
+          </div>
+        </div>
+      </div>
+
+      <section>
+        <h2>The real thing, running on Servo</h2>
+        <div class="prose">
+          <p>Stillwater's sidebar is itself a web page. Servo draws it next to the site you're visiting, the same way Firefox draws its own interface with its engine. There's no Chromium or Gecko anywhere in the stack.</p>
+        </div>
+        <figure>
+          <img src="assets/stillwater-workspaces.png" width="1296" height="839" alt="Stillwater showing servo.org, with a blue-tinted Work space selected in the sidebar">
+          <figcaption>A "Work" space with a blue accent. Each space keeps its own tabs, and its colour tints the window around the page.</figcaption>
+        </figure>
+      </section>
+
+      <section id="features">
+        <h2>What it does today</h2>
+        <ul class="features">
+          <li>
+            <strong>Vertical tabs</strong>
+            <p>Favicons, titles, a close button on hover, and middle-click to close. The URL bar sits at the top of the sidebar.</p>
+          </li>
+          <li>
+            <strong>Spaces</strong>
+            <p>Group tabs into spaces with their own name, icon and colour. Switch with a click or <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>1</kbd>–<kbd>9</kbd>. Your spaces are remembered between launches.</p>
+          </li>
+          <li>
+            <strong>Compact mode</strong>
+            <p>Press <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>C</kbd> to hide the sidebar. Touch the left edge of the window and it slides back.</p>
+          </li>
+          <li>
+            <strong>Pages as cards</strong>
+            <p>Sites sit in a rounded, inset frame on the tinted window background, so the browser's own interface stays out of the way.</p>
+          </li>
+          <li>
+            <strong>Keyboard first</strong>
+            <p><kbd>Ctrl</kbd> <kbd>L</kbd> to type an address, <kbd>Ctrl</kbd> <kbd>T</kbd> and <kbd>Ctrl</kbd> <kbd>W</kbd> for tabs. Tab shortcuts stay inside the space you're in.</p>
+          </li>
+          <li>
+            <strong>Light and dark</strong>
+            <p>Follows your Windows theme, with colours adapted from Zen Browser's open-source styles.</p>
+          </li>
+        </ul>
+      </section>
+
+      <section id="build">
+        <div class="split">
+          <div>
+            <h2>Build it yourself</h2>
+            <div class="prose">
+              <p>There are no downloads yet, so you build Stillwater from source, the same way as Servo. The first build takes a while; after that, rebuilds take seconds.</p>
+              <p class="muted">Windows is the tested platform. You need Git, Rust from rustup, uv, and Visual Studio with the C++ desktop workload.</p>
+            </div>
+            <ol class="steps">
+              <li><span>Clone the repository and open a PowerShell window in it.</span></li>
+              <li><span>Run <code>.\mach bootstrap</code> to install LLVM, CMake, GStreamer and the rest.</span></li>
+              <li><span>Run <code>.\mach build --release</code>.</span></li>
+              <li><span>Start <code>servoshell.exe</code> from <code>target\release</code>.</span></li>
+            </ol>
+          </div>
+          <pre><code><span class="c"># PowerShell</span>
+git clone https://github.com/WhoaThatCombo/stillwater.git
+cd stillwater
+.\mach bootstrap
+.\mach build --release
+.\target\release\servoshell.exe https://servo.org
+
+<span class="c"># Servo needs the MSVC Rust toolchain on Windows.
+# If yours defaults to *-windows-gnu:</span>
+rustup set default-host x86_64-pc-windows-msvc</code></pre>
+        </div>
+      </section>
+
+      <section>
+        <h2>What it can't do yet</h2>
+        <div class="prose">
+          <p>Stillwater is a hobby project on top of an engine that's still maturing. Some sites will look wrong or not load. There are no extensions, no DRM video like Netflix, and open tabs aren't restored after you close the browser.</p>
+          <p>Next up: split view, session restore, and moving tabs between spaces. Ideas and bug reports are welcome on <a href="https://github.com/WhoaThatCombo/stillwater/issues">GitHub</a>.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>Stillwater is built on <a href="https://servo.org">Servo</a> and inspired by <a href="https://github.com/zen-browser/desktop">Zen Browser</a>. It's not affiliated with or endorsed by either project.</p>
+      <p>Licensed under the <a href="https://github.com/WhoaThatCombo/stillwater/blob/stillwater/LICENSE">Mozilla Public License 2.0</a>.</p>
+    </footer>
+  </div>
+
+  <script>
+    // Hero mock: switching spaces swaps the tab list and retints the whole page.
+    const spaces = [
+      { name: "Work", color: "#6473ff", tabs: [["Pull requests", "github.com/servo/servo/pulls"], ["The Servo Book", "book.servo.org"], ["Calendar", "calendar.example.com"]] },
+      { name: "Home", color: "#3cbe78", tabs: [["Weekend recipes", "recipes.example.com"], ["Weather", "weather.example.com"]] },
+      { name: "Gaming", color: "#ff5aa0", tabs: [["Patch notes", "patches.example.com"], ["Speedrun timer", "splits.example.com"], ["Clips", "clips.example.com"], ["Wiki", "wiki.example.com"]] },
+    ];
+    const tabsEl = document.getElementById("mock-tabs");
+    const urlEl = document.getElementById("mock-url");
+    const titleEl = document.getElementById("mock-title");
+    const nameEl = document.getElementById("mock-space-name");
+    const buttons = document.querySelectorAll(".space-btn");
+
+    function selectTab(space, index) {
+      const [title, url] = space.tabs[index];
+      urlEl.textContent = url;
+      titleEl.textContent = title;
+      tabsEl.querySelectorAll(".mock-tab").forEach((tab, i) => tab.setAttribute("aria-current", String(i === index)));
+    }
+
+    function showSpace(i) {
+      const space = spaces[i];
+      document.documentElement.style.setProperty("--tint", space.color);
+      nameEl.textContent = space.name;
+      buttons.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.space === String(i))));
+      tabsEl.replaceChildren(...space.tabs.map(([title], index) => {
+        const tab = document.createElement("button");
+        tab.className = "mock-tab";
+        tab.setAttribute("role", "listitem");
+        tab.innerHTML = '<span class="favicon"></span><span></span>';
+        tab.lastChild.textContent = title;
+        tab.addEventListener("click", () => selectTab(space, index));
+        return tab;
+      }));
+      selectTab(space, 0);
+    }
+
+    buttons.forEach((button) => button.addEventListener("click", () => showSpace(Number(button.dataset.space))));
+    showSpace(0);
+  </script>
+</body>
+</html>
