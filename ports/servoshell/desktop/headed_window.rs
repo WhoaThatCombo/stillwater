@@ -113,6 +113,8 @@ pub struct HeadedWindow {
     repaint_pending: Cell<bool>,
     /// When the window was last painted.
     last_paint: Cell<Option<std::time::Instant>>,
+    /// The last press in the gaps around the page, to detect double-clicks there.
+    last_gutter_press: Cell<Option<std::time::Instant>>,
 }
 
 impl HeadedWindow {
@@ -248,6 +250,7 @@ impl HeadedWindow {
             resize_direction: Default::default(),
             repaint_pending: Cell::new(false),
             last_paint: Cell::new(None),
+            last_gutter_press: Cell::new(None),
         })
     }
 
@@ -596,10 +599,6 @@ impl HeadedWindow {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
                 let point = winit_position_to_euclid_point(*position).to_f32() / scale;
-                if gui.sidebar.update_peek(point) {
-                    window.set_needs_update();
-                    self.winit_window.request_redraw();
-                }
                 // The layout is only refreshed on the next redraw; use the last one.
                 let Some(local_point) = gui.sidebar_relative_point(point) else {
                     if self.sidebar_mouse_point.take().is_some() {
@@ -741,6 +740,16 @@ impl HeadedWindow {
                 .is_none_or(|point| self.gui.borrow().is_outside_content_rect(point))
         };
 
+        // Compact mode: the hidden sidebar slides out when the mouse touches the left edge.
+        // Check this before the resize edges, which also cover the left few pixels.
+        if let WindowEvent::CursorMoved { position, .. } = &event {
+            let point = winit_position_to_euclid_point(*position).to_f32() / self.hidpi_scale_factor();
+            if self.gui.borrow().sidebar.update_peek(point) {
+                window.set_needs_update();
+                self.winit_window.request_redraw();
+            }
+        }
+
         // A frameless window has no OS resize border, so resize from its edges ourselves.
         if !self.winit_window.is_decorated() &&
             !self.winit_window.is_maximized() &&
@@ -789,6 +798,37 @@ impl HeadedWindow {
                     .gui
                     .borrow_mut()
                     .on_window_event(&self.winit_window, &event);
+            }
+            return;
+        }
+
+        // Pressing in the gaps around the page acts like a title bar: drag to move,
+        // double-click to maximise.
+        if !self.winit_window.is_decorated() &&
+            !dialog_open &&
+            matches!(
+                event,
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                }
+            ) &&
+            should_forward_mouse_event_to_egui()
+        {
+            let now = std::time::Instant::now();
+            let double = self
+                .last_gutter_press
+                .replace(Some(now))
+                .is_some_and(|last| now.duration_since(last) < std::time::Duration::from_millis(400));
+            if double {
+                self.last_gutter_press.set(None);
+                self.winit_window
+                    .set_maximized(!self.winit_window.is_maximized());
+                diagnostics::log("click: gutter double-click (maximise)");
+            } else {
+                diagnostics::log("click: gutter (drag window)");
+                let _ = self.winit_window.drag_window();
             }
             return;
         }

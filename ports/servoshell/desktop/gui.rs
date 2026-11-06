@@ -464,8 +464,16 @@ impl Gui {
                     );
             }
 
+            // Paint the sidebar's surface every frame, even while it's collapsed in compact
+            // mode: an unconsumed frame stalls Servo's renderer and freezes the window.
+            let sidebar_paint_rect = new_sidebar_rect.unwrap_or_else(|| {
+                egui::Rect::from_min_size(
+                    full_rect.min,
+                    egui::vec2(crate::desktop::sidebar::SIDEBAR_WIDTH, full_rect.height()),
+                )
+            });
+            sidebar.paint(sidebar_paint_rect, scale);
             if let Some(sidebar_rect) = new_sidebar_rect {
-                sidebar.paint(sidebar_rect, scale);
                 // Likewise, wait for the sidebar page to load before showing its surface.
                 if sidebar.is_ready() && let Some(render_to_parent) =
                     sidebar.rendering_context().render_to_parent_callback()

@@ -37,7 +37,7 @@ pub(crate) const CONTENT_MARGIN: f32 = 8.0;
 /// Corner radius of the web content card.
 pub(crate) const CONTENT_RADIUS: f32 = 8.0;
 /// In compact mode, hovering within this many pixels of the left edge reveals the sidebar.
-const PEEK_EDGE: f32 = 6.0;
+const PEEK_EDGE: f32 = 10.0;
 
 const MESSAGE_PREFIX: &str = "__sidebar__";
 const SIDEBAR_URL: &str = "servo:sidebar/index.html";
@@ -130,7 +130,8 @@ impl Sidebar {
             tab_ids: Default::default(),
             next_tab_id: 1,
             favicons: Default::default(),
-            compact: Cell::new(false),
+            // STILLWATER_START_COMPACT: start with the sidebar collapsed (used for testing).
+            compact: Cell::new(std::env::var_os("STILLWATER_START_COMPACT").is_some()),
             peek: Cell::new(false),
             focused: Cell::new(false),
             workspaces: Workspaces::load(),
