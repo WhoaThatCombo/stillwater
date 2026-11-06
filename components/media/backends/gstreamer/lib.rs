@@ -136,6 +136,12 @@ impl GStreamerBackend {
             return Err(ErrorLoadingPlugins(errors));
         }
 
+        // libav's VP9 decoder is about twice as fast as libvpx's (vp9dec), which matters for
+        // 1440p and 4K streams decoded in software.
+        if let Some(feature) = gstreamer::Registry::get().lookup_feature("avdec_vp9") {
+            feature.set_rank(gstreamer::Rank::PRIMARY + 1);
+        }
+
         type MediaInstancesVec = Vec<(usize, Weak<Mutex<dyn MediaInstance>>)>;
         let instances: HashMap<ClientContextId, MediaInstancesVec> = Default::default();
         let instances = Arc::new(Mutex::new(instances));

@@ -270,7 +270,11 @@ pub(crate) struct HTMLMediaElement {
     #[ignore_malloc_size_of = "Media data"]
     mse_pending: DomRefCell<Option<Vec<u8>>>,
     /// A seek waits for the restarted player to show its first frame or position.
-    mse_seek_pending: Cell<bool>,    /// <https://html.spec.whatwg.org/multipage/#dom-media-played>
+    mse_seek_pending: Cell<bool>,
+    /// Video frames (rendered, dropped) by earlier players since the last load, for
+    /// getVideoPlaybackQuality().
+    frame_counts_before: Cell<(u64, u64)>,
+    /// <https://html.spec.whatwg.org/multipage/#dom-media-played>
     played: DomRefCell<TimeRangesContainer>,
     // https://html.spec.whatwg.org/multipage/#dom-media-audiotracks
     audio_tracks_list: MutNullableDom<AudioTrackList>,
@@ -461,6 +465,7 @@ impl HTMLMediaElement {
             mse_locked: Cell::new(true),
             mse_pending: DomRefCell::new(None),
             mse_seek_pending: Cell::new(false),
+            frame_counts_before: Cell::new((0, 0)),
             played: DomRefCell::new(TimeRangesContainer::default()),
             audio_tracks_list: Default::default(),
             video_tracks_list: Default::default(),
@@ -1412,7 +1417,10 @@ impl HTMLMediaElement {
         // type (including any codecs described by the codecs parameter, for types that define that
         // parameter), represents a type that the user agent knows it cannot render, then end the
         // synchronous section, and jump down to the failed with elements step below.
+        // An empty type (e.g. Shaka Player's `<source type="">` for MediaSource URLs) names no
+        // type at all, as in other browsers.
         if let Some(type_) = element.get_attribute_string_value(&local_name!("type")) &&
+            !type_.trim().is_empty() &&
             ServoMedia::get().can_play_type(&type_) == SupportsMediaType::No
         {
             self.load_from_source_child_failure_steps(cx, source);
@@ -1879,6 +1887,8 @@ impl HTMLMediaElement {
         // Step 2. Abort any already-running instance of the resource selection algorithm for this
         // element.
         self.generation_id.set(self.generation_id.get() + 1);
+
+        self.frame_counts_before.set((0, 0));
 
         // Media Source Extensions: a new load detaches the previous MediaSource.
         if let Some(media_source) = self.media_source.take() {
@@ -2404,9 +2414,8 @@ impl HTMLMediaElement {
                 Resource::Url(url) => MediaSource::from_object_url(url.as_str()).is_some(),
                 Resource::Object => false,
             };
-            let should_enable_download_buffering = !is_media_source &&
-                (is_video || self.Loop()) &&
-                self.Preload() == "auto";
+            let should_enable_download_buffering =
+                !is_media_source && (is_video || self.Loop()) && self.Preload() == "auto";
             if let Err(error) =
                 player_guard.set_download_buffering_enabled(should_enable_download_buffering)
             {
@@ -2424,6 +2433,12 @@ impl HTMLMediaElement {
             id
         };
 
+        if let Some(ref old) = *self.player.borrow() {
+            let (rendered, dropped) = old.lock().unwrap().video_frame_counts();
+            let (before_rendered, before_dropped) = self.frame_counts_before.get();
+            self.frame_counts_before
+                .set((before_rendered + rendered, before_dropped + dropped));
+        }
         *self.player.borrow_mut() = Some(player);
 
         let task_source = self
@@ -2532,12 +2547,27 @@ impl HTMLMediaElement {
         if let Some(ref player) = *self.player.borrow() {
             let player = player.lock().unwrap();
             let _ = player.set_seekable(false);
+            // The stream starts at a keyframe at or before `time`: decode from there, but only
+            // show what's from `time` on.
+            let _ = player.set_start_offset(time - base);
             let _ = player.set_mute(self.is_muted());
             let _ = player.set_volume(self.volume.get());
             if !self.paused.get() {
                 let _ = player.play();
             }
         }
+    }
+
+    /// Video frames shown and dropped (for being late) since the last load: (total, dropped),
+    /// where total counts both, as getVideoPlaybackQuality() reports them.
+    pub(crate) fn video_frame_counts(&self) -> (u64, u64) {
+        let (mut rendered, mut dropped) = self.frame_counts_before.get();
+        if let Some(ref player) = *self.player.borrow() {
+            let (now_rendered, now_dropped) = player.lock().unwrap().video_frame_counts();
+            rendered += now_rendered;
+            dropped += now_dropped;
+        }
+        (rendered + dropped, dropped)
     }
 
     /// The playback position, for MSE coded frame eviction.
@@ -2707,6 +2737,17 @@ impl HTMLMediaElement {
     fn playback_end(&self, cx: &mut JSContext) {
         // Abort the following steps of the end of playback if seeking is in progress.
         if self.seeking.get() {
+            return;
+        }
+
+        // Media Source Extensions: the stream ended where a variant with another codec begins;
+        // carry on from there with a new pipeline.
+        if let Some(time) = self
+            .media_source
+            .get()
+            .and_then(|media_source| media_source.take_pending_switch())
+        {
+            self.mse_restart(time);
             return;
         }
 

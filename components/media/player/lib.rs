@@ -135,4 +135,13 @@ pub trait Player: Send + MediaInstance {
     fn render_use_gl(&self) -> bool;
     fn set_audio_track(&self, stream_index: i32, enabled: bool) -> Result<(), PlayerError>;
     fn set_video_track(&self, stream_index: i32, enabled: bool) -> Result<(), PlayerError>;
+    /// Media Source Extensions: begin presenting at this stream time (seconds), decoding but
+    /// not showing the frames before it. Must be set before data is pushed.
+    fn set_start_offset(&self, _seconds: f64) -> Result<(), PlayerError> {
+        Ok(())
+    }
+    /// Video frames (rendered, dropped for being late) since the player started.
+    fn video_frame_counts(&self) -> (u64, u64) {
+        (0, 0)
+    }
 }

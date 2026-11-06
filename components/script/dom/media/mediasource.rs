@@ -10,12 +10,13 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::rust::HandleObject;
 use script_bindings::cell::DomRefCell;
-use script_bindings::reflector::reflect_dom_object_with_proto;
+use script_bindings::reflector::reflect_weak_referenceable_dom_object_with_proto;
 use stylo_atoms::Atom;
 use uuid::Uuid;
 
@@ -29,21 +30,26 @@ use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
+use crate::dom::bindings::weakref::WeakRef;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::fmp4::{
     InitSegment, TrackInfo, combined_init_segment, set_chunk_sequence, split_fragment,
 };
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::html::htmlmediaelement::HTMLMediaElement;
-use crate::dom::sourcebuffer::SourceBuffer;
+use crate::dom::sourcebuffer::{SourceBuffer, intersect_ranges};
 use crate::dom::sourcebufferlist::SourceBufferList;
 use crate::dom::timeranges::TimeRangesContainer;
 use crate::dom::url::URL;
 use crate::dom::window::Window;
 
 thread_local! {
-    /// Object URLs made by `URL.createObjectURL(mediaSource)`, until revoked.
-    static OBJECT_URLS: RefCell<HashMap<String, Trusted<MediaSource>>> = RefCell::new(HashMap::new());
+    /// Object URLs made by `URL.createObjectURL(mediaSource)`, until revoked. Once a media
+    /// element has attached the source the reference becomes weak: pages often never revoke
+    /// them, and a strong one would keep every MediaSource (and all its buffered media) alive for
+    /// as long as the script thread lives.
+    static OBJECT_URLS: RefCell<HashMap<String, (WeakRef<MediaSource>, Option<Trusted<MediaSource>>)>> =
+        RefCell::new(HashMap::new());
 }
 
 /// What the media element's player should get next.
@@ -69,6 +75,54 @@ struct Feed {
     end_of_stream_sent: bool,
     /// Per buffer: pieces cut from its current fragment, waiting to be fed (media start time).
     queues: Vec<VecDeque<(f64, Vec<u8>)>>,
+    /// Where playback (re)started: each buffer starts with the variant playing there.
+    start: f64,
+    /// A variant with another codec begins at this time: the stream ends there, and playback
+    /// restarts with a new pipeline once it gets there (see [`MediaSource::take_pending_switch`]).
+    switch_at: Option<f64>,
+}
+
+/// Two times closer than this are the same (matches `SourceBuffer`'s fragment tolerance).
+const EPSILON: f64 = 0.02;
+
+/// The most video pixels per second `isTypeSupported` admits (when a type gives its size):
+/// software decoding plus conversion of the frames must keep up in real time, and stay cheap.
+/// 4K60 VP9 does keep up on a 32-thread machine (~59 fps, ~4.5 cores), but YouTube then picks
+/// it even for a 1280x800 window, for ~600 MB more memory than 1080p; 1440p60 takes ~2 cores.
+const MAX_PIXELS_PER_SECOND: f64 = 2560.0 * 1440.0 * 60.0;
+
+/// The longest video side `isTypeSupported` admits (1440p, landscape or portrait).
+const MAX_VIDEO_SIDE: f64 = 2560.0;
+
+/// The highest frame rate `isTypeSupported` admits.
+const MAX_FRAMERATE: f64 = 60.0;
+
+/// Whether one `codecs` entry can be played from an MP4 or WebM `SourceBuffer`.
+fn codec_supported(codec: &str, webm: bool, audio_only: bool) -> bool {
+    // VP9 in "vp09.PP.LL.DD[...]" form: profiles 0 and 1 at 8 bits (not 10-bit / HDR).
+    let vp09 = || {
+        let mut fields = codec.split('.').skip(1);
+        let profile = fields.next().unwrap_or("00");
+        let _level = fields.next();
+        let depth = fields.next().unwrap_or("08");
+        matches!(profile, "00" | "01") && depth == "08"
+    };
+    let video = match codec {
+        "vp8" | "vp8.0" | "vp9" | "vp9.0" if webm => true,
+        _ if codec.starts_with("vp09.") => vp09(),
+        _ if codec.starts_with("avc1.") || codec.starts_with("avc3.") => !webm,
+        _ => false,
+    };
+    if video {
+        return !audio_only;
+    }
+    match codec {
+        "opus" => true,
+        "mp4a.40.2" | "mp4a.40.5" | "mp4a.40.29" | "mp4a.40" | "mp4a.67" => !webm,
+        // MP3 and FLAC in MP4, like Chrome.
+        "mp3" | "mp4a.69" | "mp4a.6b" | "mp4a.40.34" | "flac" => !webm,
+        _ => false,
+    }
 }
 
 /// Length of the pieces fragments are cut into, so audio and video interleave finely.
@@ -96,12 +150,24 @@ pub(crate) struct MediaSource {
 
 impl MediaSource {
     /// Whether `type` (a MIME type with optional `codecs`) can be played through MSE.
+    ///
+    /// Fragmented MP4 with H.264, VP9 (8-bit), AAC, MP3, FLAC or Opus, and WebM with VP8, VP9
+    /// (8-bit) or Opus, in any combination across buffers. WebM is remuxed to MP4 (see `webm.rs`).
+    /// Videos too big to decode in software in real time are refused (see
+    /// [`MAX_PIXELS_PER_SECOND`]), so adaptive players pick a variant that plays smoothly.
     pub(crate) fn type_supported(type_: &str) -> bool {
         let mut parts = type_.split(';');
         let container = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
-        if container != "video/mp4" && container != "audio/mp4" {
-            return false;
-        }
+        let (webm, audio_only) = match container.as_str() {
+            "video/mp4" => (false, false),
+            "audio/mp4" => (false, true),
+            "video/webm" => (true, false),
+            "audio/webm" => (true, true),
+            _ => return false,
+        };
+        let mut width = 0f64;
+        let mut height = 0f64;
+        let mut framerate = 0f64;
         for parameter in parts {
             let Some((name, value)) = parameter.split_once('=') else {
                 continue;
@@ -110,37 +176,46 @@ impl MediaSource {
             let value = value.trim().trim_matches('"').to_ascii_lowercase();
             match name.as_str() {
                 "codecs" => {
-                    let supported = value.split(',').map(str::trim).all(|codec| {
-                        codec.starts_with("avc1.") ||
-                            codec.starts_with("avc3.") ||
-                            codec == "mp4a.40.2" ||
-                            codec == "mp4a.40.5" ||
-                            codec == "mp4a.40.29" ||
-                            codec == "mp4a.40" ||
-                            codec == "mp4a.67"
-                    });
+                    let supported = value
+                        .split(',')
+                        .map(str::trim)
+                        .all(|codec| codec_supported(codec, webm, audio_only));
                     if !supported {
                         return false;
                     }
                 },
+                "width" => width = value.parse().unwrap_or(0.0),
+                "height" => height = value.parse().unwrap_or(0.0),
+                "framerate" => framerate = value.parse().unwrap_or(0.0),
                 // HDR transfer functions and encrypted media aren't supported.
                 "eotf" if value != "bt709" => return false,
                 "cryptoblockformat" => return false,
                 _ => {},
             }
         }
-        true
+        // Each limit also applies on its own: YouTube first asks with width=99999 alone (and
+        // height=99999, framerate=9999), and if those pass it decides the parameters are ignored
+        // and stops asking per format.
+        if width > MAX_VIDEO_SIDE || height > MAX_VIDEO_SIDE || framerate > MAX_FRAMERATE {
+            return false;
+        }
+        let framerate = if framerate > 0.0 { framerate } else { 30.0 };
+        width * height * framerate <= MAX_PIXELS_PER_SECOND
     }
 
     /// The `MediaSource` behind an object URL, if `url` is one.
     pub(crate) fn from_object_url(url: &str) -> Option<DomRoot<MediaSource>> {
-        OBJECT_URLS.with(|urls| urls.borrow().get(url).map(Trusted::root))
+        OBJECT_URLS.with(|urls| urls.borrow().get(url).and_then(|(source, _)| source.root()))
     }
 
     /// `URL.createObjectURL(mediaSource)`.
     pub(crate) fn create_object_url(&self, global: &GlobalScope) -> DOMString {
         let url = URL::unicode_serialization_blob_url(global.origin().immutable(), &Uuid::new_v4());
-        OBJECT_URLS.with(|urls| urls.borrow_mut().insert(url.clone(), Trusted::new(self)));
+        OBJECT_URLS.with(|urls| {
+            let mut urls = urls.borrow_mut();
+            urls.retain(|_, (source, _)| source.is_alive());
+            urls.insert(url.clone(), (WeakRef::new(self), Some(Trusted::new(self))));
+        });
         DOMString::from(url)
     }
 
@@ -162,6 +237,14 @@ impl MediaSource {
     /// A media element started using this source (its `src` is our object URL).
     pub(crate) fn attach(&self, element: &HTMLMediaElement) {
         self.element.set(Some(element));
+        // The element keeps the source alive now.
+        OBJECT_URLS.with(|urls| {
+            for (source, strong) in urls.borrow_mut().values_mut() {
+                if source.root().is_some_and(|source| &*source == self) {
+                    *strong = None;
+                }
+            }
+        });
         *self.feed.borrow_mut() = Feed::default();
         self.state.set(State::Open);
         self.queue_event("sourceopen");
@@ -170,6 +253,7 @@ impl MediaSource {
     /// The media element stopped using this source.
     pub(crate) fn detach(&self) {
         self.element.set(None);
+        *self.feed.borrow_mut() = Feed::default();
         self.state.set(State::Closed);
         self.duration.set(f64::NAN);
         for buffer in self.source_buffers.buffers() {
@@ -207,7 +291,7 @@ impl MediaSource {
         self.duration.get()
     }
 
-    /// The media element's `buffered`: time buffered in every `SourceBuffer`.
+    /// The media element's `buffered`: time buffered in every `SourceBuffer` (and track).
     pub(crate) fn buffered(&self) -> TimeRangesContainer {
         let buffers = self.source_buffers.buffers();
         let mut intersection: Option<Vec<(f64, f64)>> = None;
@@ -215,19 +299,7 @@ impl MediaSource {
             let ranges = buffer.track().ranges();
             intersection = Some(match intersection {
                 None => ranges,
-                Some(previous) => {
-                    let mut both = vec![];
-                    for (a_start, a_end) in &previous {
-                        for (b_start, b_end) in &ranges {
-                            let start = a_start.max(*b_start);
-                            let end = a_end.min(*b_end);
-                            if end > start {
-                                both.push((start, end));
-                            }
-                        }
-                    }
-                    both
-                },
+                Some(previous) => intersect_ranges(&previous, &ranges),
             });
         }
         let mut container = TimeRangesContainer::default();
@@ -243,14 +315,25 @@ impl MediaSource {
         let buffers = self.source_buffers.buffers();
         let base = buffers
             .iter()
-            .filter_map(|buffer| buffer.track().fragment_start_at(time))
+            .flat_map(|buffer| buffer.track_views())
+            .filter_map(|track| track.fragment_start_at(time))
             .fold(time, f64::min)
             .max(0.0);
         *self.feed.borrow_mut() = Feed {
             base,
+            start: time,
             ..Feed::default()
         };
         base
+    }
+
+    /// The stream ended at a codec switch: where playback must restart, if so.
+    pub(crate) fn take_pending_switch(&self) -> Option<f64> {
+        let mut feed = self.feed.borrow_mut();
+        if !feed.end_of_stream_sent {
+            return None;
+        }
+        feed.switch_at.take()
     }
 
     /// The next piece of the merged stream for the player, if one is ready.
@@ -259,7 +342,14 @@ impl MediaSource {
         if buffers.is_empty() {
             return None;
         }
-        let tracks: Vec<_> = buffers.iter().map(|buffer| buffer.track()).collect();
+        // Every audio and video track of every buffer.
+        let tracks: Vec<_> = buffers
+            .iter()
+            .flat_map(|buffer| buffer.track_views())
+            .collect();
+        if tracks.is_empty() {
+            return None;
+        }
         let mut feed = self.feed.borrow_mut();
 
         if !feed.started {
@@ -267,9 +357,8 @@ impl MediaSource {
             let mut generations = vec![];
             for track in &tracks {
                 let generation = track
-                    .fragment_after(feed.base)
-                    .map(|fragment| fragment.generation)
-                    .unwrap_or(track.generation);
+                    .generation_at(feed.start)
+                    .unwrap_or(track.generation());
                 track.init(generation)?;
                 generations.push(generation);
             }
@@ -297,11 +386,54 @@ impl MediaSource {
             if !feed.queues[index].is_empty() {
                 continue;
             }
-            let Some(fragment) = track.fragment_after(feed.next[index]) else {
+            let fragment = loop {
+                match track.fragment_after(feed.next[index]) {
+                    // Another variant's media from before the point playback restarted at
+                    // (e.g. the end of the old quality, overlapping the new one): skip it.
+                    Some(fragment)
+                        if fragment.generation != feed.generations[index] &&
+                            fragment.start < feed.start - EPSILON =>
+                    {
+                        feed.next[index] = fragment.end;
+                    },
+                    other => break other,
+                }
+            };
+            let Some(fragment) = fragment else {
                 continue;
             };
+            if feed
+                .switch_at
+                .is_some_and(|at| fragment.start >= at - EPSILON)
+            {
+                continue;
+            }
             if fragment.generation != feed.generations[index] {
-                return Some(MseChunk::Restart(fragment.start.max(feed.next[index])));
+                // A new variant (usually another quality). With the same codec the demuxer
+                // takes a new initialization segment in stride.
+                let same_codec = match (
+                    track.init(feed.generations[index]),
+                    track.init(fragment.generation),
+                ) {
+                    (Some((_, old)), Some((_, new))) => old.codec == new.codec,
+                    _ => false,
+                };
+                let mut generations = feed.generations.clone();
+                generations[index] = fragment.generation;
+                let inits: Vec<(&InitSegment, &TrackInfo)> = tracks
+                    .iter()
+                    .zip(&generations)
+                    .filter_map(|(track, generation)| track.init(*generation))
+                    .collect();
+                if !same_codec || inits.len() != tracks.len() {
+                    // Otherwise play out what's fed and start over with a new pipeline there.
+                    let at = fragment.start.max(feed.next[index]);
+                    feed.switch_at = Some(feed.switch_at.map_or(at, |other| other.min(at)));
+                    continue;
+                }
+                let init = combined_init_segment(&inits);
+                feed.generations = generations;
+                return Some(MseChunk::Data(init));
             }
             let end = fragment.end;
             let Some((_, info)) = track.init(fragment.generation) else {
@@ -327,22 +459,25 @@ impl MediaSource {
         }
 
         // Feed pieces in time order across buffers, never running ahead of a buffer that has
-        // nothing yet (unless the stream has ended).
+        // nothing yet (unless the stream has ended, or ends at a codec switch).
         let ended = self.state.get() == State::Ended;
+        let switch_at = feed.switch_at;
         let mut best: Option<(usize, f64)> = None;
         for index in 0..tracks.len() {
             match feed.queues[index].front() {
+                Some((start, _)) if switch_at.is_some_and(|at| *start >= at - EPSILON) => {},
                 Some((start, _)) => {
                     if best.is_none_or(|(_, earliest)| *start < earliest) {
                         best = Some((index, *start));
                     }
                 },
-                None if !ended => return None,
-                None => {},
+                None if ended => {},
+                None if switch_at.is_some_and(|at| feed.next[index] >= at - EPSILON) => {},
+                None => return None,
             }
         }
         let Some((index, _)) = best else {
-            if ended && !feed.end_of_stream_sent {
+            if (ended || switch_at.is_some()) && !feed.end_of_stream_sent {
                 feed.end_of_stream_sent = true;
                 return Some(MseChunk::EndOfStream);
             }
@@ -353,6 +488,7 @@ impl MediaSource {
         feed.sequence = feed.sequence.wrapping_add(1);
         Some(MseChunk::Data(bytes))
     }
+
     fn any_updating(&self) -> bool {
         self.source_buffers
             .buffers()
@@ -369,9 +505,9 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         proto: Option<HandleObject>,
     ) -> Fallible<DomRoot<MediaSource>> {
         let source_buffers = SourceBufferList::new(cx, window);
-        Ok(reflect_dom_object_with_proto(
+        Ok(reflect_weak_referenceable_dom_object_with_proto(
             cx,
-            Box::new(MediaSource {
+            Rc::new(MediaSource {
                 eventtarget: EventTarget::new_inherited(),
                 source_buffers: Dom::from_ref(&*source_buffers),
                 state: Cell::new(State::Closed),
@@ -430,7 +566,11 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
     }
 
     /// <https://w3c.github.io/media-source/#dom-mediasource-addsourcebuffer>
-    fn AddSourceBuffer(&self, cx: &mut JSContext, type_: DOMString) -> Fallible<DomRoot<SourceBuffer>> {
+    fn AddSourceBuffer(
+        &self,
+        cx: &mut JSContext,
+        type_: DOMString,
+    ) -> Fallible<DomRoot<SourceBuffer>> {
         if type_.is_empty() {
             return Err(Error::Type(c"Empty type".to_owned()));
         }

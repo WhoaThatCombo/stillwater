@@ -33,6 +33,8 @@ use style::attr::{AttrValue, LengthOrPercentageOrAuto};
 
 use crate::dom::bindings::cell::AtomicSafeBorrowMut;
 use crate::dom::bindings::codegen::Bindings::HTMLVideoElementBinding::HTMLVideoElementMethods;
+use crate::dom::bindings::codegen::Bindings::PerformanceBinding::PerformanceMethods;
+use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
@@ -47,6 +49,7 @@ use crate::dom::html::htmlmediaelement::{HTMLMediaElement, NetworkState, ReadySt
 use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::node::{Node, NodeDamage, NodeTraits};
 use crate::dom::performance::performanceresourcetiming::InitiatorType;
+use crate::dom::videoplaybackquality::VideoPlaybackQuality;
 use crate::event_loop::document_loader::{LoadBlocker, LoadType};
 use crate::fetch::fetch::RequestWithGlobalScope;
 use crate::fetch::network_listener::{self, FetchResponseListener, ResourceTimingListener};
@@ -413,6 +416,14 @@ impl HTMLVideoElementMethods<crate::DomTypeHolder> for HTMLVideoElement {
             return 0;
         }
         self.video_height.get().unwrap_or(0)
+    }
+
+    /// <https://w3c.github.io/media-playback-quality/#dom-htmlvideoelement-getvideoplaybackquality>
+    fn GetVideoPlaybackQuality(&self, cx: &mut JSContext) -> DomRoot<VideoPlaybackQuality> {
+        let window = self.owner_window();
+        let now = window.Performance(cx).Now();
+        let (total, dropped) = self.htmlmediaelement.video_frame_counts();
+        VideoPlaybackQuality::new(cx, &window, *now, total, dropped)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-video-poster

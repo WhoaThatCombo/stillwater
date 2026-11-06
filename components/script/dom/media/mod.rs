@@ -17,5 +17,7 @@ pub(crate) mod mediastream;
 pub(crate) mod mediastreamtrack;
 pub(crate) mod sourcebuffer;
 pub(crate) mod sourcebufferlist;
+pub(crate) mod videoplaybackquality;
 pub(crate) mod videotrack;
 pub(crate) mod videotracklist;
+pub(crate) mod webm;
