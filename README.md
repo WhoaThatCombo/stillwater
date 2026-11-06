@@ -45,7 +45,13 @@ first install.
 
 ## Features
 
-- **Vertical tabs**: favicons, a close button on hover, middle-click to close.
+- **Vertical tabs**: favicons, a close button on hover, middle-click to close, double-click a title to rename.
+- **Essentials**: favicon tiles at the top of the sidebar, shared by every space.
+- **Pinned tabs and folders**: each space has a pinned section above its tabs, with collapsible folders.
+  Pinned tabs are remembered and load only when you click them; closing one unloads it to free memory,
+  and a reset button takes it back to its pinned page.
+- **Tab menu**: right-click a tab (or use its `…` button) to pin it, add it to Essentials, move it to a folder or
+  another space, rename it or close it.
 - **URL bar in the sidebar**: type an address or a search and press Enter. <kbd>Ctrl</kbd>+<kbd>L</kbd> focuses it.
 - **Workspaces (spaces)**: each tab belongs to one space. Each space has its own name, icon and accent
   colour, and the colour tints the whole window. Space definitions are saved between launches.
@@ -137,7 +143,8 @@ cd stillwater
 - [x] Prebuilt Windows downloads
 - [x] Installer, default-browser registration and auto-updates
 - [ ] Built-in adblocker using uBlock Origin's filter lists
-- [ ] Essentials, pinned tabs, folders, Glance
+- [x] Essentials, pinned tabs, folders
+- [ ] Split view and Glance
 - [ ] Bookmarks, history, downloads, find in page, settings
 - [ ] Import from Zen
 - [x] Stillwater name and icon in the window and installer

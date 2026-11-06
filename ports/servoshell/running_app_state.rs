@@ -180,6 +180,8 @@ pub(crate) enum UserInterfaceCommand {
     Reload,
     ReloadAll,
     NewWebView,
+    /// Open a new tab at the given URL (e.g. loading a pinned tab).
+    NewWebViewWithUrl(Url),
     CloseWebView(WebViewId),
     NewWindow(TopLevelWebViewCreationRequest),
 }

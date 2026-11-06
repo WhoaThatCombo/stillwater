@@ -30,21 +30,34 @@
     </span>
   </div>
 
+  <!-- Essentials: favicon tiles shared by every space. -->
+  <div id="essentials"></div>
+
   <div id="workspace-header">
     <button id="ws-icon" class="icon ws-icon" title="Change icon"></button>
     <button id="ws-name" title="Double-click to rename"></button>
     <input id="ws-name-input" type="text" spellcheck="false" autocomplete="off" hidden>
     <span class="spacer"></span>
+    <button id="ws-new-folder" class="icon" title="New folder">&#xE8F4;</button>
     <button id="ws-color" class="ws-color" title="Change colour"></button>
     <button id="ws-delete" class="icon" title="Delete space">&#xE74D;</button>
   </div>
 
-  <main id="tabs"></main>
+  <main id="tab-area">
+    <!-- This space's pinned tabs and folders. -->
+    <div id="pinned"></div>
+    <div id="pinned-separator" class="separator"></div>
 
-  <button id="new-tab" class="tab new-tab">
-    <span class="icon tab-icon">&#xE710;</span>
-    <span class="tab-label">New Tab</span>
-  </button>
+    <button id="new-tab" class="tab new-tab">
+      <span class="icon tab-icon">&#xE710;</span>
+      <span class="tab-label">New Tab</span>
+    </button>
+
+    <div id="tabs"></div>
+  </main>
+
+  <!-- Tab menu (right-click a tab, or its "…" button). -->
+  <div id="menu" role="menu" hidden></div>
 
   <button id="update" class="update-pill" hidden></button>
   <p id="update-error" class="hint update-error" hidden></p>

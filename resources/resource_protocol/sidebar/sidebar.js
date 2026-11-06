@@ -39,30 +39,251 @@ function tabIcon(tab) {
   return letter;
 }
 
-function renderTab(tab) {
+function iconButton(className, glyph, title, onClick) {
+  const button = document.createElement("button");
+  button.className = `${className} icon`;
+  button.textContent = glyph;
+  button.title = title;
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    onClick(event);
+  });
+  return button;
+}
+
+// ---- Double-click detection (Servo may not fire dblclick) ----
+function onDoubleClick(element, handler) {
+  let last = 0;
+  element.addEventListener("click", (event) => {
+    const now = Date.now();
+    if (now - last < 400) {
+      last = 0;
+      event.stopPropagation();
+      handler(event);
+    } else {
+      last = now;
+    }
+  });
+}
+
+// ---- Inline rename: swap a label for a text field ----
+function startRename(label, current, commit) {
+  const input = document.createElement("input");
+  input.className = "rename-input";
+  input.value = current;
+  label.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (save) => {
+    if (done) return;
+    done = true;
+    if (save) commit(input.value.trim());
+    input.replaceWith(label);
+  };
+  input.addEventListener("click", (event) => event.stopPropagation());
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") finish(true);
+    else if (event.key === "Escape") finish(false);
+  });
+  input.addEventListener("blur", () => finish(true));
+}
+
+// ---- Context menu ----
+const menu = $("menu");
+function closeMenu() {
+  menu.hidden = true;
+  menu.replaceChildren();
+}
+function openMenu(items, x, y) {
+  menu.replaceChildren(...items.map((item) => {
+    if (item === "-") {
+      const line = document.createElement("div");
+      line.className = "menu-separator";
+      return line;
+    }
+    const button = document.createElement("button");
+    button.className = "menu-item";
+    button.textContent = item.label;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeMenu();
+      item.run();
+    });
+    return button;
+  }));
+  menu.hidden = false;
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - width - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - height - 4))}px`;
+}
+document.addEventListener("mousedown", (event) => {
+  if (!menu.hidden && !menu.contains(event.target)) closeMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !menu.hidden) closeMenu();
+});
+function attachMenu(element, itemsFor) {
+  element.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    openMenu(itemsFor(), event.clientX, event.clientY);
+  });
+}
+
+function otherSpaces() {
+  if (!state.workspaces) return [];
+  return state.workspaces.list.filter((space) => space.id !== state.workspaces.current);
+}
+
+function folderNames() {
+  return (state.pinned && state.pinned.folders) || [];
+}
+
+// Menu for an ordinary tab.
+function tabMenu(tab, label) {
+  return [
+    { label: "Pin tab", run: () => send("pin", tab.id) },
+    { label: "Add to Essentials", run: () => send("essential", tab.id) },
+    { label: "Rename", run: () => startRename(label, tabLabel(tab), (title) => send("tab-rename", `${tab.id}\t${title}`)) },
+    ...otherSpaces().map((space) => ({ label: `Move to ${space.name}`, run: () => send("tab-move-space", `${tab.id}\t${space.id}`) })),
+    "-",
+    { label: "Close tab", run: () => send("close", tab.id) },
+  ];
+}
+
+// Menu for a pinned tab or Essential.
+function pinMenu(pin, label, essential) {
+  const items = [];
+  if (pin.loaded) items.push({ label: "Unload (free memory)", run: () => send("pin-unload", pin.pinId) });
+  if (pin.changed) items.push({ label: "Back to pinned page", run: () => send("pin-reset", pin.pinId) });
+  if (label) {
+    items.push({ label: "Rename", run: () => startRename(label, pin.title, (title) => send("pin-rename", `${pin.pinId}\t${title}`)) });
+  }
+  if (!essential) {
+    if (items.length) items.push("-");
+    for (const folder of folderNames()) {
+      if (folder.folderId !== pin.folder) {
+        items.push({ label: `Move to folder “${folder.name}”`, run: () => send("pin-folder", `${pin.pinId}\t${folder.folderId}`) });
+      }
+    }
+    if (pin.folder) items.push({ label: "Remove from folder", run: () => send("pin-folder", `${pin.pinId}\t`) });
+    items.push({ label: "New folder with this tab", run: () => send("folder-new", pin.pinId) });
+    items.push({ label: "Move up", run: () => send("pin-move", `${pin.pinId}\t-1`) });
+    items.push({ label: "Move down", run: () => send("pin-move", `${pin.pinId}\t1`) });
+  }
+  if (items.length) items.push("-");
+  items.push({
+    label: essential ? "Remove from Essentials" : "Add to Essentials",
+    run: () => send("pin-essential", pin.pinId),
+  });
+  items.push({ label: "Unpin", run: () => send("unpin", pin.pinId) });
+  return items;
+}
+
+// One row for an ordinary tab ({id, …}) or a pinned tab ({pinId, …}).
+function renderRow(item, isPin) {
   const row = document.createElement("div");
-  row.className = "tab" + (tab.active ? " selected" : "") + (tab.loading ? " loading" : "");
-  row.title = tab.url;
+  row.className = "tab" +
+    (item.active ? " selected" : "") +
+    (item.loading ? " loading" : "") +
+    (isPin && !item.loaded ? " unloaded" : "");
+  row.title = item.url;
 
   const label = document.createElement("span");
   label.className = "tab-label";
-  label.textContent = tabLabel(tab);
-
-  const close = document.createElement("button");
-  close.className = "tab-close icon";
-  close.title = "Close tab";
-  close.textContent = "";
-  close.addEventListener("click", (event) => {
-    event.stopPropagation();
-    send("close", tab.id);
+  label.textContent = tabLabel(item);
+  onDoubleClick(label, () => {
+    if (isPin) startRename(label, item.title, (title) => send("pin-rename", `${item.pinId}\t${title}`));
+    else startRename(label, tabLabel(item), (title) => send("tab-rename", `${item.id}\t${title}`));
   });
 
-  row.append(tabIcon(tab), label, close);
-  row.addEventListener("click", () => send("activate", tab.id));
+  const items = () => (isPin ? pinMenu(item, label, false) : tabMenu(item, label));
+  const more = iconButton("tab-more", "", "More", () => {
+    const box = more.getBoundingClientRect();
+    openMenu(items(), box.left, box.bottom);
+  });
+  const parts = [tabIcon(item), label];
+  if (isPin && item.changed) {
+    parts.push(iconButton("tab-reset", "", "Back to pinned page", () => send("pin-reset", item.pinId)));
+  }
+  parts.push(more);
+  if (!isPin) {
+    parts.push(iconButton("tab-close", "", "Close tab", () => send("close", item.id)));
+  } else if (item.loaded) {
+    parts.push(iconButton("tab-close", "", "Unload tab", () => send("pin-unload", item.pinId)));
+  }
+  row.append(...parts);
+
+  row.addEventListener("click", () => (isPin ? send("pin-open", item.pinId) : send("activate", item.id)));
   row.addEventListener("mouseup", (event) => {
-    if (event.button === 1) send("close", tab.id); // middle click
+    if (event.button !== 1) return; // middle click closes / unloads
+    if (isPin) send("pin-unload", item.pinId);
+    else send("close", item.id);
   });
+  attachMenu(row, items);
   return row;
+}
+
+// Essentials: square favicon tiles at the top.
+function renderEssentials() {
+  const essentials = state.essentials || [];
+  const grid = $("essentials");
+  grid.hidden = essentials.length === 0;
+  grid.replaceChildren(...essentials.map((pin) => {
+    const tile = document.createElement("button");
+    tile.className = "essential" + (pin.active ? " selected" : "") + (pin.loaded ? "" : " unloaded");
+    tile.title = pin.title;
+    const icon = tabIcon(pin);
+    icon.classList.add("essential-icon");
+    tile.append(icon);
+    tile.addEventListener("click", () => send("pin-open", pin.pinId));
+    tile.addEventListener("mouseup", (event) => {
+      if (event.button === 1) send("pin-unload", pin.pinId);
+    });
+    attachMenu(tile, () => pinMenu(pin, null, true));
+    return tile;
+  }));
+}
+
+// This space's pinned section: folders (collapsible), then loose pins.
+function renderPinned() {
+  const pinned = state.pinned || { folders: [], pins: [] };
+  const rows = [];
+  for (const folder of pinned.folders) {
+    const header = document.createElement("div");
+    header.className = "tab folder" + (folder.collapsed ? " collapsed" : "");
+    const icon = document.createElement("span");
+    icon.className = "icon tab-icon folder-icon";
+    icon.textContent = folder.collapsed ? "" : "";
+    const label = document.createElement("span");
+    label.className = "tab-label";
+    label.textContent = folder.name;
+    const count = document.createElement("span");
+    count.className = "folder-count";
+    count.textContent = folder.collapsed && folder.pins.length ? String(folder.pins.length) : "";
+    header.append(icon, label, count);
+    header.addEventListener("click", () => send("folder-toggle", folder.folderId));
+    const rename = () => startRename(label, folder.name, (name) => send("folder-rename", `${folder.folderId}\t${name}`));
+    onDoubleClick(label, rename);
+    attachMenu(header, () => [
+      { label: "Rename folder", run: rename },
+      { label: folder.collapsed ? "Expand" : "Collapse", run: () => send("folder-toggle", folder.folderId) },
+      "-",
+      { label: "Delete folder (keeps its tabs)", run: () => send("folder-delete", folder.folderId) },
+    ]);
+    rows.push(header);
+    if (!folder.collapsed) {
+      for (const pin of folder.pins) {
+        const row = renderRow(pin, true);
+        row.classList.add("in-folder");
+        rows.push(row);
+      }
+    }
+  }
+  for (const pin of pinned.pins) rows.push(renderRow(pin, true));
+  $("pinned").replaceChildren(...rows);
+  $("pinned-separator").hidden = rows.length === 0;
 }
 
 function currentWorkspace() {
@@ -150,7 +371,12 @@ function render() {
   renderSettings();
   renderUpdate();
   if (state.workspaces) renderWorkspaces();
-  tabs.replaceChildren(...state.tabs.map(renderTab));
+  // Don't rebuild the lists while the user is renaming something in them.
+  if (!document.querySelector(".rename-input")) {
+    renderEssentials();
+    renderPinned();
+    tabs.replaceChildren(...state.tabs.map((tab) => renderRow(tab, false)));
+  }
   $("back").disabled = !state.canGoBack;
   $("forward").disabled = !state.canGoForward;
   $("compact").textContent = state.compact ? "" : "";
@@ -198,6 +424,7 @@ $("forward").addEventListener("click", () => send("forward"));
 $("reload").addEventListener("click", () => send("reload"));
 $("compact").addEventListener("click", () => send("toggle-compact"));
 $("new-tab").addEventListener("click", () => send("new-tab"));
+$("ws-new-folder").addEventListener("click", () => send("folder-new", 0));
 
 // Frameless window: caption buttons, and dragging/double-clicking empty sidebar space.
 update.addEventListener("click", () => send("update"));
@@ -219,7 +446,7 @@ $("win-max").addEventListener("click", () => send("win-max"));
 $("win-close").addEventListener("click", () => send("win-close"));
 
 const isDragSurface = (target) =>
-  target.matches("[data-drag], body, #tabs, #footer, #workspaces, #workspace-header, .spacer");
+  target.matches("[data-drag], body, #tab-area, #tabs, #pinned, #essentials, #footer, #workspaces, #workspace-header, .spacer");
 let lastDragDown = 0;
 document.addEventListener("mousedown", (event) => {
   if (event.button !== 0 || !state.frameless || !isDragSurface(event.target)) return;

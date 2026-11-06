@@ -297,10 +297,19 @@ button {
 }
 
 /* ---- Tabs (tabbrowser-tab) ---- */
-#tabs {
+/* Pinned section, New Tab and regular tabs scroll together. */
+#tab-area {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+#pinned,
+#tabs {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -641,5 +650,163 @@ button.secondary:hover {
 }
 
 .update-error[hidden] {
+  display: none;
+}
+
+/* ---- Essentials (zen-essentials): favicon tiles shared by every space ---- */
+#essentials {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin: 0 0 6px;
+}
+
+#essentials[hidden] {
+  display: none;
+}
+
+.essential {
+  height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--border-radius-medium);
+  background: var(--zen-urlbar-background);
+}
+
+.essential:hover {
+  background: var(--toolbarbutton-background-color-hover);
+}
+
+.essential.selected {
+  background: var(--tab-selected-bgcolor);
+  box-shadow: var(--tab-selected-shadow);
+}
+
+.essential .essential-icon {
+  width: 20px;
+  height: 20px;
+}
+
+.essential.unloaded .essential-icon,
+.tab.unloaded .tab-icon,
+.tab.unloaded .tab-label {
+  opacity: 0.55;
+}
+
+/* ---- Tab row extras: "…" menu and reset buttons, shown on hover ---- */
+.tab-more,
+.tab-reset {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: var(--toolbarbutton-border-radius);
+  font-size: 11px;
+  visibility: hidden;
+}
+
+.tab:hover .tab-more,
+.tab:hover .tab-reset,
+.tab.selected .tab-reset {
+  visibility: visible;
+}
+
+.tab-more:hover,
+.tab-reset:hover {
+  background: var(--toolbarbutton-background-color-hover);
+}
+
+/* ---- Folders in the pinned section ---- */
+.tab.folder {
+  font-weight: 600;
+}
+
+.folder-icon {
+  font-family: 'Segoe Fluent Icons', 'Segoe MDL2 Assets';
+  font-size: 14px;
+  opacity: 0.8;
+}
+
+.folder-count {
+  font-size: 11px;
+  opacity: 0.55;
+  padding-right: 8px;
+}
+
+.tab.in-folder {
+  padding-left: 26px;
+}
+
+/* ---- Context menu ---- */
+#menu {
+  position: fixed;
+  z-index: 10;
+  min-width: 190px;
+  max-width: 226px;
+  padding: 4px;
+  border-radius: var(--border-radius-medium);
+  background: var(--zen-urlbar-background-focus);
+  box-shadow: var(--zen-big-shadow);
+  border: 1px solid var(--zen-pinned-separator-color);
+  display: flex;
+  flex-direction: column;
+}
+
+#menu[hidden] {
+  display: none;
+}
+
+.menu-item {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 7px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.menu-item:hover {
+  background: var(--toolbarbutton-background-color-hover);
+}
+
+.menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--zen-pinned-separator-color);
+}
+
+/* ---- Inline rename field ---- */
+.rename-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  border: none;
+  outline: none;
+  border-radius: var(--toolbarbutton-border-radius);
+  background: var(--zen-urlbar-background-focus);
+  color: inherit;
+  font: inherit;
+}
+
+#workspace-header #ws-new-folder {
+  width: 26px;
+  font-size: 13px;
+  opacity: 0;
+}
+
+#workspace-header:hover #ws-new-folder {
+  opacity: 0.7;
+}
+/* Line between the pinned section and New Tab (pinned-tabs-container-separator). */
+.separator {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--zen-pinned-separator-color);
+  flex-shrink: 0;
+}
+
+.separator[hidden] {
   display: none;
 }

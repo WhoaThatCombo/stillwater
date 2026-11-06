@@ -381,6 +381,13 @@ impl ServoShellWindow {
                         TopLevelWebViewCreationRequest::WithUrl(url),
                     );
                 },
+                UserInterfaceCommand::NewWebViewWithUrl(url) => {
+                    self.set_needs_update();
+                    self.create_and_activate_toplevel_webview(
+                        state.clone(),
+                        TopLevelWebViewCreationRequest::WithUrl(url),
+                    );
+                },
                 UserInterfaceCommand::CloseWebView(id) => {
                     self.set_needs_update();
                     self.close_webview(id);

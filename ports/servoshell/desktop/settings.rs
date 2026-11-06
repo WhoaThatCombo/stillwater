@@ -24,6 +24,14 @@ const SEARCH_ENGINES: &[(&str, &str, &str)] = &[
 /// New Tab page (`servo:search-engine.js`) searches with the same engine.
 static SEARCH_TEMPLATE: RwLock<String> = RwLock::new(String::new());
 
+/// Where Stillwater keeps its settings, spaces and pins. `STILLWATER_CONFIG_DIR` overrides it
+/// (used to test without touching a real profile).
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    std::env::var_os("STILLWATER_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(crate::prefs::default_config_dir)
+}
+
 pub(crate) fn search_template() -> String {
     let template = SEARCH_TEMPLATE
         .read()
@@ -80,7 +88,7 @@ pub(crate) struct Settings {
 
 impl Settings {
     pub(crate) fn load() -> Self {
-        let path = crate::prefs::default_config_dir().map(|dir| dir.join("stillwater-settings.json"));
+        let path = config_dir().map(|dir| dir.join("stillwater-settings.json"));
         let saved = path
             .as_ref()
             .and_then(|path| std::fs::read_to_string(path).ok())

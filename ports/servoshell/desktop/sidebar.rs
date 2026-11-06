@@ -402,6 +402,13 @@ impl Sidebar {
                     if std::env::var_os("STILLWATER_OPEN_SETTINGS").is_some() {
                         self.call("openSettings()");
                     }
+                    // STILLWATER_TEST_SCRIPT: run JavaScript in the sidebar page once it's ready, to
+                    // drive the UI in tests the same way clicks do.
+                    if let Ok(script) = std::env::var("STILLWATER_TEST_SCRIPT") &&
+                        let Some(webview) = &self.webview
+                    {
+                        webview.evaluate_javascript(script, |_| {});
+                    }
                     crate::desktop::diagnostics::log("sidebar page ready");
                 },
                 "go" => {
@@ -452,6 +459,43 @@ impl Sidebar {
                 "ws-icon" => self.workspaces.cycle_icon(workspace),
                 "ws-color" => self.workspaces.cycle_color(workspace),
                 "ws-delete" => self.workspaces.delete(window, workspace),
+                // Pinned tabs, Essentials and folders. workspace holds the first numeric
+                // argument (a tab, pin or folder id) and 	ext the rest.
+                "pin" | "essential" => {
+                    if let Some(id) = self.webview_for_tab(window, &workspace.to_string()) {
+                        self.workspaces.pin_tab(window, id, command == "essential");
+                    }
+                },
+                "unpin" => self.workspaces.unpin(workspace),
+                "pin-essential" => self.workspaces.toggle_essential(workspace),
+                "pin-open" => self.workspaces.open_pin(window, workspace),
+                "pin-unload" => self.workspaces.unload_pin(window, workspace),
+                "pin-reset" => self.workspaces.reset_pin(window, workspace),
+                "pin-rename" => self.workspaces.rename_pin(workspace, text),
+                "pin-folder" => self.workspaces.move_pin_to_folder(workspace, text.parse().ok()),
+                "pin-move" => self.workspaces.move_pin(workspace, text.parse().unwrap_or(0)),
+                "tab-rename" => {
+                    if let Some(id) = self.webview_for_tab(window, &workspace.to_string()) {
+                        self.workspaces.rename_tab(id, text);
+                    }
+                },
+                "tab-move-space" => {
+                    if let (Some(id), Ok(space)) =
+                        (self.webview_for_tab(window, &workspace.to_string()), text.parse())
+                    {
+                        self.workspaces.move_tab_to_space(window, id, space);
+                    }
+                },
+                "folder-new" => {
+                    let folder = self.workspaces.create_folder();
+                    // Optionally move a pinned tab straight into the new folder.
+                    if workspace != 0 {
+                        self.workspaces.move_pin_to_folder(workspace, Some(folder));
+                    }
+                },
+                "folder-rename" => self.workspaces.rename_folder(workspace, text),
+                "folder-toggle" => self.workspaces.toggle_folder(workspace),
+                "folder-delete" => self.workspaces.delete_folder(workspace),
                 "toggle-compact" => {
                     self.toggle_compact();
                     layout_changed = true;
@@ -500,7 +544,8 @@ impl Sidebar {
 
         let active = window.active_webview();
         let active_id = active.as_ref().map(WebView::id);
-        let current_tabs = self.workspaces.current_tabs(window);
+        self.workspaces.refresh_pins(window, &self.favicons);
+        let current_tabs = self.workspaces.regular_tabs(window);
         let mut tabs = Vec::with_capacity(current_tabs.len());
         for (id, webview) in webviews.iter().filter(|(id, _)| current_tabs.contains(id)) {
             let tab_id = *self.tab_ids.entry(*id).or_insert_with(|| {
@@ -509,7 +554,7 @@ impl Sidebar {
             });
             tabs.push(serde_json::json!({
                 "id": tab_id,
-                "title": webview.page_title().unwrap_or_default(),
+                "title": self.workspaces.custom_title(*id).cloned().or_else(|| webview.page_title()).unwrap_or_default(),
                 "url": webview.url().map(|url| url.to_string()).unwrap_or_default(),
                 "active": Some(*id) == active_id,
                 "loading": matches!(webview.load_status(), LoadStatus::Started | LoadStatus::HeadParsed),
@@ -520,6 +565,8 @@ impl Sidebar {
         let background = format!("rgb({r}, {g}, {b})");
         let state = serde_json::json!({
             "tabs": tabs,
+            "essentials": self.workspaces.essentials_json(window, active_id),
+            "pinned": self.workspaces.pinned_json(window, active_id),
             "url": active.as_ref().and_then(|webview| webview.url()).map(|url| url.to_string()).unwrap_or_default(),
             "canGoBack": active.as_ref().is_some_and(|webview| webview.can_go_back()),
             "canGoForward": active.as_ref().is_some_and(|webview| webview.can_go_forward()),
