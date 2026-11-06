@@ -10,13 +10,28 @@
     <main>
       <img src="resource:///stillwater-icon.png" alt="" draggable="false" />
       <form action="https://duckduckgo.com/html/">
-        <input name="q" placeholder="Search the web" aria-label="Search the web" autocomplete="off" />
-        <button type="submit">Search</button>
+        <input name="q" aria-label="Search the web" autocomplete="off" />
+        <span class="placeholder" aria-hidden="true">Search the web</span>
       </form>
     </main>
     <footer>
       <a href="https://github.com/WhoaThatCombo/stillwater">Stillwater</a>, powered by
       <a href="https://servo.org">Servo</a>
     </footer>
+    <script>
+      // Placeholder overlay (Servo can select an empty field's placeholder text).
+      const form = document.querySelector("form");
+      const input = form.querySelector("input");
+      const sync = () => form.classList.toggle("has-value", input.value.length > 0);
+      input.addEventListener("input", sync);
+      sync();
+      // Enter searches (there's no button).
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && input.value.trim()) {
+          event.preventDefault();
+          form.submit();
+        }
+      });
+    </script>
   </body>
 </html>

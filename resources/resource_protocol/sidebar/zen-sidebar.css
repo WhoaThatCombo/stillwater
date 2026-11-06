@@ -176,6 +176,30 @@ button {
   opacity: 0.6;
 }
 
+/* Placeholders are drawn as an overlay: Servo can select an empty field's placeholder text. */
+.field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+}
+
+.field .placeholder {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0.55;
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.field.has-value .placeholder {
+  display: none;
+}
+
 #url {
   flex: 1;
   min-width: 0;

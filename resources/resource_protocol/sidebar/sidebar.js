@@ -132,6 +132,7 @@ function render() {
   if (document.activeElement !== url) {
     url.value = state.url === "servo:newtab" ? "" : state.url;
   }
+  syncPlaceholder();
 }
 
 window.sidebar = {
@@ -141,10 +142,15 @@ window.sidebar = {
   },
   focusUrl() {
     url.focus();
-    url.select();
+    // Selecting an empty field would highlight its placeholder in Servo.
+    if (url.value) url.select();
   },
 };
 
+function syncPlaceholder() {
+  url.parentElement.classList.toggle("has-value", url.value.length > 0);
+}
+url.addEventListener("input", syncPlaceholder);
 url.addEventListener("focus", () => urlbar.classList.add("focused"));
 url.addEventListener("blur", () => urlbar.classList.remove("focused"));
 url.addEventListener("keydown", (event) => {
@@ -199,7 +205,14 @@ function finishRename(commit) {
   nameInput.hidden = true;
   nameButton.hidden = false;
 }
+// Double-click to rename (like Zen), so a stray click doesn't open the editor.
+// Timed by hand rather than with the dblclick event, which Servo may not fire.
+let lastNameClick = 0;
 nameButton.addEventListener("click", () => {
+  const now = Date.now();
+  const isDouble = now - lastNameClick < 400;
+  lastNameClick = isDouble ? 0 : now;
+  if (!isDouble) return;
   nameInput.value = currentWorkspace().name;
   nameButton.hidden = true;
   nameInput.hidden = false;

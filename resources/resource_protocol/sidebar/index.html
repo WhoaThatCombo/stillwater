@@ -24,13 +24,15 @@
 
   <div id="urlbar">
     <span class="icon urlbar-icon">&#xE721;</span>
-    <input id="url" type="text" spellcheck="false" autocomplete="off"
-           placeholder="Search or enter address">
+    <span class="field">
+      <input id="url" type="text" spellcheck="false" autocomplete="off" aria-label="Search or enter address">
+      <span class="placeholder" aria-hidden="true">Search or enter address</span>
+    </span>
   </div>
 
   <div id="workspace-header">
     <button id="ws-icon" class="icon ws-icon" title="Change icon"></button>
-    <button id="ws-name" title="Rename space"></button>
+    <button id="ws-name" title="Double-click to rename"></button>
     <input id="ws-name-input" type="text" spellcheck="false" autocomplete="off" hidden>
     <span class="spacer"></span>
     <button id="ws-color" class="ws-color" title="Change colour"></button>
