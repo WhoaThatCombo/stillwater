@@ -633,3 +633,13 @@ button.secondary {
 button.secondary:hover {
   background: var(--toolbarbutton-background-color-hover);
 }
+.update-error {
+  margin: 2px 4px 4px;
+  color: rgb(230, 110, 100);
+  opacity: 1;
+  overflow-wrap: anywhere;
+}
+
+.update-error[hidden] {
+  display: none;
+}

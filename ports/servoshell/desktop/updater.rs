@@ -24,7 +24,7 @@ use crate::desktop::event_loop::AppEvent;
 
 /// This build's Stillwater version. Keep in sync with `support/windows/*.wxs*` and the
 /// `ProductVersion` in `ports/servoshell/Cargo.toml` when releasing.
-pub(crate) const CURRENT_VERSION: &str = "0.2.2";
+pub(crate) const CURRENT_VERSION: &str = "0.2.3";
 
 const RELEASES_API: &str =
     "https://api.github.com/repos/WhoaThatCombo/stillwater/releases?per_page=10";
@@ -182,6 +182,10 @@ fn check(proxy: EventLoopProxy<AppEvent>, delay: Duration, report: bool) {
             match find_update(&releases) {
                 Some(update) => {
                     diagnostics::log(format!("update check: found {update:?}"));
+                    // STILLWATER_UPDATE_AUTOINSTALL: start installing at once (for testing).
+                    if std::env::var_os("STILLWATER_UPDATE_AUTOINSTALL").is_some() {
+                        install(update.clone(), proxy.clone());
+                    }
                     let _ = proxy.send_event(AppEvent::UpdateAvailable(update));
                 },
                 None => {
@@ -248,6 +252,11 @@ pub(crate) fn install(update: UpdateInfo, proxy: EventLoopProxy<AppEvent>) {
                     return;
                 },
             };
+            // STILLWATER_UPDATE_DRY_RUN: stop after downloading and verifying (for testing).
+            if std::env::var_os("STILLWATER_UPDATE_DRY_RUN").is_some() {
+                diagnostics::log("update: dry run, not installing");
+                return;
+            }
             let Ok(exe) = std::env::current_exe() else {
                 return;
             };
@@ -263,6 +272,13 @@ pub(crate) fn install(update: UpdateInfo, proxy: EventLoopProxy<AppEvent>) {
                 quote(&setup),
                 quote(&exe),
             );
+            // STILLWATER_UPDATE_FAKE_INSTALL: run a harmless script instead of the setup (testing).
+            let script = if std::env::var_os("STILLWATER_UPDATE_FAKE_INSTALL").is_some() {
+                "Set-Content -Path (Join-Path $env:TEMP 'stillwater-fake-1.txt') -Value started; Start-Sleep -Seconds 2; Set-Content -Path (Join-Path $env:TEMP 'stillwater-fake-2.txt') -Value finished".to_owned()
+            } else {
+                script
+            };
+            diagnostics::log(format!("update: starting installer: {script}"));
             let mut command = Command::new("powershell.exe");
             command.args([
                 "-NoProfile",
@@ -275,15 +291,22 @@ pub(crate) fn install(update: UpdateInfo, proxy: EventLoopProxy<AppEvent>) {
             #[cfg(target_os = "windows")]
             {
                 use std::os::windows::process::CommandExt;
+                // Hidden, in its own process group so it outlives Stillwater. Not DETACHED_PROCESS:
+                // PowerShell started detached with inherited (invalid) stdio exits immediately.
                 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                const DETACHED_PROCESS: u32 = 0x0000_0008;
-                command.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+                const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+                command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
             }
+            command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
             match command.spawn() {
                 Ok(_) => {
                     let _ = proxy.send_event(AppEvent::UpdateReadyToRestart);
                 },
                 Err(error) => {
+                    diagnostics::log(format!("update: couldn't start the installer: {error}"));
                     let _ = proxy.send_event(AppEvent::UpdateStatus(UpdateStatus::Failed(
                         format!("couldn't start the installer: {error}"),
                     )));

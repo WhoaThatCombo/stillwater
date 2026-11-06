@@ -109,11 +109,16 @@ function renderUpdate() {
   const button = $("update");
   const update = state.update;
   button.hidden = !update;
-  if (!update) return;
+  if (!update) {
+    document.getElementById("update-error").hidden = true;
+    return;
+  }
   const status = update.status;
   button.disabled = status === "downloading" || status === "installing";
   button.classList.toggle("failed", status.startsWith("failed"));
-  button.title = status.startsWith("failed") ? status.slice("failed: ".length) : "";
+  const error = document.getElementById("update-error");
+  error.hidden = !status.startsWith("failed");
+  error.textContent = error.hidden ? "" : status.slice("failed: ".length);
   if (status === "downloading") button.textContent = "Downloading update…";
   else if (status === "installing") button.textContent = "Installing update…";
   else if (status.startsWith("failed")) button.textContent = "Update failed. Try again";
