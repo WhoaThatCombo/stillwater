@@ -82,14 +82,18 @@ fn find<'a>(boxes: &'a [BoxRef], kind: &[u8; 4]) -> Option<&'a BoxRef> {
 }
 
 fn be_u32(data: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_be_bytes(data.get(offset..offset + 4)?.try_into().ok()?))
+    Some(u32::from_be_bytes(
+        data.get(offset..offset + 4)?.try_into().ok()?,
+    ))
 }
 
 fn be_u64(data: &[u8], offset: usize) -> Option<u64> {
-    Some(u64::from_be_bytes(data.get(offset..offset + 8)?.try_into().ok()?))
+    Some(u64::from_be_bytes(
+        data.get(offset..offset + 8)?.try_into().ok()?,
+    ))
 }
 
-fn write_box(out: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
+pub(crate) fn write_box(out: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
     out.extend_from_slice(&((payload.len() + 8) as u32).to_be_bytes());
     out.extend_from_slice(kind);
     out.extend_from_slice(payload);
@@ -107,8 +111,9 @@ pub(crate) enum TrackKind {
 pub(crate) struct TrackInfo {
     #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) id: u32,
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) kind: TrackKind,
+    /// The sample entry type (`avc1`, `mp4a`, `vp09`, `Opus`, ...).
+    pub(crate) codec: [u8; 4],
     /// Media time units per second (`mdhd`).
     pub(crate) timescale: u32,
     /// From `trex`: used when fragments don't give sample durations, sizes or flags.
@@ -144,8 +149,10 @@ pub(crate) fn parse_init_segment(data: &[u8]) -> Option<InitSegment> {
     let mvhd_box = find(&moov_children, b"mvhd")?;
     let mvhd = data[mvhd_box.range.clone()].to_vec();
     let mvhd_version = *data.get(mvhd_box.payload.start)?;
-    let movie_timescale =
-        be_u32(data, mvhd_box.payload.start + if mvhd_version == 1 { 4 + 16 } else { 4 + 8 })?;
+    let movie_timescale = be_u32(
+        data,
+        mvhd_box.payload.start + if mvhd_version == 1 { 4 + 16 } else { 4 + 8 },
+    )?;
 
     let trexes: Vec<(u32, [u32; 3], Vec<u8>)> = find(&moov_children, b"mvex")
         .map(|mvex| {
@@ -180,6 +187,16 @@ pub(crate) fn parse_init_segment(data: &[u8]) -> Option<InitSegment> {
         let mdhd_version = *data.get(mdhd.payload.start)?;
         let timescale_offset = mdhd.payload.start + if mdhd_version == 1 { 4 + 16 } else { 4 + 8 };
         let timescale = be_u32(data, timescale_offset)?;
+        let codec = find(&mdia_children, b"minf")
+            .and_then(|minf| {
+                let stbl = children(data, minf.payload.clone());
+                let stbl = find(&stbl, b"stbl")?;
+                let stsd = children(data, stbl.payload.clone());
+                let stsd = find(&stsd, b"stsd")?;
+                read_box(data, stsd.payload.start + 8).ok().flatten()
+            })
+            .map(|entry| entry.kind)
+            .unwrap_or_default();
         let kind = match find(&mdia_children, b"hdlr")
             .and_then(|hdlr| data.get(hdlr.payload.start + 8..hdlr.payload.start + 12))
         {
@@ -206,6 +223,7 @@ pub(crate) fn parse_init_segment(data: &[u8]) -> Option<InitSegment> {
         tracks.push(TrackInfo {
             id,
             kind,
+            codec,
             timescale,
             default_sample_duration: defaults[0],
             default_sample_size: defaults[1],
@@ -341,10 +359,17 @@ pub(crate) struct FragmentInfo {
     pub(crate) decode_time: u64,
     /// Total duration of its samples, in the track's timescale.
     pub(crate) duration: u64,
+    /// Whether its first sample is a sync sample (a keyframe), so playback can start there.
+    pub(crate) starts_with_sync: bool,
 }
 
 /// Timing of the `moof` at `moof` (the box itself) inside `data`.
-pub(crate) fn parse_fragment(data: &[u8], moof: &BoxRef, default_duration: u32) -> Option<FragmentInfo> {
+pub(crate) fn parse_fragment(
+    data: &[u8],
+    moof: &BoxRef,
+    default_duration: u32,
+    default_flags: u32,
+) -> Option<FragmentInfo> {
     let traf = children(data, moof.payload.clone())
         .into_iter()
         .find(|child| &child.kind == b"traf")?;
@@ -361,8 +386,16 @@ pub(crate) fn parse_fragment(data: &[u8], moof: &BoxRef, default_duration: u32) 
         offset += 4; // sample description index
     }
     let mut sample_duration = default_duration;
+    let mut sample_flags = default_flags;
     if tfhd_flags & 0x08 != 0 {
         sample_duration = be_u32(data, offset)?;
+        offset += 4;
+    }
+    if tfhd_flags & 0x10 != 0 {
+        offset += 4; // default sample size
+    }
+    if tfhd_flags & 0x20 != 0 {
+        sample_flags = be_u32(data, offset)?;
     }
 
     let decode_time = match find(&traf_children, b"tfdt") {
@@ -378,6 +411,7 @@ pub(crate) fn parse_fragment(data: &[u8], moof: &BoxRef, default_duration: u32) 
     };
 
     let mut duration = 0u64;
+    let mut first_flags = None;
     for trun in traf_children.iter().filter(|child| &child.kind == b"trun") {
         let flags = be_u32(data, trun.payload.start)? & 0x00ff_ffff;
         let count = be_u32(data, trun.payload.start + 4)?;
@@ -386,7 +420,18 @@ pub(crate) fn parse_fragment(data: &[u8], moof: &BoxRef, default_duration: u32) 
             cursor += 4; // data offset
         }
         if flags & 0x04 != 0 {
+            first_flags.get_or_insert(be_u32(data, cursor)?);
             cursor += 4; // first sample flags
+        }
+        if count > 0 && flags & 0x400 != 0 {
+            // The first sample's own flags follow its duration and size, when present.
+            let at = cursor +
+                if flags & 0x100 != 0 { 4 } else { 0 } +
+                if flags & 0x200 != 0 { 4 } else { 0 };
+            first_flags.get_or_insert(be_u32(data, at)?);
+        }
+        if count > 0 {
+            first_flags.get_or_insert(sample_flags);
         }
         let per_sample = [0x100, 0x200, 0x400, 0x800]
             .iter()
@@ -407,16 +452,23 @@ pub(crate) fn parse_fragment(data: &[u8], moof: &BoxRef, default_duration: u32) 
         track_id,
         decode_time,
         duration,
+        // `sample_is_non_sync_sample` clear: playback can start here.
+        starts_with_sync: first_flags.is_none_or(|flags| flags & 0x0001_0000 == 0),
     })
 }
 
 /// One sample of a fragment, with everything needed to write it into a new `trun`.
-struct Sample {
-    duration: u32,
-    size: u32,
-    flags: u32,
-    composition_offset: u32,
+pub(crate) struct Sample {
+    pub(crate) duration: u32,
+    pub(crate) size: u32,
+    pub(crate) flags: u32,
+    pub(crate) composition_offset: u32,
 }
+
+/// `trun` sample flags of a sync sample (depends on no other sample).
+pub(crate) const SYNC_SAMPLE_FLAGS: u32 = 0x0200_0000;
+/// `trun` sample flags of a non-sync sample (depends on others, `sample_is_non_sync_sample`).
+pub(crate) const NON_SYNC_SAMPLE_FLAGS: u32 = 0x0101_0000;
 
 /// A piece of a split fragment: a self-contained `moof` + `mdat`, ready to feed.
 pub(crate) struct Chunk {
@@ -431,7 +483,8 @@ const CHUNK_SEQUENCE_OFFSET: usize = 8 + 8 + 4;
 /// Set the sequence number of a chunk made by [`split_fragment`].
 pub(crate) fn set_chunk_sequence(chunk: &mut [u8], sequence: u32) {
     if chunk.len() >= CHUNK_SEQUENCE_OFFSET + 4 {
-        chunk[CHUNK_SEQUENCE_OFFSET..CHUNK_SEQUENCE_OFFSET + 4].copy_from_slice(&sequence.to_be_bytes());
+        chunk[CHUNK_SEQUENCE_OFFSET..CHUNK_SEQUENCE_OFFSET + 4]
+            .copy_from_slice(&sequence.to_be_bytes());
     }
 }
 
@@ -484,7 +537,9 @@ pub(crate) fn split_fragment(
     }
 
     let decode_time = match find(&traf_children, b"tfdt") {
-        Some(tfdt) if data.get(tfdt.payload.start) == Some(&1) => be_u64(data, tfdt.payload.start + 4)?,
+        Some(tfdt) if data.get(tfdt.payload.start) == Some(&1) => {
+            be_u64(data, tfdt.payload.start + 4)?
+        },
         Some(tfdt) => be_u32(data, tfdt.payload.start + 4)? as u64,
         None => 0,
     };
@@ -519,7 +574,11 @@ pub(crate) fn split_fragment(
             let mut sample = Sample {
                 duration: default_duration,
                 size: default_size,
-                flags: if index == 0 { first_flags.unwrap_or(default_flags) } else { default_flags },
+                flags: if index == 0 {
+                    first_flags.unwrap_or(default_flags)
+                } else {
+                    default_flags
+                },
                 composition_offset: 0,
             };
             if flags & 0x100 != 0 {
@@ -560,20 +619,19 @@ pub(crate) fn split_fragment(
     while start < samples.len() {
         let mut end = start;
         let mut duration = 0u64;
-        while end < samples.len() && (end == start || duration + samples[end].duration as u64 <= max_duration) {
+        while end < samples.len() &&
+            (end == start || duration + samples[end].duration as u64 <= max_duration)
+        {
             duration += samples[end].duration as u64;
             end += 1;
         }
+        let payloads: Vec<&[u8]> = sample_data[start..end]
+            .iter()
+            .map(|range| &data[range.clone()])
+            .collect();
         chunks.push(Chunk {
             decode_time: time,
-            bytes: write_chunk(
-                data,
-                &samples[start..end],
-                &sample_data[start..end],
-                new_id,
-                time,
-                trun_version,
-            ),
+            bytes: write_chunk(&samples[start..end], &payloads, new_id, time, trun_version),
         });
         time += duration;
         start = end;
@@ -581,17 +639,18 @@ pub(crate) fn split_fragment(
     Some(chunks)
 }
 
-/// Write `samples` as one `moof` (mfhd, traf: tfhd, tfdt, trun) followed by their `mdat`.
-fn write_chunk(
-    data: &[u8],
+/// Write `samples` as one `moof` (mfhd, traf: tfhd, tfdt, trun) followed by their `mdat`
+/// (`payloads`, one per sample).
+pub(crate) fn write_chunk(
     samples: &[Sample],
-    ranges: &[std::ops::Range<usize>],
+    payloads: &[&[u8]],
     track_id: u32,
     decode_time: u64,
     trun_version: u8,
 ) -> Vec<u8> {
     let has_composition_offsets = samples.iter().any(|sample| sample.composition_offset != 0);
-    let trun_flags: u32 = 0x001 | 0x100 | 0x200 | 0x400 | if has_composition_offsets { 0x800 } else { 0 };
+    let trun_flags: u32 =
+        0x001 | 0x100 | 0x200 | 0x400 | if has_composition_offsets { 0x800 } else { 0 };
     let per_sample = if has_composition_offsets { 16 } else { 12 };
 
     // Sizes are fixed, so the data offset can be computed before writing.
@@ -629,14 +688,14 @@ fn write_chunk(
     write_box(&mut moof, b"mfhd", &[0; 8]);
     write_box(&mut moof, b"traf", &traf);
 
-    let mut out = Vec::with_capacity(moof_len + 8 + ranges.iter().map(|range| range.len()).sum::<usize>());
+    let mdat_len: usize = payloads.iter().map(|payload| payload.len()).sum();
+    let mut out = Vec::with_capacity(moof_len + 8 + mdat_len);
     write_box(&mut out, b"moof", &moof);
     debug_assert_eq!(out.len(), moof_len);
-    let mdat_len: usize = ranges.iter().map(|range| range.len()).sum();
     out.extend_from_slice(&((mdat_len + 8) as u32).to_be_bytes());
     out.extend_from_slice(b"mdat");
-    for range in ranges {
-        out.extend_from_slice(&data[range.clone()]);
+    for payload in payloads {
+        out.extend_from_slice(payload);
     }
     out
 }
@@ -667,7 +726,11 @@ mod tests {
         let mut hdlr = vec![0; 4];
         hdlr.extend_from_slice(handler);
         hdlr.extend_from_slice(&[0; 13]);
-        let mdia = [boxed(b"mdhd", &full(0, 0, &mdhd)), boxed(b"hdlr", &full(0, 0, &hdlr))].concat();
+        let mdia = [
+            boxed(b"mdhd", &full(0, 0, &mdhd)),
+            boxed(b"hdlr", &full(0, 0, &hdlr)),
+        ]
+        .concat();
         let trak = [boxed(b"tkhd", &full(0, 0, &tkhd)), boxed(b"mdia", &mdia)].concat();
         let mut trex = track_id.to_be_bytes().to_vec();
         trex.extend_from_slice(&1u32.to_be_bytes());
@@ -695,7 +758,11 @@ mod tests {
             boxed(b"trun", &full(0, 0x100, &trun)),
         ]
         .concat();
-        let moof = [boxed(b"mfhd", &full(0, 0, &7u32.to_be_bytes())), boxed(b"traf", &traf)].concat();
+        let moof = [
+            boxed(b"mfhd", &full(0, 0, &7u32.to_be_bytes())),
+            boxed(b"traf", &traf),
+        ]
+        .concat();
         [boxed(b"moof", &moof), boxed(b"mdat", b"abcd")].concat()
     }
 
@@ -707,7 +774,8 @@ mod tests {
         assert_eq!(audio.tracks[0].timescale, 48000);
         assert_eq!(audio.tracks[0].default_sample_duration, 1000);
 
-        let combined = combined_init_segment(&[(&video, &video.tracks[0]), (&audio, &audio.tracks[0])]);
+        let combined =
+            combined_init_segment(&[(&video, &video.tracks[0]), (&audio, &audio.tracks[0])]);
         let parsed = parse_init_segment(&combined).unwrap();
         let ids: Vec<u32> = parsed.tracks.iter().map(|track| track.id).collect();
         assert_eq!(ids, vec![1, 2]);
@@ -719,8 +787,11 @@ mod tests {
         let video = parse_init_segment(&init(1, b"vide", 90000)).unwrap();
         let data = fragment(1, 180_000, &[3000, 3000, 3000]);
         let moof = read_box(&data, 0).unwrap().unwrap();
-        let info = parse_fragment(&data, &moof, 0).unwrap();
-        assert_eq!((info.track_id, info.decode_time, info.duration), (1, 180_000, 9000));
+        let info = parse_fragment(&data, &moof, 0, 0).unwrap();
+        assert_eq!(
+            (info.track_id, info.decode_time, info.duration),
+            (1, 180_000, 9000)
+        );
 
         // Split into pieces of two samples at most, renumbered and shifted.
         let chunks = split_fragment(&data, &video.tracks[0], 2, 90_000, 6000).unwrap();
@@ -728,7 +799,10 @@ mod tests {
         assert_eq!(chunks[0].decode_time, 90_000);
         assert_eq!(chunks[1].decode_time, 96_000);
         let moof = read_box(&chunks[1].bytes, 0).unwrap().unwrap();
-        let info = parse_fragment(&chunks[1].bytes, &moof, 0).unwrap();
-        assert_eq!((info.track_id, info.decode_time, info.duration), (2, 96_000, 3000));
+        let info = parse_fragment(&chunks[1].bytes, &moof, 0, 0).unwrap();
+        assert_eq!(
+            (info.track_id, info.decode_time, info.duration),
+            (2, 96_000, 3000)
+        );
     }
 }

@@ -2411,9 +2411,8 @@ impl HTMLMediaElement {
                 Resource::Url(url) => MediaSource::from_object_url(url.as_str()).is_some(),
                 Resource::Object => false,
             };
-            let should_enable_download_buffering = !is_media_source &&
-                (is_video || self.Loop()) &&
-                self.Preload() == "auto";
+            let should_enable_download_buffering =
+                !is_media_source && (is_video || self.Loop()) && self.Preload() == "auto";
             if let Err(error) =
                 player_guard.set_download_buffering_enabled(should_enable_download_buffering)
             {

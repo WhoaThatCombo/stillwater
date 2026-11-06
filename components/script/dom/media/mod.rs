@@ -20,3 +20,4 @@ pub(crate) mod sourcebufferlist;
 pub(crate) mod videoplaybackquality;
 pub(crate) mod videotrack;
 pub(crate) mod videotracklist;
+pub(crate) mod webm;

@@ -24,14 +24,27 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::eventtarget::EventTarget;
-use crate::dom::fmp4::{InitSegment, TrackInfo, parse_fragment, parse_init_segment, read_box};
+use crate::dom::fmp4::{
+    InitSegment, TrackInfo, TrackKind, parse_fragment, parse_init_segment, read_box,
+};
 use crate::dom::mediasource::MediaSource;
 use crate::dom::timeranges::{TimeRanges, TimeRangesContainer};
+use crate::dom::webm::{WebmOutput, WebmParser};
 use crate::dom::window::Window;
 
-/// Most media a single `SourceBuffer` may hold before appends fail with `QuotaExceededError`
-/// (after evicting what's already been played). Sites then remove old data themselves.
-const MAX_BUFFERED_BYTES: usize = 300 * 1024 * 1024;
+/// Most media a video `SourceBuffer` may hold before appends fail with `QuotaExceededError`
+/// (after evicting what's already been played); sites then remove old data themselves. The same
+/// limits as Chrome, which sites' buffering strategies are tuned for.
+const MAX_VIDEO_BYTES: usize = 150 * 1024 * 1024;
+/// The same for an audio `SourceBuffer`.
+const MAX_AUDIO_BYTES: usize = 12 * 1024 * 1024;
+
+/// Media that ended this long before the playhead is dropped whenever more is appended, so a
+/// long video doesn't keep everything it played in memory. (Sites usually trim it themselves.)
+const BACK_BUFFER_SECONDS: f64 = 30.0;
+
+/// When over quota, evict played media up to this long before the playhead.
+const MIN_BACK_BUFFER_SECONDS: f64 = 3.0;
 
 /// Two times closer than this are treated as the same (fragment boundaries, buffered ranges).
 const EPSILON: f64 = 0.02;
@@ -44,6 +57,8 @@ pub(crate) struct Fragment {
     pub(crate) bytes: Vec<u8>,
     /// Which initialization segment it belongs to (changes when a site switches quality).
     pub(crate) generation: u32,
+    /// Whether it starts with a keyframe, so playback can (re)start at it.
+    pub(crate) keyframe: bool,
 }
 
 /// What a `SourceBuffer` holds: its initialization segments and parsed media segments.
@@ -59,6 +74,8 @@ pub(crate) struct TrackBuffer {
     /// Fragments by start time, in microseconds.
     fragments: BTreeMap<u64, Fragment>,
     bytes: usize,
+    /// Set while the appended byte stream is WebM, which is remuxed to fragmented MP4.
+    webm: Option<Box<WebmParser>>,
 }
 
 impl TrackBuffer {
@@ -74,6 +91,28 @@ impl TrackBuffer {
 
     /// Parse newly appended bytes. `Err` means the data isn't valid fragmented MP4.
     fn append(&mut self, data: &[u8], timestamp_offset: f64) -> Result<(), ()> {
+        // Which byte stream format this is: sniffed at the start of an initialization segment
+        // (sites may switch with changeType()).
+        if self.pending.is_empty() && self.moof.is_none() {
+            if data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+                if self.webm.is_none() {
+                    self.webm = Some(Box::default());
+                }
+            } else if matches!(data.get(4..8), Some(b"ftyp" | b"styp" | b"moov")) {
+                self.webm = None;
+            }
+        }
+        if let Some(webm) = self.webm.as_mut() {
+            for output in webm.append(data)? {
+                match output {
+                    WebmOutput::Init(init) => self.add_init(init)?,
+                    WebmOutput::Fragment(fragment) => {
+                        self.add_fragment(fragment, timestamp_offset)?
+                    },
+                }
+            }
+            return Ok(());
+        }
         self.pending.extend_from_slice(data);
         let mut consumed = 0;
         while let Some(found) = read_box(&self.pending, consumed)? {
@@ -84,21 +123,7 @@ impl TrackBuffer {
                 b"moov" => {
                     let mut init = self.ftyp.take().unwrap_or_default();
                     init.extend_from_slice(&bytes);
-                    let parsed = parse_init_segment(&init).ok_or(())?;
-                    let same = self
-                        .inits
-                        .get(&self.generation)
-                        .is_some_and(|current| current.raw == parsed.raw);
-                    if !same {
-                        self.generation += 1;
-                        self.inits.insert(self.generation, parsed);
-                        let generation = self.generation;
-                        let used: Vec<u32> =
-                            self.fragments.values().map(|fragment| fragment.generation).collect();
-                        self.inits.retain(|other, _| {
-                            *other == generation || used.contains(other)
-                        });
-                    }
+                    self.add_init(init)?;
                 },
                 b"moof" => self.moof = Some(bytes),
                 b"mdat" => {
@@ -115,11 +140,44 @@ impl TrackBuffer {
         Ok(())
     }
 
+    /// A new initialization segment (`ftyp` + `moov`); a different one starts a new generation.
+    fn add_init(&mut self, init: Vec<u8>) -> Result<(), ()> {
+        let parsed = parse_init_segment(&init).ok_or(())?;
+        let same = self
+            .inits
+            .get(&self.generation)
+            .is_some_and(|current| current.raw == parsed.raw);
+        if !same {
+            self.generation += 1;
+            self.inits.insert(self.generation, parsed);
+            self.forget_unused_inits();
+        }
+        Ok(())
+    }
+
+    /// Drop initialization segments that no buffered fragment uses (except the current one).
+    fn forget_unused_inits(&mut self) {
+        let generation = self.generation;
+        let used: Vec<u32> = self
+            .fragments
+            .values()
+            .map(|fragment| fragment.generation)
+            .collect();
+        self.inits
+            .retain(|other, _| *other == generation || used.contains(other));
+    }
+
     fn add_fragment(&mut self, bytes: Vec<u8>, timestamp_offset: f64) -> Result<(), ()> {
         let track = self.track().ok_or(())?;
         let timescale = track.timescale.max(1) as f64;
         let moof = read_box(&bytes, 0)?.ok_or(())?;
-        let info = parse_fragment(&bytes, &moof, track.default_sample_duration).ok_or(())?;
+        let info = parse_fragment(
+            &bytes,
+            &moof,
+            track.default_sample_duration,
+            track.default_sample_flags,
+        )
+        .ok_or(())?;
         let start = info.decode_time as f64 / timescale + timestamp_offset;
         let end = start + info.duration as f64 / timescale;
 
@@ -143,6 +201,7 @@ impl TrackBuffer {
                 end,
                 bytes,
                 generation: self.generation,
+                keyframe: info.starts_with_sync,
             },
         );
         Ok(())
@@ -189,7 +248,9 @@ impl TrackBuffer {
         let doomed: Vec<u64> = self
             .fragments
             .iter()
-            .filter(|(_, fragment)| fragment.start >= start - EPSILON && fragment.end <= end + EPSILON)
+            .filter(|(_, fragment)| {
+                fragment.start >= start - EPSILON && fragment.end <= end + EPSILON
+            })
             .map(|(key, _)| *key)
             .collect();
         for key in doomed {
@@ -204,6 +265,9 @@ impl TrackBuffer {
         self.pending.clear();
         self.moof = None;
         self.ftyp = None;
+        if self.webm.is_some() {
+            self.webm = Some(Box::default());
+        }
     }
 }
 
@@ -224,7 +288,11 @@ pub(crate) struct SourceBuffer {
 }
 
 impl SourceBuffer {
-    pub(crate) fn new(cx: &mut JSContext, window: &Window, parent: &MediaSource) -> DomRoot<SourceBuffer> {
+    pub(crate) fn new(
+        cx: &mut JSContext,
+        window: &Window,
+        parent: &MediaSource,
+    ) -> DomRoot<SourceBuffer> {
         reflect_dom_object(
             cx,
             Box::new(SourceBuffer {

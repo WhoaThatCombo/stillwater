@@ -69,6 +69,46 @@ struct Feed {
     end_of_stream_sent: bool,
     /// Per buffer: pieces cut from its current fragment, waiting to be fed (media start time).
     queues: Vec<VecDeque<(f64, Vec<u8>)>>,
+    /// Where playback (re)started: each buffer starts with the variant playing there.
+    start: f64,
+    /// A variant with another codec begins at this time: the stream ends there, and playback
+    /// restarts with a new pipeline once it gets there (see [`MediaSource::take_pending_switch`]).
+    switch_at: Option<f64>,
+}
+
+/// Two times closer than this are the same (matches `SourceBuffer`'s fragment tolerance).
+const EPSILON: f64 = 0.02;
+
+/// The most video pixels per second `isTypeSupported` admits (when a type gives its size):
+/// software decoding plus conversion of the frames must keep up in real time.
+const MAX_PIXELS_PER_SECOND: f64 = 3840.0 * 2160.0 * 60.0;
+
+/// Whether one `codecs` entry can be played from an MP4 or WebM `SourceBuffer`.
+fn codec_supported(codec: &str, webm: bool, audio_only: bool) -> bool {
+    // VP9 in "vp09.PP.LL.DD[...]" form: profiles 0 and 1 at 8 bits (not 10-bit / HDR).
+    let vp09 = || {
+        let mut fields = codec.split('.').skip(1);
+        let profile = fields.next().unwrap_or("00");
+        let _level = fields.next();
+        let depth = fields.next().unwrap_or("08");
+        matches!(profile, "00" | "01") && depth == "08"
+    };
+    let video = match codec {
+        "vp8" | "vp8.0" | "vp9" | "vp9.0" if webm => true,
+        _ if codec.starts_with("vp09.") => vp09(),
+        _ if codec.starts_with("avc1.") || codec.starts_with("avc3.") => !webm,
+        _ => false,
+    };
+    if video {
+        return !audio_only;
+    }
+    match codec {
+        "opus" => true,
+        "mp4a.40.2" | "mp4a.40.5" | "mp4a.40.29" | "mp4a.40" | "mp4a.67" => !webm,
+        // MP3 and FLAC in MP4, like Chrome.
+        "mp3" | "mp4a.69" | "mp4a.6b" | "mp4a.40.34" | "flac" => !webm,
+        _ => false,
+    }
 }
 
 /// Length of the pieces fragments are cut into, so audio and video interleave finely.
@@ -96,12 +136,24 @@ pub(crate) struct MediaSource {
 
 impl MediaSource {
     /// Whether `type` (a MIME type with optional `codecs`) can be played through MSE.
+    ///
+    /// Fragmented MP4 with H.264, VP9 (8-bit), AAC, MP3, FLAC or Opus, and WebM with VP8, VP9
+    /// (8-bit) or Opus, in any combination across buffers. WebM is remuxed to MP4 (see `webm.rs`).
+    /// Videos too big to decode in software in real time are refused (see
+    /// [`MAX_PIXELS_PER_SECOND`]), so adaptive players pick a variant that plays smoothly.
     pub(crate) fn type_supported(type_: &str) -> bool {
         let mut parts = type_.split(';');
         let container = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
-        if container != "video/mp4" && container != "audio/mp4" {
-            return false;
-        }
+        let (webm, audio_only) = match container.as_str() {
+            "video/mp4" => (false, false),
+            "audio/mp4" => (false, true),
+            "video/webm" => (true, false),
+            "audio/webm" => (true, true),
+            _ => return false,
+        };
+        let mut width = 0f64;
+        let mut height = 0f64;
+        let mut framerate = 0f64;
         for parameter in parts {
             let Some((name, value)) = parameter.split_once('=') else {
                 continue;
@@ -110,37 +162,40 @@ impl MediaSource {
             let value = value.trim().trim_matches('"').to_ascii_lowercase();
             match name.as_str() {
                 "codecs" => {
-                    let supported = value.split(',').map(str::trim).all(|codec| {
-                        codec.starts_with("avc1.") ||
-                            codec.starts_with("avc3.") ||
-                            codec == "mp4a.40.2" ||
-                            codec == "mp4a.40.5" ||
-                            codec == "mp4a.40.29" ||
-                            codec == "mp4a.40" ||
-                            codec == "mp4a.67"
-                    });
+                    let supported = value
+                        .split(',')
+                        .map(str::trim)
+                        .all(|codec| codec_supported(codec, webm, audio_only));
                     if !supported {
                         return false;
                     }
                 },
+                "width" => width = value.parse().unwrap_or(0.0),
+                "height" => height = value.parse().unwrap_or(0.0),
+                "framerate" => framerate = value.parse().unwrap_or(0.0),
                 // HDR transfer functions and encrypted media aren't supported.
                 "eotf" if value != "bt709" => return false,
                 "cryptoblockformat" => return false,
                 _ => {},
             }
         }
-        true
+        let framerate = if framerate > 0.0 { framerate } else { 30.0 };
+        width * height * framerate <= MAX_PIXELS_PER_SECOND
     }
 
     /// The `MediaSource` behind an object URL, if `url` is one.
     pub(crate) fn from_object_url(url: &str) -> Option<DomRoot<MediaSource>> {
-        OBJECT_URLS.with(|urls| urls.borrow().get(url).map(Trusted::root))
+        OBJECT_URLS.with(|urls| urls.borrow().get(url).and_then(|(source, _)| source.root()))
     }
 
     /// `URL.createObjectURL(mediaSource)`.
     pub(crate) fn create_object_url(&self, global: &GlobalScope) -> DOMString {
         let url = URL::unicode_serialization_blob_url(global.origin().immutable(), &Uuid::new_v4());
-        OBJECT_URLS.with(|urls| urls.borrow_mut().insert(url.clone(), Trusted::new(self)));
+        OBJECT_URLS.with(|urls| {
+            let mut urls = urls.borrow_mut();
+            urls.retain(|_, (source, _)| source.is_alive());
+            urls.insert(url.clone(), (WeakRef::new(self), Some(Trusted::new(self))));
+        });
         DOMString::from(url)
     }
 
@@ -353,6 +408,7 @@ impl MediaSource {
         feed.sequence = feed.sequence.wrapping_add(1);
         Some(MseChunk::Data(bytes))
     }
+
     fn any_updating(&self) -> bool {
         self.source_buffers
             .buffers()
@@ -430,7 +486,11 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
     }
 
     /// <https://w3c.github.io/media-source/#dom-mediasource-addsourcebuffer>
-    fn AddSourceBuffer(&self, cx: &mut JSContext, type_: DOMString) -> Fallible<DomRoot<SourceBuffer>> {
+    fn AddSourceBuffer(
+        &self,
+        cx: &mut JSContext,
+        type_: DOMString,
+    ) -> Fallible<DomRoot<SourceBuffer>> {
         if type_.is_empty() {
             return Err(Error::Type(c"Empty type".to_owned()));
         }
