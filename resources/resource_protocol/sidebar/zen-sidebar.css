@@ -58,6 +58,18 @@ body {
   overflow: hidden;
 }
 
+/* The sidebar is browser chrome, not a document: clicks shouldn't select its text.
+   Only the text fields (address bar, space name) stay selectable. */
+html,
+body,
+button {
+  user-select: none;
+}
+
+input {
+  user-select: text;
+}
+
 body {
   display: flex;
   flex-direction: column;

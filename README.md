@@ -27,9 +27,21 @@ renders its interface with Gecko.
 
 ## Download
 
-Get the latest Windows build (x64) from [Releases](https://github.com/WhoaThatCombo/stillwater/releases).
-Extract the zip and run `Stillwater\Stillwater.exe`, or use the `Stillwater-Setup.exe` installer. The build isn't code-signed, so Windows SmartScreen
-may ask you to confirm the first time it runs.
+Get the latest Windows build (x64) from [Releases](https://github.com/WhoaThatCombo/stillwater/releases):
+
+- **`Stillwater-Setup-<version>.exe`** (recommended): installs just for you, with no admin prompt.
+  It adds Start menu and desktop shortcuts and an uninstaller, registers Stillwater as a browser, and
+  keeps Stillwater up to date.
+- **`Stillwater-<version>-windows-x64.zip`**: a portable copy. Extract it and run `Stillwater\Stillwater.exe`.
+
+To make Stillwater your default browser, open **Settings → Apps → Default apps**, pick **Stillwater**, and
+set it for HTTP, HTTPS and .html. Links you open from other apps arrive as new tabs in the Stillwater
+window you already have open.
+
+Installed copies check GitHub for new versions on launch. When one is available, an **Update** button
+appears at the bottom of the sidebar; one click downloads it, checks its SHA-256, and restarts Stillwater
+on the new version. The build isn't code-signed, so Windows SmartScreen may ask you to confirm the
+first install.
 
 ## Features
 
@@ -39,6 +51,8 @@ may ask you to confirm the first time it runs.
   colour, and the colour tints the whole window. Space definitions are saved between launches.
 - **Compact mode**: the sidebar hides and slides back in when your mouse touches the left edge.
 - **Rounded content card**: web pages sit in an inset, rounded frame, like Zen.
+- **No title bar**: like Zen, the page runs to the top edge. Minimise, maximise and close sit in the sidebar,
+  and dragging empty sidebar space moves the window (`--native-titlebar` brings the Windows title bar back).
 - **Light and dark**: follows the Windows theme.
 
 ![Stillwater's default sidebar](.github/assets/stillwater-sidebar.png)
@@ -118,6 +132,11 @@ cd stillwater
 - [ ] Drag tabs between spaces, pinned tabs, folders
 - [ ] Command palette
 - [x] Prebuilt Windows downloads
+- [x] Installer, default-browser registration and auto-updates
+- [ ] Built-in adblocker using uBlock Origin's filter lists
+- [ ] Essentials, pinned tabs, folders, Glance
+- [ ] Bookmarks, history, downloads, find in page, settings
+- [ ] Import from Zen
 - [x] Stillwater name and icon in the window and installer
 
 ## Credits

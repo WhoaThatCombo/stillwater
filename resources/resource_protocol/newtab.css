@@ -31,6 +31,15 @@ body {
   margin: 0;
 }
 
+/* Only the search box should be selectable on the new tab page. */
+body {
+  user-select: none;
+}
+
+input {
+  user-select: text;
+}
+
 body {
   display: flex;
   flex-direction: column;
