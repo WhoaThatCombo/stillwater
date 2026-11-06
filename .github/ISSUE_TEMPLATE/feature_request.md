@@ -1,11 +1,12 @@
 ---
-name: Feature Request
-about: Suggest the implementation of a new feature
-title: ''
-labels: B-feature-tracking, C-untriaged
-assignees: ''
-
+name: Feature idea
+about: Suggest something for Stillwater's sidebar, spaces or interface
+labels: enhancement
 ---
 
-**Describe the new feature:**
-A clear and concise description of the new feature with links to any relevant specifications.
+**What would you like Stillwater to do?**
+
+**Why would it help you?**
+
+**Anything similar in other browsers?**
+<!-- e.g. how Zen, Arc or Firefox handles it -->

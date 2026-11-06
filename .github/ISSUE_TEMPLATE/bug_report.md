@@ -1,17 +1,23 @@
 ---
-name: Bug Report
-about: Create a bug report to help us improve
-title: ''
-labels: C-untriaged
-assignees: ''
-
+name: Bug report
+about: Something in Stillwater doesn't work as expected
+labels: bug
 ---
 
-**Describe the bug:**
-A clear and concise description of the bug.
+**What happened**
+<!-- A clear description of the problem. Screenshots help a lot. -->
 
-**To Reproduce:**
-Steps to reproduce the behavior.
+**Steps to reproduce**
+1.
+2.
+3.
 
-**Platform:**
-Specify OS, distribution, and hardware platform.
+**What you expected**
+
+**Is it the sidebar or the page?**
+<!-- If a website renders wrong, check whether it also breaks in upstream Servo (https://servo.org/download/).
+     Rendering bugs that also happen in Servo belong at https://github.com/servo/servo/issues. -->
+
+**System**
+- Windows version:
+- Stillwater commit (`git rev-parse --short HEAD`):
