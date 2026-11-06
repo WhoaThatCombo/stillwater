@@ -8,27 +8,34 @@
 interface Animation : EventTarget {
   constructor(optional AnimationEffect? effect = null,
               optional AnimationTimeline? timeline);
-  //          attribute DOMString                id;
+              attribute DOMString                id;
               attribute AnimationEffect?         effect;
               attribute AnimationTimeline?       timeline;
-  //          attribute double?                  startTime;
-  //          attribute double?                  currentTime;
-  //          attribute double                   playbackRate;
-  // readonly attribute AnimationPlayState       playState;
-  // readonly attribute AnimationReplaceState    replaceState;
-  // readonly attribute boolean                  pending;
-  // readonly attribute Promise<Animation>       ready;
-  // readonly attribute Promise<Animation>       finished;
-  //          attribute EventHandler             onfinish;
-  //          attribute EventHandler             oncancel;
-  //          attribute EventHandler             onremove;
-  // undefined cancel();
-  // undefined finish();
-  // undefined play();
-  // undefined pause();
-  // undefined updatePlaybackRate(double playbackRate);
-  // undefined reverse();
-  // undefined persist();
-  // [CEReactions]
-  // undefined commitStyles();
+              attribute double?                  startTime;
+  [SetterThrows]
+              attribute double?                  currentTime;
+              attribute double                   playbackRate;
+  readonly attribute AnimationPlayState       playState;
+  readonly attribute AnimationReplaceState    replaceState;
+  readonly attribute boolean                  pending;
+  readonly attribute Promise<Animation>       ready;
+  readonly attribute Promise<Animation>       finished;
+              attribute EventHandler             onfinish;
+              attribute EventHandler             oncancel;
+              attribute EventHandler             onremove;
+  undefined cancel();
+  [Throws] undefined finish();
+  [Throws] undefined play();
+  [Throws] undefined pause();
+  undefined updatePlaybackRate(double playbackRate);
+  [Throws] undefined reverse();
+  undefined persist();
+  [CEReactions, Throws]
+  undefined commitStyles();
 };
+
+// https://drafts.csswg.org/web-animations-1/#the-animationplaystate-enumeration
+enum AnimationPlayState { "idle", "running", "paused", "finished" };
+
+// https://drafts.csswg.org/web-animations-1/#the-animationreplacestate-enumeration
+enum AnimationReplaceState { "active", "removed", "persisted" };

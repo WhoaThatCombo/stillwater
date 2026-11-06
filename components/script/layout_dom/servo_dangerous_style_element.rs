@@ -181,11 +181,33 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
     ) -> Option<Arc<StyleLocked<PropertyDeclarationBlock>>> {
         let node = self.as_node();
         let document = node.owner_doc();
-        context.animations.get_animation_declarations(
-            &AnimationSetKey::new_for_non_pseudo(node.opaque()),
-            context.current_time_for_animations,
-            &document.shared_style_locks().author,
-        )
+        let key = AnimationSetKey::new_for_non_pseudo(node.opaque());
+        let lock = &document.shared_style_locks().author;
+        // Stillwater: Web Animations API animations compose above CSS animations.
+        let Some(script_declarations) = document.script_animation_declarations_for_layout(key.node)
+        else {
+            return context.animations.get_animation_declarations(
+                &key,
+                context.current_time_for_animations,
+                lock,
+            );
+        };
+        // Build the CSS animation values without taking the style lock (the traversal
+        // already holds it), then add the script animation values on top.
+        let mut block = context
+            .animations
+            .sets
+            .read()
+            .get(&key)
+            .and_then(|set| {
+                set.get_value_map_for_active_animations(context.current_time_for_animations)
+            })
+            .map(|map| PropertyDeclarationBlock::from_animation_value_map(&map))
+            .unwrap_or_default();
+        for (declaration, importance) in script_declarations.declaration_importance_iter() {
+            block.push(declaration.clone(), importance);
+        }
+        Some(Arc::new(lock.wrap(block)))
     }
 
     fn transition_rule(
@@ -367,9 +389,13 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
         // This is not used for pseudo elements currently so we can use the non-pseudo key.
         let key = AnimationSetKey::new_for_non_pseudo(self.as_node().opaque());
         self.may_have_animations() &&
-            context
+            (context
                 .animations
-                .has_active_animations_or_transitions(&key)
+                .has_active_animations_or_transitions(&key) ||
+                self.as_node()
+                    .owner_doc()
+                    .script_animation_declarations_for_layout(key.node)
+                    .is_some())
     }
 
     fn has_css_animations(

@@ -390,6 +390,24 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
         self.custom_element_registry()
     }
 
+    /// <https://drafts.csswg.org/web-animations-1/#dom-documentorshadowroot-getanimations>
+    fn GetAnimations(&self) -> Vec<DomRoot<crate::dom::types::Animation>> {
+        // Only script-created animations are tracked.
+        use script_bindings::codegen::GenericBindings::DocumentBinding::DocumentMethods;
+        let node = self.upcast::<Node>();
+        node.owner_doc()
+            .Timeline()
+            .animations()
+            .into_iter()
+            .filter(|animation| {
+                animation.is_relevant() &&
+                    animation
+                        .target_element()
+                        .is_some_and(|target| node.is_inclusive_ancestor_of(target.upcast()))
+            })
+            .collect()
+    }
+
     /// <https://drafts.csswg.org/cssom-view/#dom-document-elementfrompoint>
     fn ElementFromPoint(
         &self,

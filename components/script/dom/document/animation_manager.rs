@@ -22,6 +22,7 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
 use script_bindings::refcounted::Trusted;
 use serde::{Deserialize, Serialize};
+use servo_arc::Arc as ServoArc;
 use servo_base::id::PipelineId;
 use servo_constellation_traits::ScriptToConstellationMessage;
 use style::animation::{
@@ -29,6 +30,7 @@ use style::animation::{
     KeyframesIterationState, Transition,
 };
 use style::dom::OpaqueNode;
+use style::properties::PropertyDeclarationBlock;
 use style::selector_parser::PseudoElement;
 use timers::TimerId;
 
@@ -83,7 +85,17 @@ pub(crate) struct AnimationManager {
     /// The [`TimerId`] of the currently scheduled animated image update callback.
     #[no_trace]
     image_callback_timer_id: Cell<Option<TimerId>>,
+
+    /// Stillwater: the declarations that script-created (Web Animations API) animations
+    /// currently apply to each target node. Layout reads these in `animation_rule()`.
+    #[no_trace]
+    #[ignore_malloc_size_of = "Arc"]
+    script_animation_declarations: ScriptAnimationDeclarations,
 }
+
+/// Declarations applied by Web Animations API animations, by target node.
+pub(crate) type ScriptAnimationDeclarations =
+    Arc<RwLock<FxHashMap<OpaqueNode, ServoArc<PropertyDeclarationBlock>>>>;
 
 impl AnimationManager {
     pub(crate) fn new() -> Self {
@@ -96,7 +108,39 @@ impl AnimationManager {
             pending_events: Default::default(),
             timeline_value_at_last_dirty: Cell::new(0.0),
             image_callback_timer_id: Default::default(),
+            script_animation_declarations: Default::default(),
         }
+    }
+
+    /// Set (or with `None`, remove) the declarations that script-created animations apply to
+    /// `node`. The caller is responsible for restyling the node.
+    pub(crate) fn set_script_animation_declarations(
+        &self,
+        node: &Node,
+        declarations: Option<ServoArc<PropertyDeclarationBlock>>,
+    ) {
+        let mut map = self.script_animation_declarations.write();
+        match declarations {
+            Some(declarations) => {
+                node.set_flag(NodeFlags::HAS_EVER_ANIMATED, true);
+                map.insert(node.to_opaque(), declarations);
+            },
+            None => {
+                map.remove(&node.to_opaque());
+            },
+        }
+    }
+
+    /// The declarations that script-created animations apply to `node`, for layout.
+    pub(crate) fn script_animation_declarations(
+        &self,
+        node: OpaqueNode,
+    ) -> Option<ServoArc<PropertyDeclarationBlock>> {
+        let map = self.script_animation_declarations.read();
+        if map.is_empty() {
+            return None;
+        }
+        map.get(&node).cloned()
     }
 
     pub(crate) fn animating_images(&self) -> Arc<RwLock<AnimatingImages>> {
@@ -113,6 +157,7 @@ impl AnimationManager {
         self.rooted_animation_nodes.borrow_mut().clear();
         self.rooted_image_nodes.borrow_mut().clear();
         self.pending_events.borrow_mut().clear();
+        self.script_animation_declarations.write().clear();
     }
 
     // Mark all animations dirty, if they haven't been marked dirty since the

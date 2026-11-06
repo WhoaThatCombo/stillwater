@@ -8,10 +8,10 @@ interface SVGElement : Element {
 
   //[SameObject] readonly attribute SVGAnimatedString className;
 
-  //[SameObject] readonly attribute DOMStringMap dataset;
+  [SameObject] readonly attribute DOMStringMap dataset;
 
-  //readonly attribute SVGSVGElement? ownerSVGElement;
-  //readonly attribute SVGElement? viewportElement;
+  readonly attribute SVGSVGElement? ownerSVGElement;
+  readonly attribute SVGElement? viewportElement;
 
   //attribute long tabIndex;
   //void focus();

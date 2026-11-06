@@ -57,7 +57,10 @@ pub fn main() {
     // Turn on Servo's experimental web features: in tools/sitecheck they took usable sites
     // from 65 to 71 of 81 and fixed blank pages. STILLWATER_NO_EXPERIMENTAL opts out.
     if env::var_os("STILLWATER_NO_EXPERIMENTAL").is_none() {
-        for name in crate::prefs::EXPERIMENTAL_PREFS {
+        for name in crate::prefs::EXPERIMENTAL_PREFS
+            .iter()
+            .chain(crate::prefs::STILLWATER_EXTRA_PREFS)
+        {
             preferences.set_value(name, servo::PrefValue::Bool(true));
         }
     }

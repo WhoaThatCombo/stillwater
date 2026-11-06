@@ -2,31 +2,41 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
 use atomic_refcell::AtomicRefCell;
 use base64::Engine as _;
 use cssparser::Parser;
 use dom_struct::dom_struct;
+use euclid::default::Transform3D;
 use html5ever::{LocalName, Prefix, local_name, ns};
 use js::context::{JSContext, NoGC};
 use js::rust::HandleObject;
 use layout_api::SVGElementData;
+use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_url::ServoUrl;
 use style::attr::AttrValue;
 use style::parser::ParserContext;
 use style::stylesheets::Origin;
 use style::values::specified::LengthPercentage;
 use style_traits::ParsingMode;
+use stylo_atoms::Atom;
 use uuid::Uuid;
 use xml5ever::serialize::TraversalScope;
 
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
+use crate::dom::bindings::codegen::Bindings::SVGSVGElementBinding::SVGSVGElementMethods;
 use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::root::{DomRoot, LayoutDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::document::Document;
 use crate::dom::element::attributes::storage::AttrRef;
 use crate::dom::element::{AttributeMutation, Element};
+use crate::dom::geometry::dommatrix::DOMMatrix;
+use crate::dom::geometry::dompoint::DOMPoint;
+use crate::dom::geometry::domrect::DOMRect;
 use crate::dom::iterators::ShadowIncluding;
 use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::node::{
@@ -44,6 +54,9 @@ pub(crate) struct SVGSVGElement {
     // on each layout and must be invalidated when the subtree changes.
     #[no_trace]
     cached_serialized_data_url: AtomicRefCell<Option<Result<ServoUrl, ()>>>,
+    /// The document time container of SVG 1.1 (getCurrentTime() and friends).
+    /// <https://www.w3.org/TR/SVG11/struct.html#InterfaceSVGSVGElement>
+    time_container: TimeContainer,
 }
 
 impl SVGSVGElement {
@@ -56,6 +69,7 @@ impl SVGSVGElement {
             svggraphicselement: SVGGraphicsElement::new_inherited(local_name, prefix, document),
             uuid: Uuid::new_v4(),
             cached_serialized_data_url: Default::default(),
+            time_container: Default::default(),
         }
     }
 
@@ -182,6 +196,117 @@ impl SVGSVGElement {
     }
 }
 
+/// The SVG 1.1 document time container: the clock that SMIL animations in an `<svg>`
+/// fragment run on. Stillwater renders SVG without SMIL animations, but scripts still
+/// pause, seek and read this clock, so it is kept faithfully.
+#[derive(Default, JSTraceable, MallocSizeOf)]
+struct TimeContainer {
+    /// Seconds subtracted from the document's clock to get this container's time.
+    offset: Cell<f64>,
+    /// The document clock reading when the container was paused, if it is paused.
+    paused_at: Cell<Option<f64>>,
+}
+
+impl SVGSVGElement {
+    /// Seconds since the document's time origin.
+    fn document_clock(&self) -> f64 {
+        let window = self.owner_window();
+        (CrossProcessInstant::now() - window.navigation_start()).as_seconds_f64()
+    }
+
+    fn current_time(&self) -> f64 {
+        let clock = self
+            .time_container
+            .paused_at
+            .get()
+            .unwrap_or_else(|| self.document_clock());
+        (clock - self.time_container.offset.get()).max(0.0)
+    }
+}
+
+impl SVGSVGElementMethods<crate::DomTypeHolder> for SVGSVGElement {
+    /// <https://svgwg.org/svg2-draft/struct.html#__svg__SVGSVGElement__createSVGPoint>
+    fn CreateSVGPoint(&self, cx: &mut JSContext) -> DomRoot<DOMPoint> {
+        DOMPoint::new(cx, &self.owner_global(), 0.0, 0.0, 0.0, 1.0)
+    }
+
+    /// <https://svgwg.org/svg2-draft/struct.html#__svg__SVGSVGElement__createSVGMatrix>
+    fn CreateSVGMatrix(&self, cx: &mut JSContext) -> DomRoot<DOMMatrix> {
+        DOMMatrix::new(cx, &self.owner_global(), true, Transform3D::identity())
+    }
+
+    /// <https://svgwg.org/svg2-draft/struct.html#__svg__SVGSVGElement__createSVGRect>
+    fn CreateSVGRect(&self, cx: &mut JSContext) -> DomRoot<DOMRect> {
+        DOMRect::new(cx, &self.owner_global(), 0.0, 0.0, 0.0, 0.0)
+    }
+
+    /// <https://svgwg.org/svg2-draft/struct.html#__svg__SVGSVGElement__getElementById>
+    fn GetElementById(&self, element_id: DOMString) -> Option<DomRoot<Element>> {
+        // > Searches this SVG document fragment (i.e., the search is restricted to a
+        // > subset of the document tree) for an Element whose id property matches elementId.
+        let id = Atom::from(element_id);
+        self.upcast::<Node>()
+            .traverse_preorder(ShadowIncluding::No)
+            .skip(1)
+            .filter_map(DomRoot::downcast::<Element>)
+            .find(|element| element.get_id().as_ref() == Some(&id))
+    }
+
+    /// <https://svgwg.org/svg2-draft/struct.html#__svg__SVGSVGElement__suspendRedraw>
+    fn SuspendRedraw(&self, _max_wait_milliseconds: u32) -> u32 {
+        // > ... has no effect and returns 1.
+        1
+    }
+
+    /// <https://svgwg.org/svg2-draft/struct.html#__svg__SVGSVGElement__unsuspendRedraw>
+    fn UnsuspendRedraw(&self, _suspend_handle_id: u32) {}
+
+    /// <https://svgwg.org/svg2-draft/struct.html#__svg__SVGSVGElement__unsuspendRedrawAll>
+    fn UnsuspendRedrawAll(&self) {}
+
+    /// <https://svgwg.org/svg2-draft/struct.html#__svg__SVGSVGElement__forceRedraw>
+    fn ForceRedraw(&self) {}
+
+    /// <https://www.w3.org/TR/SVG11/struct.html#__svg__SVGSVGElement__pauseAnimations>
+    fn PauseAnimations(&self) {
+        if self.time_container.paused_at.get().is_none() {
+            self.time_container
+                .paused_at
+                .set(Some(self.document_clock()));
+        }
+    }
+
+    /// <https://www.w3.org/TR/SVG11/struct.html#__svg__SVGSVGElement__unpauseAnimations>
+    fn UnpauseAnimations(&self) {
+        if let Some(paused_at) = self.time_container.paused_at.take() {
+            let paused_for = self.document_clock() - paused_at;
+            self.time_container
+                .offset
+                .set(self.time_container.offset.get() + paused_for);
+        }
+    }
+
+    /// <https://www.w3.org/TR/SVG11/struct.html#__svg__SVGSVGElement__animationsPaused>
+    fn AnimationsPaused(&self) -> bool {
+        self.time_container.paused_at.get().is_some()
+    }
+
+    /// <https://www.w3.org/TR/SVG11/struct.html#__svg__SVGSVGElement__getCurrentTime>
+    fn GetCurrentTime(&self) -> Finite<f32> {
+        Finite::wrap(self.current_time() as f32)
+    }
+
+    /// <https://www.w3.org/TR/SVG11/struct.html#__svg__SVGSVGElement__setCurrentTime>
+    fn SetCurrentTime(&self, seconds: Finite<f32>) {
+        let seconds = (*seconds as f64).max(0.0);
+        let clock = self
+            .time_container
+            .paused_at
+            .get()
+            .unwrap_or_else(|| self.document_clock());
+        self.time_container.offset.set(clock - seconds);
+    }
+}
 impl<'dom> LayoutDom<'dom, SVGSVGElement> {
     pub(crate) fn data(self) -> SVGElementData<'dom> {
         let svg_id = self.unsafe_get().uuid;

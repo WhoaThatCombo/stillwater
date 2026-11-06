@@ -4109,6 +4109,17 @@ impl<'dom> LayoutDom<'dom, Document> {
         self.unsafe_get().shared_style_locks()
     }
 
+    /// The declarations that Web Animations API animations apply to `node`, if any.
+    #[inline]
+    pub(crate) fn script_animation_declarations_for_layout(
+        self,
+        node: style::dom::OpaqueNode,
+    ) -> Option<servo_arc::Arc<style::properties::PropertyDeclarationBlock>> {
+        self.unsafe_get()
+            .animation_manager
+            .script_animation_declarations(node)
+    }
+
     #[inline]
     pub(crate) fn flush_shadow_root_stylesheets_if_necessary(
         self,
@@ -7725,6 +7736,25 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
 
     fn Timeline(&self) -> DomRoot<DocumentTimeline> {
         self.timeline.as_rooted()
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#dom-documentorshadowroot-getanimations>
+    fn GetAnimations(
+        &self,
+    ) -> Vec<crate::dom::bindings::root::DomRoot<crate::dom::types::Animation>> {
+        // > Returns the set of relevant animations for a subtree for the document or shadow
+        // > root on which this method is called. (Only script-created animations are tracked.)
+        self.timeline
+            .animations()
+            .into_iter()
+            .filter(|animation| {
+                animation.is_relevant() &&
+                    animation.target_element().is_some_and(|target| {
+                        let target = target.upcast::<Node>();
+                        target.is_connected() && *target.owner_doc() == *self
+                    })
+            })
+            .collect()
     }
 }
 
