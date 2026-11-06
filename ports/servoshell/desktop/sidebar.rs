@@ -9,7 +9,7 @@
 //! Rust -> Page: `window.sidebar.setState(<json>)` via `evaluate_javascript`.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Waker;
@@ -27,7 +27,7 @@ use url::Url;
 use crate::desktop::event_loop::RepaintEventLoopWaker;
 use crate::desktop::settings::{Settings, ThemeChoice};
 use crate::desktop::updater::{UpdateInfo, UpdateStatus};
-use crate::desktop::workspaces::Workspaces;
+use crate::desktop::workspaces::{TabEntry, Workspaces};
 use crate::desktop::panes::PaneKind;
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
 use crate::window::ServoShellWindow;
@@ -422,13 +422,93 @@ impl Sidebar {
         window.webview_by_id(*id).map(|webview| webview.id())
     }
 
+    /// The sidebar id of an unloaded tab, if `tab` names one.
+    fn unloaded_tab(&self, tab: &str) -> Option<u32> {
+        tab.parse()
+            .ok()
+            .filter(|key| self.workspaces.is_unloaded(*key))
+    }
+
+    /// Bring the workspace model up to date with the window's tabs. Tabs that were just loaded
+    /// again after being unloaded keep their sidebar row (id) and icon.
+    fn sync_workspaces(&mut self, window: &ServoShellWindow) {
+        self.workspaces.sync(window);
+        for (webview, key, favicon) in self.workspaces.take_restored() {
+            self.tab_ids.insert(webview, key);
+            if let Some(favicon) = favicon {
+                self.favicons.entry(webview).or_insert(favicon);
+            }
+        }
+    }
+
+    /// The sidebar id of an open tab (allocating one if the page hasn't seen it yet).
+    fn tab_key(&mut self, webview: WebViewId) -> u32 {
+        *self.tab_ids.entry(webview).or_insert_with(|| {
+            self.next_tab_id += 1;
+            self.next_tab_id
+        })
+    }
+
+    fn unload_tab(&mut self, window: &ServoShellWindow, webview: WebViewId) -> bool {
+        let key = self.tab_key(webview);
+        let favicon = self.favicons.get(&webview).cloned();
+        self.workspaces.unload_tab(window, webview, key, favicon)
+    }
+
+    /// Unload background tabs that haven't been used for the time chosen in settings and,
+    /// if `low_memory`, the least recently used one regardless. Tabs in `keep` (playing audio
+    /// or video) and the active tab are never unloaded. Returns how many were unloaded.
+    pub(crate) fn unload_inactive_tabs(
+        &mut self,
+        window: &ServoShellWindow,
+        keep: &HashSet<WebViewId>,
+        low_memory: bool,
+    ) -> usize {
+        self.sync_workspaces(window);
+        let (minutes, on_low_memory) = {
+            let settings = self.settings.borrow();
+            (settings.tab_unload_minutes, settings.unload_on_low_memory)
+        };
+        let candidates = self.workspaces.unload_candidates(window, keep);
+        let mut unloaded = 0;
+        // STILLWATER_TAB_UNLOAD_SECONDS overrides the setting (used to test the unloader).
+        let limit = std::env::var("STILLWATER_TAB_UNLOAD_SECONDS")
+            .ok()
+            .and_then(|seconds| seconds.parse().ok())
+            .unwrap_or(minutes as u64 * 60);
+        if limit > 0 {
+            let limit = std::time::Duration::from_secs(limit);
+            for (webview, idle) in &candidates {
+                if *idle >= limit && self.unload_tab(window, *webview) {
+                    unloaded += 1;
+                }
+            }
+        }
+        // Under memory pressure, also unload the least recently used tab that has been in the
+        // background for at least a minute (one per check, to avoid unloading everything).
+        if unloaded == 0 && low_memory && on_low_memory {
+            if let Some((webview, _)) = candidates
+                .iter()
+                .find(|(_, idle)| *idle >= std::time::Duration::from_secs(60))
+            {
+                if self.unload_tab(window, *webview) {
+                    unloaded += 1;
+                }
+            }
+        }
+        if unloaded > 0 {
+            window.set_needs_update();
+        }
+        unloaded
+    }
+
     /// Act on messages sent by the sidebar page. Returns true if the layout may have changed.
     pub(crate) fn handle_messages(&mut self, window: &ServoShellWindow) -> bool {
         let messages = std::mem::take(&mut *self.inbox.borrow_mut());
         if messages.is_empty() {
             return false;
         }
-        self.workspaces.sync(window);
+        self.sync_workspaces(window);
         let mut layout_changed = false;
         for message in messages {
             let (command, argument) = message.split_once('\t').unwrap_or((&message, ""));
@@ -481,6 +561,14 @@ impl Sidebar {
                     None => window.queue_user_interface_command(UserInterfaceCommand::Reload),
                 },
                 // Open a tab in split view (the tab moves there) or a pinned tab's page.
+                "split-tab" if self.unloaded_tab(argument).is_some() => {
+                    if let Some(url) = self
+                        .unloaded_tab(argument)
+                        .and_then(|key| self.workspaces.take_unloaded_url(key))
+                    {
+                        self.window_actions.push(WindowAction::OpenPane(PaneKind::Split, url));
+                    }
+                },
                 "split-tab" => {
                     if let Some(id) = self.webview_for_tab(window, argument) &&
                         let Some(url) = window.webview_by_id(id).and_then(|webview| webview.url())
@@ -528,11 +616,20 @@ impl Sidebar {
                 "activate" => {
                     if let Some(id) = self.webview_for_tab(window, argument) {
                         window.activate_webview(id);
+                    } else if let Some(key) = self.unloaded_tab(argument) {
+                        self.workspaces.activate_entry(window, TabEntry::Unloaded(key));
                     }
                 },
                 "close" => {
                     if let Some(id) = self.webview_for_tab(window, argument) {
                         self.workspaces.close_tab(window, id);
+                    } else if let Some(key) = self.unloaded_tab(argument) {
+                        self.workspaces.close_unloaded(key);
+                    }
+                },
+                "tab-unload" => {
+                    if let Some(id) = self.webview_for_tab(window, argument) {
+                        self.unload_tab(window, id);
                     }
                 },
                 "close-active" => {
@@ -562,6 +659,8 @@ impl Sidebar {
                 "pin" | "essential" => {
                     if let Some(id) = self.webview_for_tab(window, &workspace.to_string()) {
                         self.workspaces.pin_tab(window, id, command == "essential");
+                    } else if let Some(key) = self.unloaded_tab(&workspace.to_string()) {
+                        self.workspaces.pin_unloaded(key, command == "essential");
                     }
                 },
                 "unpin" => self.workspaces.unpin(workspace),
@@ -575,6 +674,8 @@ impl Sidebar {
                 "tab-rename" => {
                     if let Some(id) = self.webview_for_tab(window, &workspace.to_string()) {
                         self.workspaces.rename_tab(id, text);
+                    } else if let Some(key) = self.unloaded_tab(&workspace.to_string()) {
+                        self.workspaces.rename_unloaded(key, text);
                     }
                 },
                 "tab-move-space" => {
@@ -582,6 +683,10 @@ impl Sidebar {
                         (self.webview_for_tab(window, &workspace.to_string()), text.parse())
                     {
                         self.workspaces.move_tab_to_space(window, id, space);
+                    } else if let (Some(key), Ok(space)) =
+                        (self.unloaded_tab(&workspace.to_string()), text.parse())
+                    {
+                        self.workspaces.move_unloaded_to_space(key, space);
                     }
                 },
                 "folder-new" => {
@@ -625,6 +730,15 @@ impl Sidebar {
                     }
                 },
                 "set-search" => self.settings.borrow_mut().set_search_engine(argument),
+                "set-tab-unload" => {
+                    if let Ok(minutes) = argument.parse() {
+                        self.settings.borrow_mut().set_tab_unload_minutes(minutes);
+                    }
+                },
+                "set-unload-low-memory" => self
+                    .settings
+                    .borrow_mut()
+                    .set_unload_on_low_memory(argument == "1"),
                 _ => warn!("unknown sidebar message: {message}"),
             }
             window.set_needs_update();
@@ -637,7 +751,7 @@ impl Sidebar {
         if self.webview.is_none() {
             return;
         }
-        self.workspaces.sync(window);
+        self.sync_workspaces(window);
         let webviews = window.webviews();
         self.tab_ids
             .retain(|id, _| webviews.iter().any(|(other, _)| other == id));
@@ -655,21 +769,27 @@ impl Sidebar {
         let split = pane_json(&self.panes.0);
         let glance = pane_json(&self.panes.1);
         self.workspaces.refresh_pins(window, &self.favicons);
-        let current_tabs = self.workspaces.regular_tabs(window);
-        let mut tabs = Vec::with_capacity(current_tabs.len());
-        for (id, webview) in webviews.iter().filter(|(id, _)| current_tabs.contains(id)) {
-            let tab_id = *self.tab_ids.entry(*id).or_insert_with(|| {
-                self.next_tab_id += 1;
-                self.next_tab_id
-            });
-            tabs.push(serde_json::json!({
-                "id": tab_id,
-                "title": self.workspaces.custom_title(*id).cloned().or_else(|| webview.page_title()).unwrap_or_default(),
-                "url": webview.url().map(|url| url.to_string()).unwrap_or_default(),
-                "active": Some(*id) == active_id,
-                "loading": matches!(webview.load_status(), LoadStatus::Started | LoadStatus::HeadParsed),
-                "favicon": self.favicons.get(id),
-            }));
+        let entries = self.workspaces.regular_entries(window);
+        let mut tabs = Vec::with_capacity(entries.len());
+        for entry in entries {
+            match entry {
+                TabEntry::Live(id) => {
+                    let Some((_, webview)) = webviews.iter().find(|(other, _)| *other == id) else {
+                        continue;
+                    };
+                    let tab_id = self.tab_key(id);
+                    tabs.push(serde_json::json!({
+                        "id": tab_id,
+                        "title": self.workspaces.custom_title(id).cloned().or_else(|| webview.page_title()).unwrap_or_default(),
+                        "url": webview.url().map(|url| url.to_string()).unwrap_or_default(),
+                        "active": Some(id) == active_id,
+                        "loading": matches!(webview.load_status(), LoadStatus::Started | LoadStatus::HeadParsed),
+                        "favicon": self.favicons.get(&id),
+                        "loaded": true,
+                    }));
+                },
+                TabEntry::Unloaded(key) => tabs.extend(self.workspaces.unloaded_json(key)),
+            }
         }
         let [r, g, b] = self.background();
         let background = format!("rgb({r}, {g}, {b})");

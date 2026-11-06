@@ -299,6 +299,19 @@ impl HeadedWindow {
         self.event_loop_proxy.clone()
     }
 
+    /// Unload this window's inactive tabs (see `Sidebar::unload_inactive_tabs`).
+    pub(crate) fn unload_inactive_tabs(
+        &self,
+        window: &ServoShellWindow,
+        keep: &std::collections::HashSet<servo::WebViewId>,
+        low_memory: bool,
+    ) -> usize {
+        self.gui
+            .borrow_mut()
+            .sidebar
+            .unload_inactive_tabs(window, keep, low_memory)
+    }
+
     /// Change the sidebar's state from outside a UI update (e.g. updater progress).
     pub(crate) fn with_sidebar(&self, change: impl FnOnce(&mut crate::desktop::sidebar::Sidebar)) {
         change(&mut self.gui.borrow_mut().sidebar);

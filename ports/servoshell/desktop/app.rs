@@ -52,7 +52,15 @@ pub struct App {
     /// Keep the event loop ticking until this time, e.g. after another launch handed us a URL:
     /// on Windows the window otherwise may not repaint until it receives its next message.
     tick_until: Option<Instant>,
+    /// When to next look for tabs to unload (inactive ones, or any when memory is low).
+    next_memory_check: Instant,
+    /// When Servo was last told that memory is low (it drops caches, so not too often).
+    last_memory_pressure: Option<Instant>,
 }
+
+/// How often to look for inactive tabs to unload, and how often while memory is low.
+const MEMORY_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const LOW_MEMORY_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl App {
     pub fn new(
@@ -80,6 +88,8 @@ impl App {
             t,
             state: AppState::Initializing,
             tick_until: None,
+            next_memory_check: t + MEMORY_CHECK_INTERVAL,
+            last_memory_pressure: None,
         }
     }
 
@@ -233,10 +243,53 @@ impl App {
 
     fn control_flow(&self) -> ControlFlow {
         if self.busy() {
-            // ~60 Hz while busy; sleep fully when idle so an idle browser costs no CPU.
+            // ~60 Hz while busy; sleep when idle so an idle browser costs almost no CPU, waking
+            // only to check for tabs to unload.
             ControlFlow::WaitUntil(Instant::now() + std::time::Duration::from_millis(16))
         } else {
-            ControlFlow::Wait
+            let mut wake = self.next_memory_check;
+            if let AppState::Running(state) = &self.state &&
+                let Some(gc_due) = state.idle_gc_due()
+            {
+                wake = wake.min(gc_due);
+            }
+            ControlFlow::WaitUntil(wake)
+        }
+    }
+
+    /// Unload tabs that haven't been used for a while (see the sidebar's settings) and, when
+    /// Windows is low on memory, the least recently used background tab.
+    fn check_memory(&mut self) {
+        let low_memory = crate::desktop::memory::system_memory_low();
+        self.next_memory_check = Instant::now() +
+            if low_memory {
+                LOW_MEMORY_CHECK_INTERVAL
+            } else {
+                MEMORY_CHECK_INTERVAL
+            };
+        let AppState::Running(state) = &self.state else {
+            return;
+        };
+        let playing = state.playing_media();
+        let mut unloaded = 0;
+        for window in state.windows().iter() {
+            if let Some(headed_window) = window.platform_window().as_headed_window() {
+                unloaded += headed_window.unload_inactive_tabs(window, &playing, low_memory);
+            }
+        }
+        if unloaded > 0 {
+            diagnostics::log(format!(
+                "memory check: low_memory={low_memory} unloaded={unloaded}"
+            ));
+        }
+        // Also drop rendering caches and collect garbage, at most once a minute.
+        if low_memory &&
+            self.last_memory_pressure
+                .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(60))
+        {
+            self.last_memory_pressure = Some(Instant::now());
+            diagnostics::log("memory is low: asking Servo to free caches");
+            state.servo().notify_memory_pressure();
         }
     }
 
@@ -278,6 +331,12 @@ impl ApplicationHandler<AppEvent> for App {
         }
         diagnostics::count("tick");
         diagnostics::maybe_summarize(|| self.busy_reason());
+        if Instant::now() >= self.next_memory_check {
+            self.check_memory();
+        }
+        if let AppState::Running(state) = &self.state {
+            state.maybe_collect_garbage();
+        }
         if let AppState::Running(state) = &self.state {
             for window in state.windows().iter() {
                 window.set_needs_repaint();
