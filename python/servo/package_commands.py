@@ -370,6 +370,9 @@ class PackageCommands(CommandBase):
             copy_packaged_resources(dir_to_root, dir_to_resources)
             shutil.copy(binary_path, dir_to_temp)
             copy_windows_dependencies(target_dir, dir_to_temp)
+            # Stillwater: ship a short README and the license next to the exe.
+            shutil.copy(path.join(dir_to_root, "support", "windows", "README.txt"), dir_to_temp)
+            shutil.copy(path.join(dir_to_root, "LICENSE"), path.join(dir_to_temp, "LICENSE.txt"))
 
             # generate ServoShell.wxs
             import mako.template
@@ -424,8 +427,10 @@ class PackageCommands(CommandBase):
 
             # Generate bundle with Servo installer.
             print("Creating bundle")
-            shutil.copy(path.join(dir_to_root, "support", "windows", "ServoShell.wxs"), dir_to_msi)
-            bundle_wxs_path = path.join(dir_to_msi, "ServoShell.wxs")
+            # Stillwater: the bundle's file name becomes the setup exe's name.
+            bundle_wxs_path = path.join(dir_to_msi, "Stillwater-Setup.wxs")
+            shutil.copy(path.join(dir_to_root, "support", "windows", "ServoShell.wxs"), bundle_wxs_path)
+            shutil.copy(path.join(dir_to_root, "resources", "stillwater_64.png"), dir_to_msi)
             try:
                 with cd(dir_to_msi):
                     subprocess.check_call(
@@ -442,11 +447,13 @@ class PackageCommands(CommandBase):
             except subprocess.CalledProcessError as e:
                 print("WiX build exited with return value %d" % e.returncode)
                 return e.returncode
-            print("Packaged Servo into " + path.join(dir_to_msi, "ServoShell.exe"))
+            print("Packaged Stillwater into " + path.join(dir_to_msi, "Stillwater-Setup.exe"))
 
             print("Creating ZIP")
-            zip_path = path.join(dir_to_msi, "ServoShell.zip")
-            archive_deterministically(dir_to_temp, zip_path, prepend_path="servo/")
+            # Stillwater: the portable build ships the exe as Stillwater.exe.
+            os.rename(path.join(dir_to_temp, "servoshell.exe"), path.join(dir_to_temp, "Stillwater.exe"))
+            zip_path = path.join(dir_to_msi, "Stillwater.zip")
+            archive_deterministically(dir_to_temp, zip_path, prepend_path="Stillwater/")
             print("Packaged Servo into " + zip_path)
 
             print("Cleaning up")

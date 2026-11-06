@@ -27,10 +27,11 @@ workspace = true
 winresource = { workspace = true }
 
 [package.metadata.winresource]
-FileDescription = "ServoShell"
-LegalCopyright = "© The Servo Project Developers"
-OriginalFilename = "servoshell.exe"
-ProductName = "ServoShell"
+FileDescription = "Stillwater"
+LegalCopyright = "© The Servo Project Developers and Stillwater contributors"
+OriginalFilename = "Stillwater.exe"
+ProductName = "Stillwater"
+ProductVersion = "0.1.1"
 
 [features]
 # Don't add new features to `default` directly. Add to `default_base` instead.

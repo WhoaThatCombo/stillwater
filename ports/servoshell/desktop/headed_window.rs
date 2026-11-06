@@ -58,7 +58,7 @@ use crate::window::{
     ServoShellWindowId,
 };
 
-pub(crate) const INITIAL_WINDOW_TITLE: &str = "Servo";
+pub(crate) const INITIAL_WINDOW_TITLE: &str = "Stillwater";
 
 pub struct HeadedWindow {
     /// The [`EventLoopProxy`] for this [`HeadedWindow`].
@@ -133,7 +133,7 @@ impl HeadedWindow {
 
         // Set a name so it can be pinned to taskbars in Linux.
         #[cfg(target_os = "linux")]
-        let window_attr = window_attr.with_name("org.servo.Servo", "Servo");
+        let window_attr = window_attr.with_name("io.github.whoathatcombo.Stillwater", "Stillwater");
 
         #[allow(deprecated)]
         let winit_window = event_loop
@@ -142,7 +142,7 @@ impl HeadedWindow {
 
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
-            let icon_bytes = include_bytes!("../../../resources/servo_64.png");
+            let icon_bytes = include_bytes!("../../../resources/stillwater_64.png");
             winit_window.set_window_icon(Some(load_icon(icon_bytes)));
         }
 
@@ -984,6 +984,7 @@ impl PlatformWindow for HeadedWindow {
                     .filter(|title| !title.is_empty())
                     .or_else(|| webview.url().map(|url| url.to_string()))
             })
+            .map(|title| format!("{title} — {INITIAL_WINDOW_TITLE}"))
             .unwrap_or_else(|| INITIAL_WINDOW_TITLE.to_string());
         if title != *self.last_title.borrow() {
             self.winit_window.set_title(&title);

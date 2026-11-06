@@ -1,26 +1,26 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="Servo Tech Demo"
-           Manufacturer="The Servo Authors"
-           UpgradeCode="060cd15d-eab1-4614-b438-3988e3efdcf1"
+  <Package Name="Stillwater"
+           Manufacturer="Stillwater contributors"
+           UpgradeCode="603d88ba-b9d4-4932-8667-ecdfc2b94e0e"
            Language="1033"
            Codepage="1252"
-           Version="0.8.0"
+           Version="0.1.1"
            InstallerVersion="200">
     <SummaryInformation Keywords="Installer"
-                        Description="Servo Tech Demo Installer"
-                        Manufacturer="The Servo Authors"/>
+                        Description="Stillwater Installer"
+                        Manufacturer="Stillwater contributors"/>
     <MajorUpgrade AllowDowngrades="yes"/>
     <Media Id="1"
-           Cabinet="Servo.cab"
+           Cabinet="Stillwater.cab"
            EmbedCab="yes"/>
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="Servo" Name="Servo">
-        <Directory Id="INSTALLDIR" Name="Servo Tech Demo">
-            <Component Id="Servo"
-                       Guid="95bcea71-78bb-4ec8-9766-44bc01443840"
+      <Directory Id="StillwaterRoot" Name="Stillwater">
+        <Directory Id="INSTALLDIR" Name="Stillwater">
+            <Component Id="StillwaterMain"
+                       Guid="944d7db1-de0f-4eaf-a11c-15aa80abd451"
                        Bitness="always64">
               <File Id="ServoEXE"
-                    Name="servoshell.exe"
+                    Name="Stillwater.exe"
                     DiskId="1"
                     Source="${windowize(exe_path)}\servoshell.exe"
                     KeyPath="yes">
@@ -34,18 +34,18 @@
       </StandardDirectory>
 
       <StandardDirectory Id="ProgramMenuFolder">
-        <Directory Id="ProgramMenuDir" Name="Servo Tech Demo">
-          <Component Id="ProgramMenuDir" Guid="e04737ce-16eb-4977-9b4c-ed2db8a5a77d">
+        <Directory Id="ProgramMenuDir" Name="Stillwater">
+          <Component Id="ProgramMenuDir" Guid="3b5c77db-ca91-4349-884a-efa4f0be77bf">
             <RemoveFolder Id="ProgramMenuDir" On="both"/>
             <RegistryValue Root="HKCU"
-                           Key="Software\Servo\Servo Tech Demo"
+                           Key="Software\Stillwater"
                            Type="string"
                            Value=""
                            KeyPath="yes"/>
-            <Shortcut Id="StartMenuServoTechDemo"
+            <Shortcut Id="StartMenuStillwater"
               Directory="ProgramMenuDir"
-              Name="Servo Tech Demo"
-              Target="[INSTALLDIR]servoshell.exe"
+              Name="Stillwater"
+              Target="[INSTALLDIR]Stillwater.exe"
               WorkingDirectory="INSTALLDIR"
               Icon="servoshell.exe"/>
           </Component>
@@ -53,7 +53,7 @@
       </StandardDirectory>
 
       <Feature Id="Complete" Level="1">
-        <ComponentRef Id="Servo"/>
+        <ComponentRef Id="StillwaterMain"/>
          % for c in components:
          <ComponentRef Id="${c}"/>
          % endfor

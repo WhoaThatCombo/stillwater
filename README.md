@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src=".github/assets/stillwater-icon.png" width="96" alt="Stillwater icon: a calm wave in a dark circle">
+
 # Stillwater
 
 **A calm, lightweight browser built on [Servo](https://servo.org) — vertical tabs and workspaces, written in Rust.**
@@ -26,7 +28,7 @@ renders its interface with Gecko.
 ## Download
 
 Get the latest Windows build (x64) from [Releases](https://github.com/WhoaThatCombo/stillwater/releases).
-Extract the zip and run `Stillwater\servoshell.exe`. The build isn't code-signed, so Windows SmartScreen
+Extract the zip and run `Stillwater\Stillwater.exe`, or use the `Stillwater-Setup.exe` installer. The build isn't code-signed, so Windows SmartScreen
 may ask you to confirm the first time it runs.
 
 ## Features
@@ -71,7 +73,7 @@ git clone https://github.com/WhoaThatCombo/stillwater.git
 cd stillwater
 .\mach bootstrap          # installs LLVM, CMake, ninja, GStreamer, ...
 .\mach build --release    # first build is long; rebuilds are quick
-.\target\release\servoshell.exe https://servo.org
+.\target\release\servoshell.exe https://servo.org   # local builds keep Servo's binary name
 ```
 
 **Common problems:**
@@ -116,7 +118,7 @@ cd stillwater
 - [ ] Drag tabs between spaces, pinned tabs, folders
 - [ ] Command palette
 - [x] Prebuilt Windows downloads
-- [ ] Stillwater name and icon in the window and installer
+- [x] Stillwater name and icon in the window and installer
 
 ## Credits
 

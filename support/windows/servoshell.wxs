@@ -1,24 +1,25 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
-  <Bundle Name="ServoShell"
-          Version="1.0"
-          UpgradeCode="91b09c7e-6c0d-4166-b806-1dc724acf728">
+  <Bundle Name="Stillwater"
+          Version="0.1.1"
+          UpgradeCode="b6f826c9-cff2-43c0-9eb7-58c2c0ce4726">
 
     <Variable Name="InstallFolder"
           Type="formatted"
-          Value="[ProgramFiles64Folder]Servo\Servo Tech Demo"
+          Value="[ProgramFiles64Folder]Stillwater"
           bal:Overridable="yes" />
 
     <BootstrapperApplication>
       <bal:WixStandardBootstrapperApplication
         LicenseUrl="https://www.mozilla.org/en-US/MPL/2.0/"
         Theme="hyperlinkLicense"
+        LogoFile="stillwater_64.png"
         />
     </BootstrapperApplication>
     <Chain>
       <MsiPackage
           SourceFile="Installer.msi"
           Compressed="yes"
-          DisplayName="ServoShell"
+          DisplayName="Stillwater"
           ForcePerMachine="yes">
         <MsiProperty Name="INSTALLDIR" Value="[InstallFolder]" />
       </MsiPackage>
