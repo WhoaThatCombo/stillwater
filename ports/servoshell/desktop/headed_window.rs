@@ -248,6 +248,16 @@ impl HeadedWindow {
         &self.winit_window
     }
 
+    pub(crate) fn event_loop_proxy(&self) -> EventLoopProxy<AppEvent> {
+        self.event_loop_proxy.clone()
+    }
+
+    /// Change the sidebar's state from outside a UI update (e.g. updater progress).
+    pub(crate) fn with_sidebar(&self, change: impl FnOnce(&mut crate::desktop::sidebar::Sidebar)) {
+        change(&mut self.gui.borrow_mut().sidebar);
+        self.winit_window.request_redraw();
+    }
+
     /// Restore and focus the window (e.g. when another launch handed us a link).
     pub(crate) fn bring_to_front(&self) {
         self.winit_window.set_minimized(false);

@@ -6,7 +6,7 @@ use std::{env, panic};
 
 use crate::desktop::app::App;
 use crate::desktop::event_loop::ServoShellEventLoop;
-use crate::desktop::single_instance;
+use crate::desktop::{single_instance, updater};
 use crate::panic_hook;
 use crate::prefs::{ArgumentParsingResult, parse_command_line_arguments};
 
@@ -60,7 +60,8 @@ pub fn main() {
         false => ServoShellEventLoop::headed(),
     };
     if single_instance && let Some(proxy) = event_loop.event_loop_proxy() {
-        single_instance::listen_for_other_instances(proxy);
+        single_instance::listen_for_other_instances(proxy.clone());
+        updater::check_in_background(proxy);
     }
 
     {

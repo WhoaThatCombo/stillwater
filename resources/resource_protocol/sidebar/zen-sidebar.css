@@ -361,6 +361,38 @@ img.tab-icon {
   opacity: 1;
 }
 
+/* ---- Update available ---- */
+.update-pill {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 34px;
+  margin: 6px 0 2px;
+  padding: 6px 12px;
+  border-radius: var(--border-radius-medium);
+  background: var(--ws-accent, rgb(100, 115, 255));
+  color: white;
+  font-weight: 600;
+  text-align: center;
+}
+
+.update-pill[hidden] {
+  display: none;
+}
+
+.update-pill:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.update-pill:disabled {
+  opacity: 0.75;
+}
+
+.update-pill.failed {
+  background: rgb(200, 70, 60);
+}
+
 /* ---- Workspaces strip (zen-workspaces) ---- */
 #workspaces {
   display: flex;

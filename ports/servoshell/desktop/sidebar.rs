@@ -25,6 +25,7 @@ use servo::{
 use url::Url;
 
 use crate::desktop::event_loop::RepaintEventLoopWaker;
+use crate::desktop::updater::{UpdateInfo, UpdateStatus};
 use crate::desktop::workspaces::Workspaces;
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
 use crate::window::ServoShellWindow;
@@ -48,6 +49,8 @@ pub(crate) enum WindowAction {
     ToggleMaximize,
     Close,
     Drag,
+    /// Install the available update (or open its release page for portable copies).
+    Update,
 }
 
 struct SidebarDelegate {
@@ -106,6 +109,8 @@ pub(crate) struct Sidebar {
     window_actions: Vec<WindowAction>,
     frameless: bool,
     maximized: bool,
+    update: Option<UpdateInfo>,
+    update_status: Option<UpdateStatus>,
 }
 
 impl Sidebar {
@@ -131,12 +136,36 @@ impl Sidebar {
             window_actions: Vec::new(),
             frameless: false,
             maximized: false,
+            update: None,
+            update_status: None,
         }
     }
 
     /// Window operations requested since the last call (caption buttons, dragging).
     pub(crate) fn take_window_actions(&mut self) -> Vec<WindowAction> {
         std::mem::take(&mut self.window_actions)
+    }
+
+    pub(crate) fn set_update_available(&mut self, update: UpdateInfo) {
+        self.update = Some(update);
+        self.last_pushed_state = None;
+    }
+
+    pub(crate) fn set_update_status(&mut self, status: UpdateStatus) {
+        self.update_status = Some(status);
+        self.last_pushed_state = None;
+    }
+
+    pub(crate) fn update(&self) -> Option<&UpdateInfo> {
+        self.update.as_ref()
+    }
+
+    /// Whether an update is already downloading or installing.
+    pub(crate) fn update_in_progress(&self) -> bool {
+        matches!(
+            self.update_status,
+            Some(UpdateStatus::Downloading | UpdateStatus::Installing)
+        )
     }
 
     /// Tell the page whether to draw its own caption buttons and which maximise icon to use.
@@ -388,6 +417,7 @@ impl Sidebar {
                 "win-max" => self.window_actions.push(WindowAction::ToggleMaximize),
                 "win-close" => self.window_actions.push(WindowAction::Close),
                 "win-drag" => self.window_actions.push(WindowAction::Drag),
+                "update" => self.window_actions.push(WindowAction::Update),
                 _ => warn!("unknown sidebar message: {message}"),
             }
             window.set_needs_update();
@@ -437,6 +467,16 @@ impl Sidebar {
             "background": background,
             "frameless": self.frameless,
             "maximized": self.maximized,
+            "update": self.update.as_ref().map(|update| serde_json::json!({
+                "version": update.version,
+                "installable": update.installable,
+                "status": match &self.update_status {
+                    None => "available".to_owned(),
+                    Some(UpdateStatus::Downloading) => "downloading".to_owned(),
+                    Some(UpdateStatus::Installing) => "installing".to_owned(),
+                    Some(UpdateStatus::Failed(error)) => format!("failed: {error}"),
+                },
+            })),
         })
         .to_string();
 

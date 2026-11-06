@@ -9975,6 +9975,7 @@ dependencies = [
  "servo-allocator",
  "servo-base",
  "servo-webdriver-server",
+ "sha2 0.11.1",
  "signal-hook-registry",
  "surfman",
  "tokio",

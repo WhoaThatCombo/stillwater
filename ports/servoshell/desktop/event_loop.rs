@@ -26,6 +26,12 @@ pub enum AppEvent {
     RequestRepaint(ServoShellWindowId),
     /// A later launch of Stillwater asked this instance to open a URL (or just come forward).
     OpenUrl(String),
+    /// The updater found a newer Stillwater release.
+    UpdateAvailable(crate::desktop::updater::UpdateInfo),
+    /// Progress of an update the user started.
+    UpdateStatus(crate::desktop::updater::UpdateStatus),
+    /// The update installer is waiting for Stillwater to quit.
+    UpdateReadyToRestart,
     #[cfg(feature = "gamepad")]
     Gamepad(Event, String, GamepadIndex),
 }

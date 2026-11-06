@@ -20,6 +20,7 @@ mod protocols;
 mod sidebar;
 mod single_instance;
 mod tracing;
+mod updater;
 #[cfg(feature = "webxr")]
 mod webxr;
 mod workspaces;

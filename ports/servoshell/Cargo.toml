@@ -31,7 +31,7 @@ FileDescription = "Stillwater"
 LegalCopyright = "© The Servo Project Developers and Stillwater contributors"
 OriginalFilename = "Stillwater.exe"
 ProductName = "Stillwater"
-ProductVersion = "0.1.1"
+ProductVersion = "0.2.0"
 
 [features]
 # Don't add new features to `default` directly. Add to `default_base` instead.
@@ -151,6 +151,7 @@ headers = { workspace = true }
 itertools = { workspace = true }
 rfd = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 # For optional feature servo-allocator/use-jemalloc and servo-allocator/allocation-tracking
 servo-allocator = { workspace = true }
 surfman = { workspace = true, features = ["sm-x11"] }

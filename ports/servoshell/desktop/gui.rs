@@ -53,6 +53,7 @@ use winit::window::Window;
 use crate::desktop::event_loop::AppEvent;
 use crate::desktop::headed_window;
 use crate::desktop::sidebar::{CONTENT_RADIUS, Sidebar, WindowAction, png_data_url};
+use crate::desktop::updater::{self, UpdateStatus};
 use crate::running_app_state::RunningAppState;
 use crate::window::{PlatformWindow, ServoShellWindow};
 
@@ -312,6 +313,21 @@ impl Gui {
                 WindowAction::Close => window.schedule_close(),
                 WindowAction::Drag => {
                     let _ = winit_window.drag_window();
+                },
+                WindowAction::Update => {
+                    let Some(update) = self.sidebar.update().cloned() else {
+                        continue;
+                    };
+                    let proxy = headed_window.event_loop_proxy();
+                    if update.installable {
+                        if !self.sidebar.update_in_progress() {
+                            self.sidebar.set_update_status(UpdateStatus::Downloading);
+                            updater::install(update, proxy);
+                        }
+                    } else {
+                        // Portable copies can't replace themselves: show the release page.
+                        let _ = proxy.send_event(AppEvent::OpenUrl(update.page_url));
+                    }
                 },
             }
         }

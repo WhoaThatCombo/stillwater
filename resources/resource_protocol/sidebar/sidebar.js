@@ -104,8 +104,25 @@ function renderCaption() {
   max.title = state.maximized ? "Restore" : "Maximise";
 }
 
+function renderUpdate() {
+  const button = $("update");
+  const update = state.update;
+  button.hidden = !update;
+  if (!update) return;
+  const status = update.status;
+  button.disabled = status === "downloading" || status === "installing";
+  button.classList.toggle("failed", status.startsWith("failed"));
+  button.title = status.startsWith("failed") ? status.slice("failed: ".length) : "";
+  if (status === "downloading") button.textContent = "Downloading update…";
+  else if (status === "installing") button.textContent = "Installing update…";
+  else if (status.startsWith("failed")) button.textContent = "Update failed. Try again";
+  else if (update.installable) button.textContent = `Update to Stillwater ${update.version}`;
+  else button.textContent = `Stillwater ${update.version} is available`;
+}
+
 function render() {
   renderCaption();
+  renderUpdate();
   if (state.workspaces) renderWorkspaces();
   tabs.replaceChildren(...state.tabs.map(renderTab));
   $("back").disabled = !state.canGoBack;
@@ -148,6 +165,7 @@ $("compact").addEventListener("click", () => send("toggle-compact"));
 $("new-tab").addEventListener("click", () => send("new-tab"));
 
 // Frameless window: caption buttons, and dragging/double-clicking empty sidebar space.
+$("update").addEventListener("click", () => send("update"));
 $("win-min").addEventListener("click", () => send("win-min"));
 $("win-max").addEventListener("click", () => send("win-max"));
 $("win-close").addEventListener("click", () => send("win-close"));
