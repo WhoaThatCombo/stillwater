@@ -649,7 +649,9 @@ fn process_property_indexed_keyframes(
     // flag set to true.
     let mut easing = DOMString::from_static("linear");
     let mut property_values: Vec<(NonCustomPropertyId, Vec<DOMString>)> = Vec::new();
-    for_each_animatable_property(cx, object.handle(), |cx, name, value| {
+    let wanted =
+        |name: &str| name == "easing" || lookup_css_property_by_idl_attribute_name(name).is_some();
+    for_each_animatable_property(cx, object.handle(), wanted, |cx, name, value| {
         if name == "easing" {
             if let Ok(ConversionResult::Success(value)) =
                 DOMString::from_jsval(cx, value, StringificationBehavior::Default)
@@ -735,11 +737,13 @@ fn convert_to_domstring(cx: &mut JSContext, value: HandleValue) -> Result<DOMStr
     }
 }
 
-/// Calls `callback` with the name and value of each own string-keyed property of `object`.
+/// Calls `callback` with the name and value of each own string-keyed property of `object`
+/// whose name passes `wanted` (other properties are never read, as the spec requires).
 #[expect(unsafe_code)]
 fn for_each_animatable_property(
     cx: &mut JSContext,
     object: HandleObject,
+    wanted: impl Fn(&str) -> bool,
     mut callback: impl FnMut(&mut JSContext, &str, HandleValue) -> Fallible<()>,
 ) -> Fallible<()> {
     let mut ids = IdVector::new(cx);
@@ -760,6 +764,9 @@ fn for_each_animatable_property(
             continue;
         };
         let property_name = unsafe { jsstr_to_string(cx, js_string) };
+        if !wanted(&property_name) {
+            continue;
+        }
         rooted!(&in(cx) let mut property_value = UndefinedValue());
         if !unsafe {
             JS_GetPropertyById(
