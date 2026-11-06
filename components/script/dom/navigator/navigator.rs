@@ -49,6 +49,7 @@ use crate::dom::csp::{GlobalCspReporting, Violation};
 use crate::dom::gamepad::Gamepad;
 use crate::dom::geolocation::Geolocation;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::lockmanager::LockManager;
 use crate::dom::mediadevices::MediaDevices;
 use crate::dom::mediasession::MediaSession;
 use crate::dom::mimetypearray::MimeTypeArray;
@@ -142,6 +143,7 @@ pub(crate) struct Navigator {
     servo_internals: MutNullableDom<ServoInternals>,
     user_activation: MutNullableDom<UserActivation>,
     wake_lock: MutNullableDom<WakeLock>,
+    locks: MutNullableDom<LockManager>,
 }
 
 impl Navigator {
@@ -171,6 +173,7 @@ impl Navigator {
             servo_internals: Default::default(),
             user_activation: Default::default(),
             wake_lock: Default::default(),
+            locks: Default::default(),
         }
     }
 
@@ -674,6 +677,11 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
     /// <https://w3c.github.io/screen-wake-lock/#dom-navigator-wakelock>
     fn WakeLock(&self, cx: &mut js::context::JSContext) -> DomRoot<WakeLock> {
         self.wake_lock.or_init(|| WakeLock::new(cx, &self.global()))
+    }
+
+    /// <https://w3c.github.io/web-locks/#dom-navigatorlocks-locks>
+    fn Locks(&self, cx: &mut js::context::JSContext) -> DomRoot<LockManager> {
+        self.locks.or_init(|| LockManager::new(cx, &self.global()))
     }
 }
 

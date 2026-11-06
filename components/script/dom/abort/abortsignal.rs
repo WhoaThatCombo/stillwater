@@ -31,6 +31,7 @@ use crate::dom::bindings::str::DOMString;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::internalclosewatcher::InternalCloseWatcher;
+use crate::dom::lockmanager::LockManager;
 use crate::dom::readablestream::PipeTo;
 use crate::dom::request::Request;
 use crate::fetch::fetch::DeferredFetchRecordId;
@@ -54,6 +55,8 @@ pub(crate) enum AbortAlgorithm {
     FetchLater(#[no_trace] DeferredFetchRecordId),
     /// <https://html.spec.whatwg.org/multipage/#dom-closewatcher>
     CloseWatcher(#[conditional_malloc_size_of] Rc<InternalCloseWatcher>),
+    /// <https://w3c.github.io/web-locks/#request-a-lock>
+    LockRequest(Dom<LockManager>, u64),
 }
 
 #[derive(Clone, JSTraceable, MallocSizeOf)]
@@ -210,6 +213,11 @@ impl AbortSignal {
             },
             AbortAlgorithm::CloseWatcher(close_watcher) => {
                 close_watcher.destroy(cx.no_gc());
+            },
+            AbortAlgorithm::LockRequest(manager, id) => {
+                rooted!(&in(cx) let mut reason = UndefinedValue());
+                reason.set(self.abort_reason.get());
+                manager.abort_request(cx, *id, reason.handle());
             },
         }
     }

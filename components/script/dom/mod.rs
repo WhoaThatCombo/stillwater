@@ -281,6 +281,8 @@ pub(crate) mod indexeddb;
 pub(crate) use self::indexeddb::*;
 pub(crate) mod intersectionobserver;
 pub(crate) use self::intersectionobserver::*;
+pub(crate) mod locks;
+pub(crate) use self::locks::*;
 pub(crate) mod mathml;
 pub(crate) use self::mathml::*;
 pub(crate) mod media;

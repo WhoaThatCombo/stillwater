@@ -14,6 +14,7 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::utils::to_frozen_array;
+use crate::dom::lockmanager::LockManager;
 use crate::dom::navigator::hardware_concurrency;
 use crate::dom::navigatorinfo;
 use crate::dom::permissions::Permissions;
@@ -28,6 +29,7 @@ pub(crate) struct WorkerNavigator {
     reflector_: Reflector,
     permissions: MutNullableDom<Permissions>,
     storage: MutNullableDom<StorageManager>,
+    locks: MutNullableDom<LockManager>,
     #[cfg(feature = "webgpu")]
     gpu: MutNullableDom<GPU>,
 }
@@ -38,6 +40,7 @@ impl WorkerNavigator {
             reflector_: Reflector::new(),
             permissions: Default::default(),
             storage: Default::default(),
+            locks: Default::default(),
             #[cfg(feature = "webgpu")]
             gpu: Default::default(),
         }
@@ -127,6 +130,11 @@ impl WorkerNavigatorMethods<crate::DomTypeHolder> for WorkerNavigator {
     fn Storage(&self, cx: &mut JSContext) -> DomRoot<StorageManager> {
         self.storage
             .or_init(|| StorageManager::new(cx, &self.global()))
+    }
+
+    /// <https://w3c.github.io/web-locks/#dom-navigatorlocks-locks>
+    fn Locks(&self, cx: &mut JSContext) -> DomRoot<LockManager> {
+        self.locks.or_init(|| LockManager::new(cx, &self.global()))
     }
 
     // https://gpuweb.github.io/gpuweb/#dom-navigator-gpu
