@@ -112,6 +112,8 @@ impl GStreamerRegistryScanner {
                 self.supported_codecs.insert("vp9");
                 self.supported_codecs.insert("x-vp9");
                 self.supported_codecs.insert("vp9.0");
+                // The ISO-BMFF style codec string (vp09.<profile>.<level>.<bit depth>...).
+                self.supported_codecs.insert("vp09*");
             }
 
             if is_opus_supported {

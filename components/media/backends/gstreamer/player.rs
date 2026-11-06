@@ -4,7 +4,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, Once};
 use std::time;
@@ -42,6 +42,45 @@ const DEFAULT_VOLUME: f64 = 1.0;
 const DEFAULT_TIME_RANGES: Vec<Range<f64>> = vec![];
 
 const MAX_BUFFER_SIZE: i32 = 500 * 1024 * 1024;
+
+/// Threads for converting decoded video frames to the compositor's format.
+const VIDEO_CONVERT_THREADS: u32 = 4;
+
+/// Most threads a software video decoder may use.
+const DECODER_THREADS: u32 = 8;
+
+/// Move a demuxer's time segment to start at `offset`, so decoders and sinks drop everything
+/// before it: a restarted Media Source Extensions stream begins at a keyframe, and playback must
+/// begin at the seek target after it. Stream time is kept equal to the timestamps.
+fn apply_start_offset(info: &mut gstreamer::PadProbeInfo, offset: gstreamer::ClockTime) {
+    let Some(gstreamer::PadProbeData::Event(ref event)) = info.data else {
+        return;
+    };
+    let gstreamer::EventView::Segment(segment_event) = event.view() else {
+        return;
+    };
+    let Some(segment) = segment_event
+        .segment()
+        .downcast_ref::<gstreamer::ClockTime>()
+    else {
+        return;
+    };
+    let start = segment.start().unwrap_or(gstreamer::ClockTime::ZERO);
+    if start >= offset {
+        return;
+    }
+    let mut segment = segment.clone();
+    let shift = offset - start;
+    segment.set_start(offset);
+    segment.set_time(segment.time().unwrap_or(gstreamer::ClockTime::ZERO) + shift);
+    if segment.position().is_some_and(|position| position < offset) {
+        segment.set_position(offset);
+    }
+    let new_event = gstreamer::event::Segment::builder(&segment)
+        .seqnum(event.seqnum())
+        .build();
+    info.data = Some(gstreamer::PadProbeData::Event(new_event));
+}
 
 fn metadata_from_media_info(media_info: &gstreamer_play::PlayMediaInfo) -> Result<Metadata, ()> {
     let dur = media_info.duration();
@@ -454,6 +493,14 @@ pub struct GStreamerPlayer {
     /// Whether to enable download buffering. This is only enabled heuristically for some media,
     /// because it causes issues in certain situations. See <https://github.com/servo/servo/issues/23241>.
     download_buffering_enabled: AtomicBool,
+    /// Media Source Extensions: stream time (ns) where presentation starts; frames before it are
+    /// decoded but not shown (0 = from the start). See [`Player::set_start_offset`].
+    start_offset: Arc<AtomicU64>,
+    /// Video frames handed to the renderer.
+    frames_rendered: Arc<AtomicU64>,
+    /// Video frames the sink dropped for being late: (last count the sink reported, frames
+    /// counted before the sink last reset its statistics).
+    frames_dropped: Mutex<(u64, u64)>,
 }
 
 impl GStreamerPlayer {
@@ -486,6 +533,9 @@ impl GStreamerPlayer {
             stream_type,
             render: Arc::new(Mutex::new(GStreamerRender::new(gl_context))),
             download_buffering_enabled: AtomicBool::new(false),
+            start_offset: Arc::new(AtomicU64::new(0)),
+            frames_rendered: Arc::new(AtomicU64::new(0)),
+            frames_dropped: Mutex::new((0, 0)),
         }
     }
 
@@ -543,6 +593,40 @@ impl GStreamerPlayer {
 
         // Set max size for the player buffer.
         pipeline.set_property("buffer-size", MAX_BUFFER_SIZE);
+
+        let start_offset = self.start_offset.clone();
+        let is_media_source = self.stream_type == StreamType::MediaSource;
+        pipeline.connect("deep-element-added", false, move |args| {
+            let element = args[2].get::<gstreamer::Element>().ok()?;
+            let factory = element.factory()?;
+            let name = factory.name();
+            if name.starts_with("avdec_") && element.find_property("max-threads").is_some() {
+                // libav uses a thread per core by default, each holding frames in flight: on a
+                // 32-thread machine that doubles a 4K decoder's memory (~900 MB) for no speed.
+                element.set_property("max-threads", DECODER_THREADS as i32);
+            } else if name == "vp9dec" || name == "vp8dec" {
+                element.set_property("threads", DECODER_THREADS);
+            } else if name.starts_with("videoconvert") || name == "videoscale" {
+                // Converting decoded frames to BGRA for the compositor is single-threaded by
+                // default, which can't keep up with 1440p and up.
+                if element.find_property("n-threads").is_some() {
+                    element.set_property("n-threads", VIDEO_CONVERT_THREADS);
+                }
+            } else if is_media_source && name == "qtdemux" {
+                let start_offset = start_offset.clone();
+                element.connect_pad_added(move |_, pad| {
+                    let start_offset = start_offset.clone();
+                    pad.add_probe(gstreamer::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+                        let offset = start_offset.load(Ordering::Relaxed);
+                        if offset > 0 {
+                            apply_start_offset(info, gstreamer::ClockTime::from_nseconds(offset));
+                        }
+                        gstreamer::PadProbeReturn::Ok
+                    });
+                });
+            }
+            None
+        });
 
         // Set player position interval update to 0.5 seconds.
         let mut config = player.config();
@@ -777,6 +861,7 @@ impl GStreamerPlayer {
                 let render = self.render.clone();
                 let observer = self.observer.clone();
                 let weak_video_renderer = Arc::downgrade(&video_renderer);
+                let frames_rendered = self.frames_rendered.clone();
 
                 move |sample: gstreamer::Sample| {
                     let Some(frame) = render.lock().unwrap().get_frame_from_sample(sample) else {
@@ -792,6 +877,7 @@ impl GStreamerPlayer {
                         },
                     };
 
+                    frames_rendered.fetch_add(1, Ordering::Relaxed);
                     let _ = notify!(observer, PlayerEvent::VideoFrameUpdated);
                     Ok(gstreamer::FlowSuccess::Ok)
                 }
@@ -1023,6 +1109,32 @@ impl Player for GStreamerPlayer {
 
     fn render_use_gl(&self) -> bool {
         self.render.lock().unwrap().is_gl()
+    }
+
+    fn set_start_offset(&self, seconds: f64) -> Result<(), PlayerError> {
+        let nanos = (seconds.max(0.0) * 1_000_000_000.0) as u64;
+        self.start_offset.store(nanos, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn video_frame_counts(&self) -> (u64, u64) {
+        let rendered = self.frames_rendered.load(Ordering::Relaxed);
+        let Some(inner) = self.inner.borrow().as_ref().cloned() else {
+            return (rendered, 0);
+        };
+        let stats = inner
+            .lock()
+            .unwrap()
+            .video_sink
+            .property::<gstreamer::Structure>("stats");
+        let now = stats.get::<u64>("dropped").unwrap_or(0);
+        // The sink's statistics restart when the stream changes (e.g. a new resolution).
+        let mut dropped = self.frames_dropped.lock().unwrap();
+        if now < dropped.0 {
+            dropped.1 += dropped.0;
+        }
+        dropped.0 = now;
+        (rendered, dropped.0 + dropped.1)
     }
 }
 

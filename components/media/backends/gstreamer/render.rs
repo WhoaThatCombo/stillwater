@@ -136,6 +136,11 @@ impl GStreamerRender {
             .map_err(|error| PlayerError::Backend(format!("appsink creation failed: {error:?}")))?
             .downcast::<gstreamer_app::AppSink>()
             .unwrap();
+        // Behave like a video sink: drop frames that are already late (and tell the decoder, so
+        // it can skip work) instead of showing every frame later and later when decoding can't
+        // keep up. The counts are reported through getVideoPlaybackQuality().
+        appsink.set_max_lateness(20_000_000);
+        appsink.set_qos(true);
 
         if let Some(render) = self.render.as_ref() {
             render.build_video_sink(appsink.upcast_ref::<gstreamer::Element>(), pipeline)?
