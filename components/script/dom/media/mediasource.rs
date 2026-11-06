@@ -37,7 +37,7 @@ use crate::dom::fmp4::{
 };
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::html::htmlmediaelement::HTMLMediaElement;
-use crate::dom::sourcebuffer::SourceBuffer;
+use crate::dom::sourcebuffer::{SourceBuffer, intersect_ranges};
 use crate::dom::sourcebufferlist::SourceBufferList;
 use crate::dom::timeranges::TimeRangesContainer;
 use crate::dom::url::URL;
@@ -277,7 +277,7 @@ impl MediaSource {
         self.duration.get()
     }
 
-    /// The media element's `buffered`: time buffered in every `SourceBuffer`.
+    /// The media element's `buffered`: time buffered in every `SourceBuffer` (and track).
     pub(crate) fn buffered(&self) -> TimeRangesContainer {
         let buffers = self.source_buffers.buffers();
         let mut intersection: Option<Vec<(f64, f64)>> = None;
@@ -285,19 +285,7 @@ impl MediaSource {
             let ranges = buffer.track().ranges();
             intersection = Some(match intersection {
                 None => ranges,
-                Some(previous) => {
-                    let mut both = vec![];
-                    for (a_start, a_end) in &previous {
-                        for (b_start, b_end) in &ranges {
-                            let start = a_start.max(*b_start);
-                            let end = a_end.min(*b_end);
-                            if end > start {
-                                both.push((start, end));
-                            }
-                        }
-                    }
-                    both
-                },
+                Some(previous) => intersect_ranges(&previous, &ranges),
             });
         }
         let mut container = TimeRangesContainer::default();
@@ -313,7 +301,8 @@ impl MediaSource {
         let buffers = self.source_buffers.buffers();
         let base = buffers
             .iter()
-            .filter_map(|buffer| buffer.track().fragment_start_at(time))
+            .flat_map(|buffer| buffer.track_views())
+            .filter_map(|track| track.fragment_start_at(time))
             .fold(time, f64::min)
             .max(0.0);
         *self.feed.borrow_mut() = Feed {
@@ -339,14 +328,23 @@ impl MediaSource {
         if buffers.is_empty() {
             return None;
         }
-        let tracks: Vec<_> = buffers.iter().map(|buffer| buffer.track()).collect();
+        // Every audio and video track of every buffer.
+        let tracks: Vec<_> = buffers
+            .iter()
+            .flat_map(|buffer| buffer.track_views())
+            .collect();
+        if tracks.is_empty() {
+            return None;
+        }
         let mut feed = self.feed.borrow_mut();
 
         if !feed.started {
             // Start with the variant of each buffer's first fragment to play.
             let mut generations = vec![];
             for track in &tracks {
-                let generation = track.generation_at(feed.start).unwrap_or(track.generation);
+                let generation = track
+                    .generation_at(feed.start)
+                    .unwrap_or(track.generation());
                 track.init(generation)?;
                 generations.push(generation);
             }

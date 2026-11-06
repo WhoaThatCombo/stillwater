@@ -488,6 +488,198 @@ pub(crate) fn set_chunk_sequence(chunk: &mut [u8], sequence: u32) {
     }
 }
 
+/// The samples of one `traf` of a media segment.
+struct TrafSamples {
+    track_id: u32,
+    /// Decode time of the first sample, in the track's timescale.
+    decode_time: u64,
+    samples: Vec<Sample>,
+    /// Where each sample's data is in the segment.
+    ranges: Vec<Range<usize>>,
+    trun_version: u8,
+}
+
+/// Every `traf` of the `moof` in `data` (a `moof` + `mdat`), with its samples. `track_for` gives
+/// the `trex` defaults of a track ID; trafs of unknown tracks are left out.
+fn parse_trafs<'a>(
+    data: &[u8],
+    track_for: &dyn Fn(u32) -> Option<&'a TrackInfo>,
+) -> Option<Vec<TrafSamples>> {
+    let top = children(data, 0..data.len());
+    let moof = find(&top, b"moof")?;
+    let mdat_start = find(&top, b"mdat")?.payload.start;
+    // Without explicit offsets, each traf's data follows the previous one's.
+    let mut next_data = mdat_start;
+    let mut traf_index = 0;
+    let mut trafs = vec![];
+    for traf in children(data, moof.payload.clone())
+        .into_iter()
+        .filter(|child| &child.kind == b"traf")
+    {
+        let traf_children = children(data, traf.payload.clone());
+        let tfhd = find(&traf_children, b"tfhd")?;
+        let tfhd_flags = be_u32(data, tfhd.payload.start)? & 0x00ff_ffff;
+        let track_id = be_u32(data, tfhd.payload.start + 4)?;
+        let mut cursor = tfhd.payload.start + 8;
+        // An absolute base offset can't be resolved within a segment; treat it as the moof
+        // (default-base-is-moof), which is what segments for MSE use.
+        let base = moof.range.start;
+        let explicit_base = tfhd_flags & (0x01 | 0x02_0000) != 0;
+        if tfhd_flags & 0x01 != 0 {
+            cursor += 8;
+        }
+        if tfhd_flags & 0x02 != 0 {
+            cursor += 4;
+        }
+        let track = track_for(track_id);
+        let mut default_duration = track.map_or(0, |track| track.default_sample_duration);
+        let mut default_size = track.map_or(0, |track| track.default_sample_size);
+        let mut default_flags = track.map_or(0, |track| track.default_sample_flags);
+        if tfhd_flags & 0x08 != 0 {
+            default_duration = be_u32(data, cursor)?;
+            cursor += 4;
+        }
+        if tfhd_flags & 0x10 != 0 {
+            default_size = be_u32(data, cursor)?;
+            cursor += 4;
+        }
+        if tfhd_flags & 0x20 != 0 {
+            default_flags = be_u32(data, cursor)?;
+        }
+
+        let decode_time = match find(&traf_children, b"tfdt") {
+            Some(tfdt) if data.get(tfdt.payload.start) == Some(&1) => {
+                be_u64(data, tfdt.payload.start + 4)?
+            },
+            Some(tfdt) => be_u32(data, tfdt.payload.start + 4)? as u64,
+            None => 0,
+        };
+
+        // Collect every sample and the bytes it occupies.
+        let mut samples = vec![];
+        let mut ranges: Vec<Range<usize>> = vec![];
+        let mut trun_version = 0;
+        // Relative to the base: the moof, or for a later traf without an explicit base, the
+        // end of the previous traf's data (ISO/IEC 14496-12, 8.8.7.1).
+        let traf_base = if explicit_base || traf_index == 0 {
+            base
+        } else {
+            next_data
+        };
+        traf_index += 1;
+        for trun in traf_children.iter().filter(|child| &child.kind == b"trun") {
+            let version = *data.get(trun.payload.start)?;
+            trun_version = trun_version.max(version);
+            let flags = be_u32(data, trun.payload.start)? & 0x00ff_ffff;
+            let count = be_u32(data, trun.payload.start + 4)?;
+            let mut at = trun.payload.start + 8;
+            let mut offset = next_data;
+            if flags & 0x01 != 0 {
+                let relative = be_u32(data, at)? as i32;
+                offset = (traf_base as i64 + relative as i64) as usize;
+                at += 4;
+            }
+            let mut first_flags = None;
+            if flags & 0x04 != 0 {
+                first_flags = Some(be_u32(data, at)?);
+                at += 4;
+            }
+            for index in 0..count {
+                let mut sample = Sample {
+                    duration: default_duration,
+                    size: default_size,
+                    flags: if index == 0 {
+                        first_flags.unwrap_or(default_flags)
+                    } else {
+                        default_flags
+                    },
+                    composition_offset: 0,
+                };
+                if flags & 0x100 != 0 {
+                    sample.duration = be_u32(data, at)?;
+                    at += 4;
+                }
+                if flags & 0x200 != 0 {
+                    sample.size = be_u32(data, at)?;
+                    at += 4;
+                }
+                if flags & 0x400 != 0 {
+                    sample.flags = be_u32(data, at)?;
+                    at += 4;
+                }
+                if flags & 0x800 != 0 {
+                    sample.composition_offset = be_u32(data, at)?;
+                    at += 4;
+                }
+                let end = offset + sample.size as usize;
+                if end > data.len() {
+                    return None;
+                }
+                ranges.push(offset..end);
+                offset = end;
+                samples.push(sample);
+            }
+            next_data = offset;
+        }
+        if track.is_some() {
+            trafs.push(TrafSamples {
+                track_id,
+                decode_time,
+                samples,
+                ranges,
+                trun_version,
+            });
+        }
+    }
+    Some(trafs)
+}
+
+/// Split a media segment (`moof` + `mdat`) holding several tracks (a muxed `SourceBuffer`)
+/// into one segment per track: (track ID, `moof` + `mdat`). A one-track segment is returned
+/// as is. `track_for` gives a track ID's `trex` defaults; unknown tracks are dropped.
+pub(crate) fn split_tracks<'a>(
+    data: Vec<u8>,
+    track_for: &dyn Fn(u32) -> Option<&'a TrackInfo>,
+) -> Option<Vec<(u32, Vec<u8>)>> {
+    let top = children(&data, 0..data.len());
+    let moof = find(&top, b"moof")?;
+    let traf_ids: Vec<u32> = children(&data, moof.payload.clone())
+        .into_iter()
+        .filter(|child| &child.kind == b"traf")
+        .filter_map(|traf| {
+            let tfhd = find(&children(&data, traf.payload.clone()), b"tfhd")?.clone();
+            be_u32(&data, tfhd.payload.start + 4)
+        })
+        .collect();
+    if let [id] = traf_ids[..] {
+        return Some(vec![(id, data)]);
+    }
+    let trafs = parse_trafs(&data, track_for)?;
+    Some(
+        trafs
+            .into_iter()
+            .filter(|traf| !traf.samples.is_empty())
+            .map(|traf| {
+                let payloads: Vec<&[u8]> = traf
+                    .ranges
+                    .iter()
+                    .map(|range| &data[range.clone()])
+                    .collect();
+                (
+                    traf.track_id,
+                    write_chunk(
+                        &traf.samples,
+                        &payloads,
+                        traf.track_id,
+                        traf.decode_time,
+                        traf.trun_version,
+                    ),
+                )
+            })
+            .collect(),
+    )
+}
+
 /// Re-cut a media segment (`moof` + `mdat`, in `data`) into self-contained pieces of at most
 /// `max_duration` (track timescale units), with its track renumbered to `new_id` and its decode
 /// time moved back by `shift`.
@@ -502,112 +694,18 @@ pub(crate) fn split_fragment(
     shift: u64,
     max_duration: u64,
 ) -> Option<Vec<Chunk>> {
-    let moof = children(data, 0..data.len())
-        .into_iter()
-        .find(|child| &child.kind == b"moof")?;
-    let traf = children(data, moof.payload.clone())
-        .into_iter()
-        .find(|child| &child.kind == b"traf")?;
-    let traf_children = children(data, traf.payload.clone());
-
-    let tfhd = find(&traf_children, b"tfhd")?;
-    let tfhd_flags = be_u32(data, tfhd.payload.start)? & 0x00ff_ffff;
-    let mut cursor = tfhd.payload.start + 8;
-    let mut base = moof.range.start;
-    if tfhd_flags & 0x01 != 0 {
-        // An absolute base offset can't be resolved within a segment; treat it as the moof.
-        cursor += 8;
-    }
-    if tfhd_flags & 0x02 != 0 {
-        cursor += 4;
-    }
-    let mut default_duration = track.default_sample_duration;
-    let mut default_size = track.default_sample_size;
-    let mut default_flags = track.default_sample_flags;
-    if tfhd_flags & 0x08 != 0 {
-        default_duration = be_u32(data, cursor)?;
-        cursor += 4;
-    }
-    if tfhd_flags & 0x10 != 0 {
-        default_size = be_u32(data, cursor)?;
-        cursor += 4;
-    }
-    if tfhd_flags & 0x20 != 0 {
-        default_flags = be_u32(data, cursor)?;
-    }
-
-    let decode_time = match find(&traf_children, b"tfdt") {
-        Some(tfdt) if data.get(tfdt.payload.start) == Some(&1) => {
-            be_u64(data, tfdt.payload.start + 4)?
-        },
-        Some(tfdt) => be_u32(data, tfdt.payload.start + 4)? as u64,
-        None => 0,
+    let trafs = parse_trafs(data, &|_| Some(track))?;
+    // Stored fragments hold one track (see `split_tracks`).
+    let Some(TrafSamples {
+        decode_time,
+        samples,
+        ranges: sample_data,
+        trun_version,
+        ..
+    }) = trafs.into_iter().next()
+    else {
+        return Some(vec![]);
     };
-
-    // Collect every sample and the bytes it occupies.
-    let mut samples = vec![];
-    let mut sample_data: Vec<std::ops::Range<usize>> = vec![];
-    let mut trun_version = 0;
-    let mdat_start = children(data, 0..data.len())
-        .into_iter()
-        .find(|child| &child.kind == b"mdat")
-        .map(|mdat| mdat.payload.start)?;
-    let mut next_data = None;
-    for trun in traf_children.iter().filter(|child| &child.kind == b"trun") {
-        let version = *data.get(trun.payload.start)?;
-        trun_version = trun_version.max(version);
-        let flags = be_u32(data, trun.payload.start)? & 0x00ff_ffff;
-        let count = be_u32(data, trun.payload.start + 4)?;
-        let mut at = trun.payload.start + 8;
-        let mut offset = next_data.unwrap_or(mdat_start);
-        if flags & 0x01 != 0 {
-            let relative = be_u32(data, at)? as i32;
-            offset = (base as i64 + relative as i64) as usize;
-            at += 4;
-        }
-        let mut first_flags = None;
-        if flags & 0x04 != 0 {
-            first_flags = Some(be_u32(data, at)?);
-            at += 4;
-        }
-        for index in 0..count {
-            let mut sample = Sample {
-                duration: default_duration,
-                size: default_size,
-                flags: if index == 0 {
-                    first_flags.unwrap_or(default_flags)
-                } else {
-                    default_flags
-                },
-                composition_offset: 0,
-            };
-            if flags & 0x100 != 0 {
-                sample.duration = be_u32(data, at)?;
-                at += 4;
-            }
-            if flags & 0x200 != 0 {
-                sample.size = be_u32(data, at)?;
-                at += 4;
-            }
-            if flags & 0x400 != 0 {
-                sample.flags = be_u32(data, at)?;
-                at += 4;
-            }
-            if flags & 0x800 != 0 {
-                sample.composition_offset = be_u32(data, at)?;
-                at += 4;
-            }
-            let end = offset + sample.size as usize;
-            if end > data.len() {
-                return None;
-            }
-            sample_data.push(offset..end);
-            offset = end;
-            samples.push(sample);
-        }
-        next_data = Some(offset);
-        base = moof.range.start;
-    }
     if samples.is_empty() {
         return Some(vec![]);
     }
@@ -780,6 +878,75 @@ mod tests {
         let ids: Vec<u32> = parsed.tracks.iter().map(|track| track.id).collect();
         assert_eq!(ids, vec![1, 2]);
         assert_eq!(parsed.tracks[1].kind, TrackKind::Audio);
+    }
+
+    /// A muxed media segment: track 1 with two 2-byte samples, track 2 with one 3-byte sample,
+    /// data offsets relative to the moof.
+    fn muxed_fragment() -> Vec<u8> {
+        let traf = |track_id: u32, decode_time: u64, samples: &[(u32, u32)], data_offset: u32| {
+            let tfhd = full(0, 0x020000, &track_id.to_be_bytes());
+            let tfdt = full(1, 0, &decode_time.to_be_bytes());
+            let mut trun = (samples.len() as u32).to_be_bytes().to_vec();
+            trun.extend_from_slice(&data_offset.to_be_bytes());
+            for (duration, size) in samples {
+                trun.extend_from_slice(&duration.to_be_bytes());
+                trun.extend_from_slice(&size.to_be_bytes());
+            }
+            [
+                boxed(b"tfhd", &tfhd),
+                boxed(b"tfdt", &tfdt),
+                boxed(b"trun", &full(0, 0x301, &trun)),
+            ]
+            .concat()
+        };
+        // Offsets are fixed up below, once the moof's size is known.
+        let build = |first: u32, second: u32| {
+            let moof = [
+                boxed(b"mfhd", &full(0, 0, &1u32.to_be_bytes())),
+                boxed(b"traf", &traf(1, 9000, &[(3000, 2), (3000, 2)], first)),
+                boxed(b"traf", &traf(2, 4800, &[(1024, 3)], second)),
+            ]
+            .concat();
+            [boxed(b"moof", &moof), boxed(b"mdat", b"aabbccc")].concat()
+        };
+        let moof_len = read_box(&build(0, 0), 0).unwrap().unwrap().range.len() as u32;
+        build(moof_len + 8, moof_len + 8 + 4)
+    }
+
+    #[test]
+    fn splits_muxed_fragments_by_track() {
+        let video = parse_init_segment(&init(1, b"vide", 90000)).unwrap();
+        let audio = parse_init_segment(&init(2, b"soun", 48000)).unwrap();
+        let tracks = [video.tracks[0].clone(), audio.tracks[0].clone()];
+        let track_for = |id: u32| tracks.iter().find(|track| track.id == id);
+        let split = split_tracks(muxed_fragment(), &track_for).unwrap();
+        assert_eq!(
+            split.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let (_, first) = &split[0];
+        let moof = read_box(first, 0).unwrap().unwrap();
+        let info = parse_fragment(first, &moof, 0, 0).unwrap();
+        assert_eq!(
+            (info.track_id, info.decode_time, info.duration),
+            (1, 9000, 6000)
+        );
+        assert!(first.ends_with(b"aabb"));
+
+        let (_, second) = &split[1];
+        let moof = read_box(second, 0).unwrap().unwrap();
+        let info = parse_fragment(second, &moof, 0, 0).unwrap();
+        assert_eq!(
+            (info.track_id, info.decode_time, info.duration),
+            (2, 4800, 1024)
+        );
+        assert!(second.ends_with(b"ccc"));
+
+        // Re-cutting a split segment for the feed keeps its samples and data.
+        let chunks = split_fragment(second, &tracks[1], 2, 0, 48000).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].bytes.ends_with(b"ccc"));
     }
 
     #[test]

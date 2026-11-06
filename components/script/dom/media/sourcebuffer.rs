@@ -25,7 +25,7 @@ use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::fmp4::{
-    InitSegment, TrackInfo, TrackKind, parse_fragment, parse_init_segment, read_box,
+    InitSegment, TrackInfo, TrackKind, parse_fragment, parse_init_segment, read_box, split_tracks,
 };
 use crate::dom::mediasource::MediaSource;
 use crate::dom::timeranges::{TimeRanges, TimeRangesContainer};
@@ -69,7 +69,139 @@ impl Fragment {
     }
 }
 
-/// What a `SourceBuffer` holds: its initialization segments and parsed media segments.
+/// The media of one track of a `SourceBuffer` (most buffers have one track; muxed ones, e.g.
+/// Twitch's VODs or hls.js with muxed segments, have audio and video in one buffer).
+pub(crate) struct TrackMedia {
+    /// The track's ID in the buffer's initialization segments.
+    id: u32,
+    /// Fragments by start time, in microseconds.
+    fragments: BTreeMap<u64, Fragment>,
+    bytes: usize,
+}
+
+impl TrackMedia {
+    fn new(id: u32) -> TrackMedia {
+        TrackMedia {
+            id,
+            fragments: BTreeMap::new(),
+            bytes: 0,
+        }
+    }
+
+    fn insert(&mut self, fragment: Fragment) {
+        let (start, end) = (fragment.start, fragment.end);
+        // Newer media replaces whatever covered the same time (e.g. a different quality).
+        let overlapping: Vec<u64> = self
+            .fragments
+            .iter()
+            .filter(|(_, other)| {
+                let tolerance = other.tolerance().min(EPSILON.min((end - start) / 4.0));
+                other.start < end - tolerance && other.end > start + tolerance
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        for key in overlapping {
+            if let Some(old) = self.fragments.remove(&key) {
+                self.bytes -= old.bytes.len();
+            }
+        }
+        self.bytes += fragment.bytes.len();
+        self.fragments
+            .insert((start.max(0.0) * 1_000_000.0) as u64, fragment);
+    }
+
+    /// The first fragment that still has media after `time`.
+    pub(crate) fn fragment_after(&self, time: f64) -> Option<&Fragment> {
+        self.fragments
+            .values()
+            .find(|fragment| fragment.end > time + fragment.tolerance())
+    }
+
+    /// The variant (initialization segment generation) playing at `time`: that of the fragment
+    /// starting last at or before it, else of the first one after it.
+    pub(crate) fn generation_at(&self, time: f64) -> Option<u32> {
+        let mut generation = None;
+        for fragment in self.fragments.values() {
+            if fragment.start > time + EPSILON {
+                return generation.or(Some(fragment.generation));
+            }
+            generation = Some(fragment.generation);
+        }
+        generation
+    }
+
+    /// Where playback restarted at `time` must begin: the start of the last fragment at or
+    /// before `time` that starts with a keyframe (or the first fragment after `time`).
+    pub(crate) fn fragment_start_at(&self, time: f64) -> Option<f64> {
+        let mut start = None;
+        for fragment in self.fragments.values() {
+            if fragment.start > time + EPSILON {
+                break;
+            }
+            if fragment.keyframe {
+                start = Some(fragment.start);
+            }
+        }
+        start
+            .or_else(|| self.fragment_after(time).map(|fragment| fragment.start))
+            .map(|start| start.min(time))
+    }
+
+    /// Buffered time ranges (fragments merged when they touch).
+    pub(crate) fn ranges(&self) -> Vec<(f64, f64)> {
+        let mut ranges: Vec<(f64, f64)> = vec![];
+        for fragment in self.fragments.values() {
+            match ranges.last_mut() {
+                Some(last) if fragment.start <= last.1 + EPSILON => {
+                    last.1 = last.1.max(fragment.end);
+                },
+                _ => ranges.push((fragment.start, fragment.end)),
+            }
+        }
+        ranges
+    }
+
+    fn highest_end(&self) -> f64 {
+        self.fragments
+            .values()
+            .map(|fragment| fragment.end)
+            .fold(0.0, f64::max)
+    }
+
+    /// Drop fragments lying entirely within `[start, end]`.
+    fn remove(&mut self, start: f64, end: f64) {
+        let doomed: Vec<u64> = self
+            .fragments
+            .iter()
+            .filter(|(_, fragment)| {
+                fragment.start >= start - EPSILON && fragment.end <= end + EPSILON
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        for key in doomed {
+            if let Some(old) = self.fragments.remove(&key) {
+                self.bytes -= old.bytes.len();
+            }
+        }
+    }
+}
+
+/// The intersection of two lists of time ranges.
+pub(crate) fn intersect_ranges(a: &[(f64, f64)], b: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut both = vec![];
+    for (a_start, a_end) in a {
+        for (b_start, b_end) in b {
+            let start = a_start.max(*b_start);
+            let end = a_end.min(*b_end);
+            if end > start {
+                both.push((start, end));
+            }
+        }
+    }
+    both
+}
+
+/// What a `SourceBuffer` holds: its initialization segments and each track's media segments.
 #[derive(Default)]
 pub(crate) struct TrackBuffer {
     /// Appended bytes that don't form a complete box yet.
@@ -79,22 +211,66 @@ pub(crate) struct TrackBuffer {
     /// Initialization segments by generation (only recent ones are kept).
     inits: HashMap<u32, InitSegment>,
     pub(crate) generation: u32,
-    /// Fragments by start time, in microseconds.
-    fragments: BTreeMap<u64, Fragment>,
-    bytes: usize,
+    /// One per audio or video track.
+    tracks: Vec<TrackMedia>,
     /// Set while the appended byte stream is WebM, which is remuxed to fragmented MP4.
     webm: Option<Box<WebmParser>>,
 }
 
-impl TrackBuffer {
-    /// The latest initialization segment's (first) track.
-    pub(crate) fn track(&self) -> Option<&TrackInfo> {
-        self.inits.get(&self.generation)?.tracks.first()
+/// One track of a `SourceBuffer`, as the media source's feed sees it.
+pub(crate) struct TrackView<'a> {
+    buffer: Ref<'a, TrackBuffer>,
+    index: usize,
+}
+
+impl TrackView<'_> {
+    fn media(&self) -> &TrackMedia {
+        &self.buffer.tracks[self.index]
     }
 
+    /// The buffer's latest initialization segment generation.
+    pub(crate) fn generation(&self) -> u32 {
+        self.buffer.generation
+    }
+
+    /// This track in the initialization segment of `generation`.
     pub(crate) fn init(&self, generation: u32) -> Option<(&InitSegment, &TrackInfo)> {
-        let init = self.inits.get(&generation)?;
-        Some((init, init.tracks.first()?))
+        let init = self.buffer.inits.get(&generation)?;
+        let id = self.media().id;
+        Some((init, init.tracks.iter().find(|track| track.id == id)?))
+    }
+
+    pub(crate) fn fragment_after(&self, time: f64) -> Option<&Fragment> {
+        self.media().fragment_after(time)
+    }
+
+    pub(crate) fn generation_at(&self, time: f64) -> Option<u32> {
+        self.media().generation_at(time)
+    }
+
+    pub(crate) fn fragment_start_at(&self, time: f64) -> Option<f64> {
+        self.media().fragment_start_at(time)
+    }
+}
+
+impl TrackBuffer {
+    /// The latest initialization segment's audio and video tracks.
+    fn playable_tracks(&self) -> impl Iterator<Item = &TrackInfo> {
+        self.inits
+            .get(&self.generation)
+            .into_iter()
+            .flat_map(|init| init.tracks.iter())
+            .filter(|track| track.kind != TrackKind::Other)
+    }
+
+    /// Whether any of the latest tracks is video (for the quota).
+    fn has_video(&self) -> bool {
+        self.playable_tracks()
+            .any(|track| track.kind == TrackKind::Video)
+    }
+
+    fn bytes(&self) -> usize {
+        self.tracks.iter().map(|track| track.bytes).sum()
     }
 
     /// Parse newly appended bytes. `Err` means the data isn't valid fragmented MP4.
@@ -158,6 +334,12 @@ impl TrackBuffer {
         if !same {
             self.generation += 1;
             self.inits.insert(self.generation, parsed);
+            let ids: Vec<u32> = self.playable_tracks().map(|track| track.id).collect();
+            for id in ids {
+                if !self.tracks.iter().any(|track| track.id == id) {
+                    self.tracks.push(TrackMedia::new(id));
+                }
+            }
             self.forget_unused_inits();
         }
         Ok(())
@@ -167,8 +349,9 @@ impl TrackBuffer {
     fn forget_unused_inits(&mut self) {
         let generation = self.generation;
         let used: Vec<u32> = self
-            .fragments
-            .values()
+            .tracks
+            .iter()
+            .flat_map(|track| track.fragments.values())
             .map(|fragment| fragment.generation)
             .collect();
         self.inits
@@ -176,120 +359,65 @@ impl TrackBuffer {
     }
 
     fn add_fragment(&mut self, bytes: Vec<u8>, timestamp_offset: f64) -> Result<(), ()> {
-        let track = self.track().ok_or(())?;
-        let timescale = track.timescale.max(1) as f64;
-        let moof = read_box(&bytes, 0)?.ok_or(())?;
-        let info = parse_fragment(
-            &bytes,
-            &moof,
-            track.default_sample_duration,
-            track.default_sample_flags,
-        )
-        .ok_or(())?;
-        let start = info.decode_time as f64 / timescale + timestamp_offset;
-        let end = start + info.duration as f64 / timescale;
-
-        // Newer media replaces whatever covered the same time (e.g. a different quality).
-        let overlapping: Vec<u64> = self
-            .fragments
-            .iter()
-            .filter(|(_, other)| {
-                let tolerance = other.tolerance().min(EPSILON.min((end - start) / 4.0));
-                other.start < end - tolerance && other.end > start + tolerance
-            })
-            .map(|(key, _)| *key)
-            .collect();
-        for key in overlapping {
-            if let Some(old) = self.fragments.remove(&key) {
-                self.bytes -= old.bytes.len();
-            }
-        }
-        self.bytes += bytes.len();
-        self.fragments.insert(
-            (start.max(0.0) * 1_000_000.0) as u64,
-            Fragment {
+        let init = self.inits.get(&self.generation).ok_or(())?;
+        let track_for = |id: u32| init.tracks.iter().find(|track| track.id == id);
+        let pieces = split_tracks(bytes, &track_for).ok_or(())?;
+        for (id, bytes) in pieces {
+            let Some(track) = track_for(id) else {
+                continue;
+            };
+            let Some(media) = self.tracks.iter().position(|media| media.id == id) else {
+                // Not an audio or video track.
+                continue;
+            };
+            let timescale = track.timescale.max(1) as f64;
+            let moof = read_box(&bytes, 0)?.ok_or(())?;
+            let info = parse_fragment(
+                &bytes,
+                &moof,
+                track.default_sample_duration,
+                track.default_sample_flags,
+            )
+            .ok_or(())?;
+            let start = info.decode_time as f64 / timescale + timestamp_offset;
+            let end = start + info.duration as f64 / timescale;
+            let fragment = Fragment {
                 start,
                 end,
                 bytes,
                 generation: self.generation,
                 keyframe: info.starts_with_sync,
-            },
-        );
+            };
+            self.tracks[media].insert(fragment);
+        }
         Ok(())
     }
 
-    /// The first fragment that still has media after `time`.
-    pub(crate) fn fragment_after(&self, time: f64) -> Option<&Fragment> {
-        self.fragments
-            .values()
-            .find(|fragment| fragment.end > time + fragment.tolerance())
-    }
-
-    /// The variant (initialization segment generation) playing at `time`: that of the fragment
-    /// starting last at or before it, else of the first one after it.
-    pub(crate) fn generation_at(&self, time: f64) -> Option<u32> {
-        let mut generation = None;
-        for fragment in self.fragments.values() {
-            if fragment.start > time + EPSILON {
-                return generation.or(Some(fragment.generation));
-            }
-            generation = Some(fragment.generation);
-        }
-        generation
-    }
-
-    /// Where playback restarted at `time` must begin: the start of the last fragment at or
-    /// before `time` that starts with a keyframe (or the first fragment after `time`).
-    pub(crate) fn fragment_start_at(&self, time: f64) -> Option<f64> {
-        let mut start = None;
-        for fragment in self.fragments.values() {
-            if fragment.start > time + EPSILON {
-                break;
-            }
-            if fragment.keyframe {
-                start = Some(fragment.start);
-            }
-        }
-        start
-            .or_else(|| self.fragment_after(time).map(|fragment| fragment.start))
-            .map(|start| start.min(time))
-    }
-
-    /// Buffered time ranges (fragments merged when they touch).
+    /// Buffered time ranges: where every track has media.
     pub(crate) fn ranges(&self) -> Vec<(f64, f64)> {
-        let mut ranges: Vec<(f64, f64)> = vec![];
-        for fragment in self.fragments.values() {
-            match ranges.last_mut() {
-                Some(last) if fragment.start <= last.1 + EPSILON => {
-                    last.1 = last.1.max(fragment.end);
-                },
-                _ => ranges.push((fragment.start, fragment.end)),
-            }
-        }
-        ranges
+        let mut tracks = self
+            .tracks
+            .iter()
+            .filter(|track| !track.fragments.is_empty());
+        let Some(first) = tracks.next() else {
+            return vec![];
+        };
+        tracks.fold(first.ranges(), |ranges, track| {
+            intersect_ranges(&ranges, &track.ranges())
+        })
     }
 
     pub(crate) fn highest_end(&self) -> f64 {
-        self.fragments
-            .values()
-            .map(|fragment| fragment.end)
+        self.tracks
+            .iter()
+            .map(TrackMedia::highest_end)
             .fold(0.0, f64::max)
     }
 
     /// Drop fragments lying entirely within `[start, end]`.
     fn remove(&mut self, start: f64, end: f64) {
-        let doomed: Vec<u64> = self
-            .fragments
-            .iter()
-            .filter(|(_, fragment)| {
-                fragment.start >= start - EPSILON && fragment.end <= end + EPSILON
-            })
-            .map(|(key, _)| *key)
-            .collect();
-        for key in doomed {
-            if let Some(old) = self.fragments.remove(&key) {
-                self.bytes -= old.bytes.len();
-            }
+        for track in &mut self.tracks {
+            track.remove(start, end);
         }
     }
 
@@ -345,6 +473,17 @@ impl SourceBuffer {
 
     pub(crate) fn track(&self) -> Ref<'_, TrackBuffer> {
         self.track.borrow()
+    }
+
+    /// Each of the buffer's audio and video tracks.
+    pub(crate) fn track_views(&self) -> Vec<TrackView<'_>> {
+        let count = self.track.borrow().tracks.len();
+        (0..count)
+            .map(|index| TrackView {
+                buffer: self.track.borrow(),
+                index,
+            })
+            .collect()
     }
 
     pub(crate) fn is_updating(&self) -> bool {
@@ -509,18 +648,20 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
             if playing_buffered && now > BACK_BUFFER_SECONDS {
                 track.remove(0.0, now - BACK_BUFFER_SECONDS);
             }
-            let quota = match track.track().map(|info| info.kind) {
-                Some(TrackKind::Audio) => MAX_AUDIO_BYTES,
-                _ => MAX_VIDEO_BYTES,
+            let audio_only = track.playable_tracks().next().is_some() && !track.has_video();
+            let quota = if audio_only {
+                MAX_AUDIO_BYTES
+            } else {
+                MAX_VIDEO_BYTES
             };
-            if track.bytes + bytes.len() > quota {
+            if track.bytes() + bytes.len() > quota {
                 if now > MIN_BACK_BUFFER_SECONDS {
                     track.remove(0.0, now - MIN_BACK_BUFFER_SECONDS);
                 }
-                if track.bytes + bytes.len() > quota {
+                if track.bytes() + bytes.len() > quota {
                     return Err(Error::QuotaExceeded {
                         quota: Finite::new(quota as f64),
-                        requested: Finite::new((track.bytes + bytes.len()) as f64),
+                        requested: Finite::new((track.bytes() + bytes.len()) as f64),
                     });
                 }
             }
