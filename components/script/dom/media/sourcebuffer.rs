@@ -340,9 +340,10 @@ impl SourceBuffer {
         self.updating.get()
     }
 
+    /// Removed from its `MediaSource` (or the source closed): free the media it holds.
     pub(crate) fn set_removed(&self) {
         self.removed.set(true);
-        self.track.borrow_mut().reset_parser();
+        *self.track.borrow_mut() = TrackBuffer::default();
     }
 
     fn check_usable(&self) -> ErrorResult {
@@ -473,23 +474,35 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
     fn AppendBuffer(&self, data: ArrayBufferViewOrArrayBuffer) -> ErrorResult {
         self.check_usable()?;
         let bytes = match &data {
-            ArrayBufferViewOrArrayBuffer::ArrayBufferView(view) => get_buffer_source_copy(view.into()),
-            ArrayBufferViewOrArrayBuffer::ArrayBuffer(buffer) => get_buffer_source_copy(buffer.into()),
+            ArrayBufferViewOrArrayBuffer::ArrayBufferView(view) => {
+                get_buffer_source_copy(view.into())
+            },
+            ArrayBufferViewOrArrayBuffer::ArrayBuffer(buffer) => {
+                get_buffer_source_copy(buffer.into())
+            },
         };
         self.parent.reopen_if_ended();
 
-        // Coded frame eviction: make room by dropping media well behind the playhead.
+        // Coded frame eviction: drop media long behind the playhead, and when over quota, all
+        // played media but the last few seconds.
         {
             let mut track = self.track.borrow_mut();
-            if track.bytes + bytes.len() > MAX_BUFFERED_BYTES {
-                let played = self.parent.current_time() - 10.0;
-                if played > 0.0 {
-                    track.remove(0.0, played);
+            let now = self.parent.current_time();
+            if now > BACK_BUFFER_SECONDS {
+                track.remove(0.0, now - BACK_BUFFER_SECONDS);
+            }
+            let quota = match track.track().map(|info| info.kind) {
+                Some(TrackKind::Audio) => MAX_AUDIO_BYTES,
+                _ => MAX_VIDEO_BYTES,
+            };
+            if track.bytes + bytes.len() > quota {
+                if now > MIN_BACK_BUFFER_SECONDS {
+                    track.remove(0.0, now - MIN_BACK_BUFFER_SECONDS);
                 }
-                if track.bytes + bytes.len() > MAX_BUFFERED_BYTES {
+                if track.bytes + bytes.len() > quota {
                     return Err(Error::QuotaExceeded {
-                        quota: None,
-                        requested: None,
+                        quota: Finite::new(quota as f64),
+                        requested: Finite::new((track.bytes + bytes.len()) as f64),
                     });
                 }
             }

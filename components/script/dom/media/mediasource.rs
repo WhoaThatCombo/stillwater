@@ -10,12 +10,13 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::rust::HandleObject;
 use script_bindings::cell::DomRefCell;
-use script_bindings::reflector::reflect_dom_object_with_proto;
+use script_bindings::reflector::reflect_weak_referenceable_dom_object_with_proto;
 use stylo_atoms::Atom;
 use uuid::Uuid;
 
@@ -29,6 +30,7 @@ use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
+use crate::dom::bindings::weakref::WeakRef;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::fmp4::{
     InitSegment, TrackInfo, combined_init_segment, set_chunk_sequence, split_fragment,
@@ -42,8 +44,12 @@ use crate::dom::url::URL;
 use crate::dom::window::Window;
 
 thread_local! {
-    /// Object URLs made by `URL.createObjectURL(mediaSource)`, until revoked.
-    static OBJECT_URLS: RefCell<HashMap<String, Trusted<MediaSource>>> = RefCell::new(HashMap::new());
+    /// Object URLs made by `URL.createObjectURL(mediaSource)`, until revoked. Once a media
+    /// element has attached the source the reference becomes weak: pages often never revoke
+    /// them, and a strong one would keep every MediaSource (and all its buffered media) alive for
+    /// as long as the script thread lives.
+    static OBJECT_URLS: RefCell<HashMap<String, (WeakRef<MediaSource>, Option<Trusted<MediaSource>>)>> =
+        RefCell::new(HashMap::new());
 }
 
 /// What the media element's player should get next.
@@ -217,6 +223,14 @@ impl MediaSource {
     /// A media element started using this source (its `src` is our object URL).
     pub(crate) fn attach(&self, element: &HTMLMediaElement) {
         self.element.set(Some(element));
+        // The element keeps the source alive now.
+        OBJECT_URLS.with(|urls| {
+            for (source, strong) in urls.borrow_mut().values_mut() {
+                if source.root().is_some_and(|source| &*source == self) {
+                    *strong = None;
+                }
+            }
+        });
         *self.feed.borrow_mut() = Feed::default();
         self.state.set(State::Open);
         self.queue_event("sourceopen");
@@ -225,6 +239,7 @@ impl MediaSource {
     /// The media element stopped using this source.
     pub(crate) fn detach(&self) {
         self.element.set(None);
+        *self.feed.borrow_mut() = Feed::default();
         self.state.set(State::Closed);
         self.duration.set(f64::NAN);
         for buffer in self.source_buffers.buffers() {
@@ -478,9 +493,9 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         proto: Option<HandleObject>,
     ) -> Fallible<DomRoot<MediaSource>> {
         let source_buffers = SourceBufferList::new(cx, window);
-        Ok(reflect_dom_object_with_proto(
+        Ok(reflect_weak_referenceable_dom_object_with_proto(
             cx,
-            Box::new(MediaSource {
+            Rc::new(MediaSource {
                 eventtarget: EventTarget::new_inherited(),
                 source_buffers: Dom::from_ref(&*source_buffers),
                 state: Cell::new(State::Closed),
