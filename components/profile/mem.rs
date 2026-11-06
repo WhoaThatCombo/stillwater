@@ -137,16 +137,21 @@ impl Profiler {
     fn collect_reports(&self) -> HashMap<u32, Vec<Report>> {
         let mut result = HashMap::new();
 
-        for reporter in self.reporters.values() {
+        for (name, reporter) in self.reporters.iter() {
             let (chan, port) = generic_channel::channel().unwrap();
             reporter.collect_reports(ReportsChan(chan));
-            if let Ok(mut reports) = port.recv() {
-                result
+            // Don't let one stuck reporter (e.g. a busy script thread) hang the whole report.
+            match port.try_recv_timeout(REPORTER_TIMEOUT) {
+                Ok(mut reports) => result
                     .entry(reports.pid)
                     .or_insert(vec![])
-                    .append(&mut reports.reports);
+                    .append(&mut reports.reports),
+                Err(_) => log::warn!("Memory reporter {name} did not answer"),
             }
         }
         result
     }
 }
+
+/// How long to wait for each reporter before leaving it out of a memory report.
+const REPORTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);

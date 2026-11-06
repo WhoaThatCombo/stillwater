@@ -207,10 +207,19 @@ mod platform {
             let heap = GetProcessHeap();
 
             if HeapValidate(heap, 0, ptr) == FALSE {
-                ptr = *(ptr as *const *const c_void).offset(-1)
+                // Over-aligned allocations store the real heap block just before `ptr`.
+                ptr = *(ptr as *const *const c_void).offset(-1);
+                // Anything else (static data, memory from another allocator) can't be
+                // measured: HeapSize on a pointer that isn't a heap block is undefined.
+                if HeapValidate(heap, 0, ptr) == FALSE {
+                    return 0;
+                }
             }
 
-            let size = HeapSize(heap, 0, ptr) as usize;
+            let size = HeapSize(heap, 0, ptr);
+            if size == usize::MAX {
+                return 0;
+            }
             #[cfg(feature = "allocation-tracking")]
             crate::ALLOC.note_allocation(ptr, size);
             size
