@@ -309,6 +309,23 @@ impl MediaSource {
         container
     }
 
+    /// Whether every buffer has media at `time`, so playback can restart there now. Once the
+    /// stream has ended, any time counts (there is nothing more to wait for).
+    pub(crate) fn has_data_at(&self, time: f64) -> bool {
+        if self.state.get() == State::Ended {
+            return true;
+        }
+        let buffers = self.source_buffers.buffers();
+        !buffers.is_empty() &&
+            buffers.iter().all(|buffer| {
+                buffer
+                    .track()
+                    .ranges()
+                    .iter()
+                    .any(|(start, end)| time >= start - EPSILON && time < end - EPSILON)
+            })
+    }
+
     /// Restart the merged stream so the player's time zero is at (or just before) `time`.
     /// Returns the media time the new stream starts at.
     pub(crate) fn restart_feed(&self, time: f64) -> f64 {

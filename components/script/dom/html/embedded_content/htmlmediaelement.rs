@@ -271,6 +271,8 @@ pub(crate) struct HTMLMediaElement {
     mse_pending: DomRefCell<Option<Vec<u8>>>,
     /// A seek waits for the restarted player to show its first frame or position.
     mse_seek_pending: Cell<bool>,
+    /// A seek to a time the page hasn't appended media for yet: restart there once it has.
+    mse_seek_waiting: Cell<Option<f64>>,
     /// Video frames (rendered, dropped) by earlier players since the last load, for
     /// getVideoPlaybackQuality().
     frame_counts_before: Cell<(u64, u64)>,
@@ -465,6 +467,7 @@ impl HTMLMediaElement {
             mse_locked: Cell::new(true),
             mse_pending: DomRefCell::new(None),
             mse_seek_pending: Cell::new(false),
+            mse_seek_waiting: Cell::new(None),
             frame_counts_before: Cell::new((0, 0)),
             played: DomRefCell::new(TimeRangesContainer::default()),
             audio_tracks_list: Default::default(),
@@ -2255,11 +2258,24 @@ impl HTMLMediaElement {
         // Step 11. Set the current playback position to the new playback position.
         self.current_playback_position.set(time);
 
-        if self.media_source.get().is_some() {
+        if let Some(media_source) = self.media_source.get() {
             // MSE streams can't be seeked by the player: restart them at the new position.
             self.current_seek_position.set(time);
             self.mse_seek_pending.set(true);
-            self.mse_restart(time);
+            if media_source.has_data_at(time) {
+                self.mse_seek_waiting.set(None);
+                self.mse_restart(time);
+            } else {
+                // Nothing appended there yet (the page fetches it in response to `seeking`):
+                // stop playing the old position and restart once the media arrives, instead of
+                // jumping to whatever is buffered next.
+                self.mse_seek_waiting.set(Some(time));
+                self.mse_locked.set(true);
+                *self.mse_pending.borrow_mut() = None;
+                if let Some(ref player) = *self.player.borrow() {
+                    let _ = player.lock().unwrap().pause();
+                }
+            }
             return;
         }
 
@@ -2460,6 +2476,7 @@ impl HTMLMediaElement {
     fn attach_media_source(&self, media_source: &MediaSource) {
         self.media_source.set(Some(media_source));
         self.mse_base.set(0.0);
+        self.mse_seek_waiting.set(None);
         self.mse_locked.set(true);
         *self.mse_pending.borrow_mut() = None;
         if let Some(ref player) = *self.player.borrow() {
@@ -2486,6 +2503,15 @@ impl HTMLMediaElement {
         let Some(media_source) = self.media_source.get() else {
             return;
         };
+        if let Some(time) = self.mse_seek_waiting.get() {
+            if !media_source.has_data_at(time) {
+                return;
+            }
+            // The media for a pending seek arrived; the new player asks for data itself.
+            self.mse_seek_waiting.set(None);
+            self.mse_restart(time);
+            return;
+        }
         loop {
             if self.mse_locked.get() {
                 return;
@@ -4672,6 +4698,7 @@ impl HTMLMediaElementEventHandler {
         }
 
         if element.mse_seek_pending.get() &&
+            element.mse_seek_waiting.get().is_none() &&
             matches!(
                 event,
                 PlayerEvent::VideoFrameUpdated |
