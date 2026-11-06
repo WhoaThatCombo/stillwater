@@ -179,7 +179,7 @@ impl PlayerInner {
     }
 
     pub fn set_playback_rate(&mut self, playback_rate: f64) -> Result<(), PlayerError> {
-        if self.stream_type != StreamType::Seekable {
+        if self.stream_type == StreamType::Stream {
             return Err(PlayerError::NonSeekableStream);
         }
 
@@ -621,7 +621,7 @@ impl GStreamerPlayer {
                 })?;
                 "mediastream://".to_value()
             },
-            StreamType::Seekable => {
+            StreamType::Seekable | StreamType::MediaSource => {
                 register_servo_src().map_err(|error| {
                     PlayerError::Backend(format!("servosrc registration error: {error:?}"))
                 })?;
@@ -837,7 +837,7 @@ impl GStreamerPlayer {
 
                 let mut inner = inner_clone.lock().unwrap();
                 let source = match inner.stream_type {
-                    StreamType::Seekable => {
+                    StreamType::Seekable | StreamType::MediaSource => {
                         let servosrc = source
                             .dynamic_cast::<ServoSrc>()
                             .expect("Source element is expected to be a ServoSrc!");
@@ -845,7 +845,12 @@ impl GStreamerPlayer {
                         if inner.input_size > 0 {
                             servosrc.set_size(inner.input_size as i64);
                         }
-                        servosrc.set_seekable(inner.seekable);
+                        if inner.stream_type == StreamType::MediaSource {
+                            servosrc.set_seekable(false);
+                            servosrc.set_bandwidth_limited(false);
+                        } else {
+                            servosrc.set_seekable(inner.seekable);
+                        }
 
                         let sender_clone = sender.clone();
                         let is_ready = is_ready_clone.clone();

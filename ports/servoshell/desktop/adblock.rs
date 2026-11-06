@@ -378,6 +378,12 @@ fn save() {
 
 /// Decide about one request. Runs on Servo's network threads, so it must stay fast.
 fn filter_request(request: &WebResourceRequest, webview: Option<WebViewId>) -> RequestDecision {
+    // STILLWATER_NET_LOG: log every request (debugging).
+    static NET_LOG: LazyLock<bool> = LazyLock::new(|| std::env::var_os("STILLWATER_NET_LOG").is_some());
+    if *NET_LOG {
+        let url = request.url.as_str();
+        diagnostics::log(format!("net: {:?} {} {}", request.destination, request.method, &url[..url.len().min(160)]));
+    }
     // Main pages go to the main thread, which prepares the site's scriptlets.
     if request.destination == Destination::Document {
         return RequestDecision::AskEmbedder;

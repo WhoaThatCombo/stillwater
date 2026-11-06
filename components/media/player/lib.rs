@@ -94,6 +94,10 @@ pub enum StreamType {
     Stream,
     /// The stream is seekable.
     Seekable,
+    /// Media pushed by the page (Media Source Extensions): a byte stream that isn't seekable by
+    /// offset, may never end, and is already in memory, so it must not wait on network-style
+    /// buffering.
+    MediaSource,
 }
 
 pub trait Player: Send + MediaInstance {

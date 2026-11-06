@@ -58,7 +58,7 @@ use crate::dom::bindings::codegen::Bindings::TextTrackCueBinding::TextTrackCueMe
 use crate::dom::bindings::codegen::Bindings::URLBinding::URLMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
 use crate::dom::bindings::codegen::UnionTypes::{
-    MediaStreamOrBlob, VideoTrackOrAudioTrackOrTextTrack,
+    BlobOrMediaSource, MediaStreamOrBlob, VideoTrackOrAudioTrackOrTextTrack,
 };
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
@@ -86,6 +86,7 @@ use crate::dom::html::htmlvideoelement::HTMLVideoElement;
 use crate::dom::mediaerror::MediaError;
 use crate::dom::mediafragmentparser::MediaFragmentParser;
 use crate::dom::medialist::MediaList;
+use crate::dom::mediasource::{MediaSource, MseChunk};
 use crate::dom::mediastream::MediaStream;
 use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::node::{Node, NodeDamage, NodeTraits, UnbindContext};
@@ -259,7 +260,17 @@ pub(crate) struct HTMLMediaElement {
     /// is a blob.
     #[no_trace]
     blob_url: DomRefCell<Option<ServoUrl>>,
-    /// <https://html.spec.whatwg.org/multipage/#dom-media-played>
+    /// Media Source Extensions: the MediaSource this element plays, if any.
+    media_source: MutNullableDom<MediaSource>,
+    /// Media time at which the current player's stream starts (MSE restarts the stream to seek).
+    mse_base: Cell<f64>,
+    /// The player asked us to stop pushing (EnoughData) or hasn't asked for data yet.
+    mse_locked: Cell<bool>,
+    /// A piece of the stream the player refused, to push again first.
+    #[ignore_malloc_size_of = "Media data"]
+    mse_pending: DomRefCell<Option<Vec<u8>>>,
+    /// A seek waits for the restarted player to show its first frame or position.
+    mse_seek_pending: Cell<bool>,    /// <https://html.spec.whatwg.org/multipage/#dom-media-played>
     played: DomRefCell<TimeRangesContainer>,
     // https://html.spec.whatwg.org/multipage/#dom-media-audiotracks
     audio_tracks_list: MutNullableDom<AudioTrackList>,
@@ -445,6 +456,11 @@ impl HTMLMediaElement {
             current_seek_position: Cell::new(f64::NAN),
             resource_url: DomRefCell::new(None),
             blob_url: DomRefCell::new(None),
+            media_source: MutNullableDom::new(None),
+            mse_base: Cell::new(0.0),
+            mse_locked: Cell::new(true),
+            mse_pending: DomRefCell::new(None),
+            mse_seek_pending: Cell::new(false),
             played: DomRefCell::new(TimeRangesContainer::default()),
             audio_tracks_list: Default::default(),
             video_tracks_list: Default::default(),
@@ -483,7 +499,8 @@ impl HTMLMediaElement {
             .as_ref()
             .is_some_and(|player| !player.lock().unwrap().paused());
 
-        if self.is_potentially_playing() && !is_playing {
+        let potentially_playing = self.is_potentially_playing();
+        if potentially_playing && !is_playing {
             if let Some(ref player) = *self.player.borrow() {
                 let player = player.lock().unwrap();
 
@@ -497,7 +514,8 @@ impl HTMLMediaElement {
                     error!("Could not play media: {error:?}");
                 }
             }
-        } else if is_playing &&
+        } else if !potentially_playing &&
+            is_playing &&
             let Some(ref player) = *self.player.borrow() &&
             let Err(error) = player.lock().unwrap().pause()
         {
@@ -611,6 +629,18 @@ impl HTMLMediaElement {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#time-marches-on>
+    /// Step 6 of the time marches on steps: during normal playback, fire timeupdate at most every
+    /// 250 ms.
+    fn queue_timeupdate_during_playback(&self, playback_was_moved_monotonic_increase: bool) {
+        if playback_was_moved_monotonic_increase &&
+            Instant::now() > self.next_timeupdate_event.get()
+        {
+            self.queue_media_element_task_to_fire_event(atom!("timeupdate"));
+            self.next_timeupdate_event
+                .set(Instant::now() + Duration::from_millis(250));
+        }
+    }
+
     fn time_marches_on(&self, cx: &mut JSContext, playback_was_moved: PlaybackPositionWasMoved) {
         let playback_was_moved_monotonic_increase =
             playback_was_moved == PlaybackPositionWasMoved::NormalPlayback;
@@ -623,6 +653,9 @@ impl HTMLMediaElement {
         // all the cues of hidden and showing text tracks of the media element
         // that are not present in current cues.
         let Some(text_tracks_list) = self.text_tracks_list.get() else {
+            // No text tracks means no cues to update, but timeupdate (step 6) still applies:
+            // streaming players schedule their downloads from it.
+            self.queue_timeupdate_during_playback(playback_was_moved_monotonic_increase);
             return;
         };
         let Some((current_cues, other_cues)) =
@@ -678,13 +711,7 @@ impl HTMLMediaElement {
         // timeupdate event at the element in the past 15 to 250ms and is not still running event
         // handlers for such an event, then the user agent must queue a media element task given the
         // media element to fire an event named timeupdate at the element.
-        if playback_was_moved_monotonic_increase &&
-            Instant::now() > self.next_timeupdate_event.get()
-        {
-            self.queue_media_element_task_to_fire_event(atom!("timeupdate"));
-            self.next_timeupdate_event
-                .set(Instant::now() + Duration::from_millis(250));
-        }
+        self.queue_timeupdate_during_playback(playback_was_moved_monotonic_increase);
 
         // Step 7. If all of the cues in current cues have their text track cue active flag set,
         // none of the cues in other cues have their text track cue active flag set,
@@ -1656,7 +1683,15 @@ impl HTMLMediaElement {
 
         // Step 5. Run the appropriate steps from the following list:
         match resource {
+            Resource::MediaSource => {},
             Resource::Url(url) => {
+                // Media Source Extensions: an object URL for a MediaSource is fed by the page
+                // through SourceBuffers instead of being fetched.
+                if let Some(media_source) = MediaSource::from_object_url(url.as_str()) {
+                    *self.resource_url.borrow_mut() = Some(url);
+                    self.attach_media_source(&media_source);
+                    return;
+                }
                 // Step 5.remote.1. Optionally, run the following substeps. This is the expected
                 // behavior if the user agent intends to not attempt to fetch the resource until the
                 // user requests it explicitly (e.g. as a way to implement the preload attribute's
@@ -1707,7 +1742,10 @@ impl HTMLMediaElement {
                 if let Some(ref src_object) = *self.src_object.borrow() {
                     match src_object {
                         SrcObject::Blob(blob) => {
-                            let blob_url = URL::CreateObjectURL(&self.global(), blob);
+                            let blob_url = URL::CreateObjectURL(
+                                &self.global(),
+                                BlobOrMediaSource::Blob(DomRoot::from_ref(&**blob)),
+                            );
                             *self.blob_url.borrow_mut() =
                                 Some(ServoUrl::parse(&blob_url.str()).expect("infallible"));
                             self.fetch_request(cx, None, None);
@@ -1841,6 +1879,14 @@ impl HTMLMediaElement {
         // Step 2. Abort any already-running instance of the resource selection algorithm for this
         // element.
         self.generation_id.set(self.generation_id.get() + 1);
+
+        // Media Source Extensions: a new load detaches the previous MediaSource.
+        if let Some(media_source) = self.media_source.take() {
+            media_source.detach();
+            *self.mse_pending.borrow_mut() = None;
+            self.mse_seek_pending.set(false);
+            self.mse_base.set(0.0);
+        }
 
         self.load_state.set(LoadState::NotLoaded);
         *self.source_children_pointer.borrow_mut() = None;
@@ -2199,6 +2245,14 @@ impl HTMLMediaElement {
         // Step 11. Set the current playback position to the new playback position.
         self.current_playback_position.set(time);
 
+        if self.media_source.get().is_some() {
+            // MSE streams can't be seeked by the player: restart them at the new position.
+            self.current_seek_position.set(time);
+            self.mse_seek_pending.set(true);
+            self.mse_restart(time);
+            return;
+        }
+
         if let Some(ref player) = *self.player.borrow() &&
             let Err(error) = player.lock().unwrap().seek(time)
         {
@@ -2268,7 +2322,11 @@ impl HTMLMediaElement {
                     return Err(());
                 }
             },
-            _ => StreamType::Seekable,
+            Resource::MediaSource => StreamType::MediaSource,
+            Resource::Url(ref url) if MediaSource::from_object_url(url.as_str()).is_some() => {
+                StreamType::MediaSource
+            },
+            Resource::Url(_) => StreamType::Seekable,
         };
 
         let window = self.owner_window();
@@ -2338,8 +2396,17 @@ impl HTMLMediaElement {
                 self.media_type_id(),
                 HTMLMediaElementTypeId::HTMLVideoElement
             );
-            let should_enable_download_buffering =
-                (is_video || self.Loop()) && self.Preload() == "auto";
+            // Media Source Extensions streams never end on their own, so download buffering (which
+            // waits for a full buffer or the end of the stream) would stall them, and their data
+            // is in memory already.
+            let is_media_source = match resource {
+                Resource::MediaSource => true,
+                Resource::Url(url) => MediaSource::from_object_url(url.as_str()).is_some(),
+                Resource::Object => false,
+            };
+            let should_enable_download_buffering = !is_media_source &&
+                (is_video || self.Loop()) &&
+                self.Preload() == "auto";
             if let Err(error) =
                 player_guard.set_download_buffering_enabled(should_enable_download_buffering)
             {
@@ -2372,6 +2439,124 @@ impl HTMLMediaElement {
             .setup(player_id, task_source, weak_video_renderer);
 
         Ok(())
+    }
+
+    /// Start playing media_source (the element's src is its object URL).
+    fn attach_media_source(&self, media_source: &MediaSource) {
+        self.media_source.set(Some(media_source));
+        self.mse_base.set(0.0);
+        self.mse_locked.set(true);
+        *self.mse_pending.borrow_mut() = None;
+        if let Some(ref player) = *self.player.borrow() {
+            let _ = player.lock().unwrap().set_seekable(false);
+        }
+        media_source.attach(self);
+
+        // Nothing is fetched, so stop delaying the document's load event.
+        let this = Trusted::new(self);
+        let generation_id = self.generation_id.get();
+        self.owner_global()
+            .task_manager()
+            .media_element_task_source()
+            .queue(task!(mse_stop_delaying_load: move |cx| {
+                let this = this.root();
+                if generation_id == this.generation_id.get() {
+                    this.delay_load_event(cx, false);
+                }
+            }));
+    }
+
+    /// Push whatever the MediaSource has ready to the player, until it asks us to stop.
+    pub(crate) fn mse_feed(&self) {
+        let Some(media_source) = self.media_source.get() else {
+            return;
+        };
+        loop {
+            if self.mse_locked.get() {
+                return;
+            }
+            let Some(player) = self.player.borrow().as_ref().cloned() else {
+                return;
+            };
+            let pending = self.mse_pending.borrow_mut().take();
+            let chunk = match pending {
+                Some(bytes) => MseChunk::Data(bytes),
+                None => match media_source.next_chunk() {
+                    Some(chunk) => chunk,
+                    None => return,
+                },
+            };
+            match chunk {
+                MseChunk::Data(bytes) => {
+                    let result = player.lock().unwrap().push_data(bytes.clone());
+                    match result {
+                        Ok(()) => {},
+                        Err(PlayerError::EnoughData) => {
+                            *self.mse_pending.borrow_mut() = Some(bytes);
+                            self.mse_locked.set(true);
+                            return;
+                        },
+                        Err(error) => {
+                            warn!("MSE: could not push data to the player: {error:?}");
+                            return;
+                        },
+                    }
+                },
+                MseChunk::EndOfStream => {
+                    let _ = player.lock().unwrap().end_of_stream();
+                },
+                MseChunk::Restart(time) => {
+                    self.mse_restart(time);
+                    return;
+                },
+            }
+        }
+    }
+
+    /// Replace the player with one whose stream starts at (or just before) media time 	ime.
+    fn mse_restart(&self, time: f64) {
+        let Some(media_source) = self.media_source.get() else {
+            return;
+        };
+        let base = media_source.restart_feed(time);
+        self.mse_base.set(base);
+        *self.mse_pending.borrow_mut() = None;
+        self.mse_locked.set(true);
+        if let Some(ref player) = *self.player.borrow() {
+            let _ = player.lock().unwrap().stop();
+        }
+        if self.create_media_player(&Resource::MediaSource).is_err() {
+            warn!("MSE: could not restart the player");
+            return;
+        }
+        if let Some(ref player) = *self.player.borrow() {
+            let player = player.lock().unwrap();
+            let _ = player.set_seekable(false);
+            let _ = player.set_mute(self.is_muted());
+            let _ = player.set_volume(self.volume.get());
+            if !self.paused.get() {
+                let _ = player.play();
+            }
+        }
+    }
+
+    /// The playback position, for MSE coded frame eviction.
+    pub(crate) fn mse_current_time(&self) -> f64 {
+        *self.CurrentTime()
+    }
+
+    /// The page changed mediaSource.duration.
+    pub(crate) fn mse_duration_changed(&self) {
+        let Some(media_source) = self.media_source.get() else {
+            return;
+        };
+        let duration = media_source.element_duration();
+        let current = self.duration.get();
+        if current == duration || (current.is_nan() && duration.is_nan()) {
+            return;
+        }
+        self.duration.set(duration);
+        self.queue_media_element_task_to_fire_event(atom!("durationchange"));
     }
 
     fn reset_media_player(&self, no_gc: &NoGC) {
@@ -2722,11 +2907,13 @@ impl HTMLMediaElement {
         // in principle infinite), update the duration attribute to the value positive Infinity.
         // Note: The user agent will queue a media element task given the media element to fire an
         // event named durationchange at the element at this point.
-        self.duration.set(
-            metadata
+        // With Media Source Extensions the duration is whatever the page set on the MediaSource.
+        self.duration.set(match self.media_source.get() {
+            Some(media_source) => media_source.element_duration(),
+            None => metadata
                 .duration
                 .map_or(f64::INFINITY, |duration| duration.as_secs_f64()),
-        );
+        });
         self.queue_media_element_task_to_fire_event(atom!("durationchange"));
 
         // Step 5. For video elements, set the videoWidth and videoHeight attributes, and queue a
@@ -2743,6 +2930,13 @@ impl HTMLMediaElement {
 
         // Step 6. Set the readyState attribute to HAVE_METADATA.
         self.change_ready_state(cx, ReadyState::HaveMetadata);
+
+        // Media Source Extensions: readiness follows the buffered ranges, and the player only
+        // reports metadata once media is flowing, so the data for playback is there. (Waiting
+        // for a later player state change can miss one that arrived before the metadata.)
+        if self.media_source.get().is_some() {
+            self.change_ready_state(cx, ReadyState::HaveEnoughData);
+        }
 
         // Step 7. Let jumped be false.
         let mut jumped = false;
@@ -2797,6 +2991,10 @@ impl HTMLMediaElement {
     }
 
     fn playback_duration_changed(&self, duration: Option<Duration>) {
+        // With Media Source Extensions the page sets the duration.
+        if self.media_source.get().is_some() {
+            return;
+        }
         let duration = duration.map_or(f64::INFINITY, |duration| duration.as_secs_f64());
 
         if self.duration.get() == duration {
@@ -2853,6 +3051,11 @@ impl HTMLMediaElement {
     }
 
     fn playback_need_data(&self) {
+        if self.media_source.get().is_some() {
+            self.mse_locked.set(false);
+            self.mse_feed();
+            return;
+        }
         // The media engine signals that the source needs more data. If we already have a valid
         // fetch request, we do nothing. Otherwise, if we have no request and the previous request
         // was cancelled because we got an EnoughData event, we restart fetching where we left.
@@ -2891,6 +3094,10 @@ impl HTMLMediaElement {
     }
 
     fn playback_enough_data(&self) {
+        if self.media_source.get().is_some() {
+            self.mse_locked.set(true);
+            return;
+        }
         // The media engine signals that the source has enough data and asks us to stop pushing bytes
         // to avoid excessive buffer queueing, so we cancel the ongoing fetch request if we are able
         // to restart it from where we left. Otherwise, we continue the current fetch request,
@@ -2903,6 +3110,8 @@ impl HTMLMediaElement {
     }
 
     fn playback_position_changed(&self, cx: &mut JSContext, position: f64) {
+        // MSE: the player's stream starts at media time `mse_base`.
+        let position = position + self.mse_base.get();
         // Abort the following steps of the current time update if seeking is in progress.
         if self.seeking.get() {
             return;
@@ -2991,6 +3200,14 @@ impl HTMLMediaElement {
 
     fn seekable(&self) -> TimeRangesContainer {
         let mut seekable = TimeRangesContainer::default();
+        if let Some(media_source) = self.media_source.get() {
+            let duration = media_source.element_duration();
+            if duration.is_finite() && duration > 0.0 {
+                let _ = seekable.add(0.0, duration);
+                return seekable;
+            }
+            return media_source.buffered();
+        }
         if let Some(ref player) = *self.player.borrow() {
             let ranges = player.lock().unwrap().seekable();
             for range in ranges {
@@ -3607,6 +3824,9 @@ impl HTMLMediaElementMethods<crate::DomTypeHolder> for HTMLMediaElement {
 
     /// <https://html.spec.whatwg.org/multipage/#dom-media-buffered>
     fn Buffered(&self, cx: &mut JSContext) -> DomRoot<TimeRanges> {
+        if let Some(media_source) = self.media_source.get() {
+            return TimeRanges::new(cx, self.global().as_window(), media_source.buffered());
+        }
         let mut buffered = TimeRangesContainer::default();
         if let Some(ref player) = *self.player.borrow() {
             let ranges = player.lock().unwrap().buffered();
@@ -3885,6 +4105,8 @@ impl MicrotaskRunnable for MediaElementMicrotask {
 enum Resource {
     Object,
     Url(ServoUrl),
+    /// Media Source Extensions: a restarted stream from the attached MediaSource.
+    MediaSource,
 }
 
 #[derive(Debug, MallocSizeOf, PartialEq)]
@@ -4406,6 +4628,18 @@ impl HTMLMediaElementEventHandler {
         // Abort event processing if the associated media player is outdated.
         if element.player_id().is_none_or(|id| id != player_id) {
             return;
+        }
+
+        if element.mse_seek_pending.get() &&
+            matches!(
+                event,
+                PlayerEvent::VideoFrameUpdated |
+                    PlayerEvent::PositionChanged(_) |
+                    PlayerEvent::StateChanged(PlaybackState::Playing | PlaybackState::Paused)
+            )
+        {
+            element.mse_seek_pending.set(false);
+            element.playback_seek_done(cx, element.current_seek_position.get());
         }
 
         match event {

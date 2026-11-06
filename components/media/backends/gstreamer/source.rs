@@ -48,6 +48,8 @@ mod imp {
         position: Mutex<Position>,
         seeking: AtomicBool,
         seekable: AtomicBool,
+    /// Report the source as bandwidth-limited (network-like), which makes the pipeline buffer.
+    bandwidth_limited: AtomicBool,
         size: Mutex<Option<i64>>,
     }
 
@@ -68,6 +70,10 @@ mod imp {
 
         pub fn set_seekable(&self, seekable: bool) {
             self.seekable.store(seekable, Ordering::Relaxed);
+        }
+
+        pub fn set_bandwidth_limited(&self, limited: bool) {
+            self.bandwidth_limited.store(limited, Ordering::Relaxed);
         }
 
         pub fn set_seek_offset<O: IsA<gstreamer::Object>>(&self, parent: &O, offset: u64) -> bool {
@@ -222,8 +228,13 @@ mod imp {
                     } else {
                         gstreamer::SchedulingFlags::SEQUENTIAL
                     };
+                    let bandwidth_flag = if self.bandwidth_limited.load(Ordering::Relaxed) {
+                        gstreamer::SchedulingFlags::BANDWIDTH_LIMITED
+                    } else {
+                        gstreamer::SchedulingFlags::empty()
+                    };
                     q.set(
-                        seekability_flag | gstreamer::SchedulingFlags::BANDWIDTH_LIMITED,
+                        seekability_flag | bandwidth_flag,
                         1,
                         -1,
                         0,
@@ -281,6 +292,7 @@ mod imp {
                 position: Mutex::new(Default::default()),
                 seeking: AtomicBool::new(false),
                 seekable: AtomicBool::new(true),
+            bandwidth_limited: AtomicBool::new(true),
                 size: Mutex::new(None),
             }
         }
@@ -402,6 +414,10 @@ impl ServoSrc {
 
     pub fn set_seekable(&self, seekable: bool) {
         self.imp().set_seekable(seekable);
+    }
+
+    pub fn set_bandwidth_limited(&self, limited: bool) {
+        self.imp().set_bandwidth_limited(limited);
     }
 
     pub fn set_seek_offset(&self, offset: u64) -> bool {

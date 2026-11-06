@@ -26,6 +26,23 @@
     window.cancelIdleCallback = function (id) { clearTimeout(id); };
   }
 
+  // HTMLVideoElement.getVideoPlaybackQuality(): streaming players (e.g. YouTube) poll it while
+  // playing to pick a quality and schedule downloads. Servo doesn't count decoded frames yet,
+  // so report frames estimated from the playback position, with none dropped.
+  if (typeof HTMLVideoElement !== "undefined" &&
+      typeof HTMLVideoElement.prototype.getVideoPlaybackQuality !== "function") {
+    HTMLVideoElement.prototype.getVideoPlaybackQuality = function () {
+      const frames = Math.floor((this.played && this.played.length ? this.currentTime : 0) * 30);
+      return {
+        creationTime: performance.now(),
+        totalVideoFrames: frames,
+        droppedVideoFrames: 0,
+        corruptedVideoFrames: 0,
+        totalFrameDelay: 0,
+      };
+    };
+  }
+
   // Element.checkVisibility(): whether the element is rendered and not hidden.
   if (typeof Element !== "undefined" && typeof Element.prototype.checkVisibility !== "function") {
     Element.prototype.checkVisibility = function (options) {
