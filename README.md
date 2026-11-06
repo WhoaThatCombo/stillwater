@@ -4,7 +4,7 @@
 
 **A calm, lightweight browser built on [Servo](https://servo.org) — vertical tabs and workspaces, written in Rust.**
 
-[Website](https://whoathatcombo.github.io/stillwater/) · [Build it](#build-on-windows) · [How it works](#how-it-works) · [Credits](#credits)
+[Download for Windows](https://github.com/WhoaThatCombo/stillwater/releases) · [Website](https://whoathatcombo.github.io/stillwater/) · [Build it](#build-on-windows) · [How it works](#how-it-works) · [Credits](#credits)
 
 ![Stillwater with a blue-tinted "Work" space](.github/assets/stillwater-workspaces.png)
 
@@ -22,6 +22,12 @@ written entirely in Rust, so there's no Chromium or Gecko inside.
 
 The sidebar itself is an HTML/CSS page that **Servo renders for its own UI**, the same way Firefox
 renders its interface with Gecko.
+
+## Download
+
+Get the latest Windows build (x64) from [Releases](https://github.com/WhoaThatCombo/stillwater/releases).
+Extract the zip and run `Stillwater\servoshell.exe`. The build isn't code-signed, so Windows SmartScreen
+may ask you to confirm the first time it runs.
 
 ## Features
 
@@ -109,7 +115,8 @@ cd stillwater
 - [ ] Session restore
 - [ ] Drag tabs between spaces, pinned tabs, folders
 - [ ] Command palette
-- [ ] Prebuilt Windows downloads
+- [x] Prebuilt Windows downloads
+- [ ] Stillwater name and icon in the window and installer
 
 ## Credits
 
