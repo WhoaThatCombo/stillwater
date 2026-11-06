@@ -68,9 +68,23 @@ pub(crate) fn UserAgent(user_agent: &str) -> DOMString {
     DOMString::from(user_agent)
 }
 
+/// <https://html.spec.whatwg.org/multipage/#dom-navigator-appversion>
+///
+/// "4.0" is allowed, but libraries still in wide use treat it as Netscape 4: jsbn's random
+/// number generator then calls `crypto.random()`, which no browser has anymore, and throws
+/// (as on web.telegram.org). Report "5.0" like every current engine, with Gecko's platform
+/// token to match the user agent string.
 #[expect(non_snake_case)]
 pub(crate) fn AppVersion() -> DOMString {
-    DOMString::from_static("4.0")
+    if cfg!(target_os = "windows") {
+        DOMString::from_static("5.0 (Windows)")
+    } else if cfg!(target_os = "macos") {
+        DOMString::from_static("5.0 (Macintosh)")
+    } else if cfg!(target_os = "android") {
+        DOMString::from_static("5.0 (Android 10)")
+    } else {
+        DOMString::from_static("5.0 (X11)")
+    }
 }
 
 #[expect(non_snake_case)]
