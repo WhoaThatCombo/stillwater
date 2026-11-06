@@ -52,6 +52,21 @@ pub(crate) static EXPERIMENTAL_PREFS: &[&str] = &[
     "layout_css_font_variations_enabled",
 ];
 
+/// Stillwater: further Servo features that are off by default (and not in Servo's own
+/// experimental list) but that real sites need, turned on together with
+/// [`EXPERIMENTAL_PREFS`] at startup (desktop/cli.rs; `STILLWATER_NO_EXPERIMENTAL` opts out).
+/// Each one was checked with `tools/sitecheck` (`-- --pref=<name>=true`) before being added.
+pub(crate) static STILLWATER_EXTRA_PREFS: &[&str] = &[
+    // document/shadowRoot.adoptedStyleSheets (constructable stylesheets): GitHub, archive.org,
+    // nytimes.com and Lit-based web components fail without it.
+    "dom_adoptedstylesheet_enabled",
+    // window.cookieStore (microsoft.com).
+    "dom_cookiestore_enabled",
+    // Element.animate(), getAnimations() and the Animation interfaces (reddit.com, bsky.app,
+    // airbnb.com).
+    "dom_web_animations_enabled",
+];
+
 #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
 #[derive(Clone)]
 pub(crate) struct ServoShellPreferences {
