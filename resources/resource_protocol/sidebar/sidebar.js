@@ -97,7 +97,15 @@ function renderWorkspaces() {
   $("workspaces").replaceChildren(...strip, add);
 }
 
+function renderCaption() {
+  $("caption").hidden = !state.frameless;
+  const max = $("win-max");
+  max.textContent = state.maximized ? "" : "";
+  max.title = state.maximized ? "Restore" : "Maximise";
+}
+
 function render() {
+  renderCaption();
   if (state.workspaces) renderWorkspaces();
   tabs.replaceChildren(...state.tabs.map(renderTab));
   $("back").disabled = !state.canGoBack;
@@ -138,6 +146,26 @@ $("forward").addEventListener("click", () => send("forward"));
 $("reload").addEventListener("click", () => send("reload"));
 $("compact").addEventListener("click", () => send("toggle-compact"));
 $("new-tab").addEventListener("click", () => send("new-tab"));
+
+// Frameless window: caption buttons, and dragging/double-clicking empty sidebar space.
+$("win-min").addEventListener("click", () => send("win-min"));
+$("win-max").addEventListener("click", () => send("win-max"));
+$("win-close").addEventListener("click", () => send("win-close"));
+
+const isDragSurface = (target) =>
+  target.matches("[data-drag], body, #tabs, #workspaces, #workspace-header, .spacer");
+let lastDragDown = 0;
+document.addEventListener("mousedown", (event) => {
+  if (event.button !== 0 || !state.frameless || !isDragSurface(event.target)) return;
+  const now = Date.now();
+  if (now - lastDragDown < 400) {
+    lastDragDown = 0;
+    send("win-max"); // double-click toggles maximise, like a title bar
+  } else {
+    lastDragDown = now;
+    send("win-drag");
+  }
+});
 
 // Workspace header: click icon / colour dot to cycle them, click the name to rename.
 $("ws-icon").addEventListener("click", () => send("ws-icon", currentWorkspace().id));

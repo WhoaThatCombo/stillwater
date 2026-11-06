@@ -9,12 +9,17 @@
   <link rel="stylesheet" href="servo:sidebar/zen-sidebar.css">
 </head>
 <body>
-  <header id="toolbar">
+  <header id="toolbar" data-drag>
+    <button id="compact" class="icon" title="Toggle compact mode (Ctrl+Alt+C)">&#xE89F;</button>
     <button id="back" class="icon" title="Back">&#xE72B;</button>
     <button id="forward" class="icon" title="Forward">&#xE72A;</button>
     <button id="reload" class="icon" title="Reload">&#xE72C;</button>
-    <span class="spacer"></span>
-    <button id="compact" class="icon" title="Toggle compact mode (Ctrl+Alt+C)">&#xE89F;</button>
+    <span class="spacer" data-drag></span>
+    <span id="caption" hidden>
+      <button id="win-min" class="icon caption" title="Minimise">&#xE921;</button>
+      <button id="win-max" class="icon caption" title="Maximise">&#xE922;</button>
+      <button id="win-close" class="icon caption close" title="Close">&#xE8BB;</button>
+    </span>
   </header>
 
   <div id="urlbar">

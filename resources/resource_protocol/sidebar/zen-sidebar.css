@@ -117,6 +117,31 @@ button {
   opacity: 0.35;
 }
 
+/* Caption buttons for the frameless window (Windows-style hover colours). */
+#caption {
+  display: flex;
+  gap: 0;
+}
+
+#caption[hidden] {
+  display: none;
+}
+
+#toolbar button.caption {
+  width: 28px;
+  font-size: 10px;
+}
+
+#toolbar button.caption.close:hover {
+  background: #c42b1c;
+  color: white;
+}
+
+#toolbar button.caption.close:active {
+  background: #a52416;
+  color: white;
+}
+
 /* ---- URL bar (zen-omnibox) ---- */
 #urlbar {
   display: flex;

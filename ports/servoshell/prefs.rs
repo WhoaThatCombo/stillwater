@@ -482,9 +482,9 @@ struct CmdArgs {
     #[bpaf(short('M'), long)]
     multiprocess: bool,
 
-    /// Do not use native titlebar.
-    #[bpaf(short('b'), long)]
-    no_native_titlebar: bool,
+    /// Use the operating system's title bar instead of Stillwater's frameless window.
+    #[bpaf(long)]
+    native_titlebar: bool,
 
     /// Path to an output image. The format of the image is determined by the extension.
     /// Supports all formats that `rust-image` does.
@@ -720,7 +720,7 @@ fn parse_arguments_helper(args_without_binary: Args) -> ArgumentParsingResult {
 
     let servoshell_preferences = ServoShellPreferences {
         url: Some(cmd_args.url),
-        no_native_titlebar: cmd_args.no_native_titlebar,
+        no_native_titlebar: !cmd_args.native_titlebar,
         device_pixel_ratio_override: cmd_args.device_pixel_ratio,
         clean_shutdown: cmd_args.clean_shutdown,
         headless: cmd_args.headless,

@@ -106,6 +106,8 @@ pub struct HeadedWindow {
     last_mouse_position: Cell<Option<Point2D<f32, DeviceIndependentPixel>>>,
     /// The mouse position relative to the sidebar, if the mouse is over the sidebar.
     sidebar_mouse_point: Cell<Option<Point2D<f32, DevicePixel>>>,
+    /// The frameless-window edge the mouse is over, if any.
+    resize_direction: Cell<Option<winit::window::ResizeDirection>>,
 }
 
 impl HeadedWindow {
@@ -121,7 +123,9 @@ impl HeadedWindow {
         let window_attr = winit::window::Window::default_attributes()
             .with_title(INITIAL_WINDOW_TITLE.to_string())
             .with_decorations(!no_native_titlebar)
-            .with_transparent(no_native_titlebar)
+            // Stillwater draws its own window background, so only macOS needs transparency
+            // to blend its traffic-light area.
+            .with_transparent(no_native_titlebar && cfg!(target_os = "macos"))
             .with_inner_size(LogicalSize::new(inner_size.width, inner_size.height))
             .with_min_inner_size(LogicalSize::new(
                 MIN_WINDOW_INNER_SIZE.width,
@@ -130,6 +134,13 @@ impl HeadedWindow {
             // Must be invisible at startup; accesskit_winit setup needs to
             // happen before the window is shown for the first time.
             .with_visible(false);
+
+        // Keep the Windows 11 drop shadow on the frameless window.
+        #[cfg(target_os = "windows")]
+        let window_attr = {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            window_attr.with_undecorated_shadow(true)
+        };
 
         // Set a name so it can be pinned to taskbars in Linux.
         #[cfg(target_os = "linux")]
@@ -150,6 +161,9 @@ impl HeadedWindow {
             .window_handle()
             .expect("winit window did not have a window handle");
         HeadedWindow::force_srgb_color_space(window_handle.as_raw());
+        if no_native_titlebar {
+            round_window_corners(window_handle.as_raw());
+        }
 
         let monitor = winit_window
             .current_monitor()
@@ -226,6 +240,7 @@ impl HeadedWindow {
             visible_input_method: Default::default(),
             last_mouse_position: Default::default(),
             sidebar_mouse_point: Default::default(),
+            resize_direction: Default::default(),
         })
     }
 
@@ -677,6 +692,42 @@ impl HeadedWindow {
                 .get()
                 .is_none_or(|point| self.gui.borrow().is_outside_content_rect(point))
         };
+
+        // A frameless window has no OS resize border, so resize from its edges ourselves.
+        if !self.winit_window.is_decorated() &&
+            !self.winit_window.is_maximized() &&
+            !self.get_fullscreen()
+        {
+            match &event {
+                WindowEvent::CursorMoved { position, .. } => {
+                    let scale = self.hidpi_scale_factor();
+                    let point = winit_position_to_euclid_point(*position).to_f32() / scale;
+                    let size =
+                        winit_size_to_euclid_size(self.winit_window.inner_size()).to_f32() / scale;
+                    let direction = resize_direction_at(point, size);
+                    let previous = self.resize_direction.replace(direction);
+                    if let Some(direction) = direction {
+                        self.winit_window.set_cursor(resize_cursor(direction));
+                        return;
+                    }
+                    if previous.is_some() {
+                        self.winit_window
+                            .set_cursor(winit::window::CursorIcon::Default);
+                    }
+                },
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    if let Some(direction) = self.resize_direction.get() {
+                        let _ = self.winit_window.drag_resize_window(direction);
+                        return;
+                    }
+                },
+                _ => {},
+            }
+        }
 
         // The sidebar gets first pick of input, unless a dialog is capturing it.
         let dialog_open = window
@@ -1301,6 +1352,65 @@ impl PlatformWindow for HeadedWindow {
         self.gui
             .borrow_mut()
             .notify_accessibility_tree_update(tree_update);
+    }
+}
+
+/// Ask Windows 11 to round the corners of a frameless window, like normal windows.
+/// Earlier Windows versions ignore the attribute.
+#[cfg_attr(not(target_os = "windows"), expect(unused_variables))]
+fn round_window_corners(window_handle: RawWindowHandle) {
+    #[cfg(target_os = "windows")]
+    if let RawWindowHandle::Win32(handle) = window_handle {
+        use windows_sys::Win32::Graphics::Dwm::{
+            DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+        };
+        let preference = DWMWCP_ROUND;
+        unsafe {
+            DwmSetWindowAttribute(
+                handle.hwnd.get() as _,
+                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                &preference as *const _ as *const _,
+                std::mem::size_of_val(&preference) as u32,
+            );
+        }
+    }
+}
+
+/// Which window edge or corner (if any) a point is on, for resizing a frameless window.
+fn resize_direction_at(
+    point: Point2D<f32, DeviceIndependentPixel>,
+    size: Size2D<f32, DeviceIndependentPixel>,
+) -> Option<winit::window::ResizeDirection> {
+    use winit::window::ResizeDirection::*;
+    const EDGE: f32 = 6.0;
+    let left = point.x < EDGE;
+    let right = point.x > size.width - EDGE;
+    let top = point.y < EDGE;
+    let bottom = point.y > size.height - EDGE;
+    match (left, right, top, bottom) {
+        (true, _, true, _) => Some(NorthWest),
+        (_, true, true, _) => Some(NorthEast),
+        (true, _, _, true) => Some(SouthWest),
+        (_, true, _, true) => Some(SouthEast),
+        (true, ..) => Some(West),
+        (_, true, ..) => Some(East),
+        (_, _, true, _) => Some(North),
+        (.., true) => Some(South),
+        _ => None,
+    }
+}
+
+fn resize_cursor(direction: winit::window::ResizeDirection) -> winit::window::CursorIcon {
+    use winit::window::{CursorIcon, ResizeDirection::*};
+    match direction {
+        East => CursorIcon::EResize,
+        West => CursorIcon::WResize,
+        North => CursorIcon::NResize,
+        South => CursorIcon::SResize,
+        NorthEast => CursorIcon::NeResize,
+        NorthWest => CursorIcon::NwResize,
+        SouthEast => CursorIcon::SeResize,
+        SouthWest => CursorIcon::SwResize,
     }
 }
 

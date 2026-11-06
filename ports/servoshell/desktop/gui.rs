@@ -52,7 +52,7 @@ use winit::window::Window;
 
 use crate::desktop::event_loop::AppEvent;
 use crate::desktop::headed_window;
-use crate::desktop::sidebar::{CONTENT_RADIUS, Sidebar, png_data_url};
+use crate::desktop::sidebar::{CONTENT_RADIUS, Sidebar, WindowAction, png_data_url};
 use crate::running_app_state::RunningAppState;
 use crate::window::{PlatformWindow, ServoShellWindow};
 
@@ -300,6 +300,23 @@ impl Gui {
         self.sidebar.ensure_webview(state, theme, hidpi_scale);
         load_pending_favicons(window, &mut self.sidebar);
         self.sidebar.handle_messages(window);
+
+        // Caption buttons and window dragging for the frameless window.
+        let winit_window = headed_window.winit_window();
+        for action in self.sidebar.take_window_actions() {
+            match action {
+                WindowAction::Minimize => winit_window.set_minimized(true),
+                WindowAction::ToggleMaximize => {
+                    winit_window.set_maximized(!winit_window.is_maximized())
+                },
+                WindowAction::Close => window.schedule_close(),
+                WindowAction::Drag => {
+                    let _ = winit_window.drag_window();
+                },
+            }
+        }
+        self.sidebar
+            .set_window_state(!winit_window.is_decorated(), winit_window.is_maximized());
         self.sidebar.push_state(window);
 
         self.rendering_context

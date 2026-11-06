@@ -41,6 +41,15 @@ const PEEK_EDGE: f32 = 6.0;
 const MESSAGE_PREFIX: &str = "__sidebar__";
 const SIDEBAR_URL: &str = "servo:sidebar/index.html";
 
+/// Window operations requested by the sidebar's own caption buttons.
+#[derive(Clone, Copy)]
+pub(crate) enum WindowAction {
+    Minimize,
+    ToggleMaximize,
+    Close,
+    Drag,
+}
+
 struct SidebarDelegate {
     inbox: Rc<RefCell<Vec<String>>>,
     cursor: Rc<Cell<Cursor>>,
@@ -94,6 +103,9 @@ pub(crate) struct Sidebar {
     focused: Cell<bool>,
     workspaces: Workspaces,
     theme: Theme,
+    window_actions: Vec<WindowAction>,
+    frameless: bool,
+    maximized: bool,
 }
 
 impl Sidebar {
@@ -116,6 +128,23 @@ impl Sidebar {
             focused: Cell::new(false),
             workspaces: Workspaces::load(),
             theme: Theme::Light,
+            window_actions: Vec::new(),
+            frameless: false,
+            maximized: false,
+        }
+    }
+
+    /// Window operations requested since the last call (caption buttons, dragging).
+    pub(crate) fn take_window_actions(&mut self) -> Vec<WindowAction> {
+        std::mem::take(&mut self.window_actions)
+    }
+
+    /// Tell the page whether to draw its own caption buttons and which maximise icon to use.
+    pub(crate) fn set_window_state(&mut self, frameless: bool, maximized: bool) {
+        if (self.frameless, self.maximized) != (frameless, maximized) {
+            self.frameless = frameless;
+            self.maximized = maximized;
+            self.last_pushed_state = None;
         }
     }
 
@@ -355,6 +384,10 @@ impl Sidebar {
                     layout_changed = true;
                 },
                 "blur" => self.set_focused(false, window),
+                "win-min" => self.window_actions.push(WindowAction::Minimize),
+                "win-max" => self.window_actions.push(WindowAction::ToggleMaximize),
+                "win-close" => self.window_actions.push(WindowAction::Close),
+                "win-drag" => self.window_actions.push(WindowAction::Drag),
                 _ => warn!("unknown sidebar message: {message}"),
             }
             window.set_needs_update();
@@ -402,6 +435,8 @@ impl Sidebar {
             "compact": self.compact.get(),
             "workspaces": self.workspaces.to_json(),
             "background": background,
+            "frameless": self.frameless,
+            "maximized": self.maximized,
         })
         .to_string();
 
