@@ -127,7 +127,7 @@ impl RenderingContext for ConnectionlessRenderingContext {
     fn create_texture(
         &self,
         surface: Surface,
-    ) -> Option<(SurfaceTexture, u32, UntypedSize2D<i32>)> {
+    ) -> Result<(SurfaceTexture, u32, UntypedSize2D<i32>), Surface> {
         self.0.create_texture(surface)
     }
 

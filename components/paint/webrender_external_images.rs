@@ -47,9 +47,16 @@ impl WebGLExternalImages {
             *busy_webgl_context_map.entry(id).or_default() += 1;
         }
 
-        let front_buffer = self.swap_chains.get(id)?.take_surface()?;
+        let swap_chain = self.swap_chains.get(id)?;
+        let front_buffer = swap_chain.take_surface()?;
         let (surface_texture, gl_texture, size) =
-            self.rendering_context.create_texture(front_buffer)?;
+            match self.rendering_context.create_texture(front_buffer) {
+                Ok(result) => result,
+                Err(front_buffer) => {
+                    swap_chain.recycle_surface(front_buffer);
+                    return None;
+                },
+            };
         self.locked_front_buffers.insert(id, surface_texture);
 
         Some((gl_texture, size))
