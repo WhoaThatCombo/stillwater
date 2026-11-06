@@ -2055,15 +2055,20 @@ impl WindowOrDissimilarOriginWindow {
         cx: &mut CurrentRealm,
         id: HandleId,
     ) -> Option<DomRoot<WindowProxy>> {
-        // TODO: We cannot yet enumerate cross-origin child navigable target names.
-        let Self::Window(window) = &self else {
-            return None;
-        };
-
         let name = jsid_to_string(cx, id)?;
         if name.is_empty() {
             return None;
         }
+        let Self::Window(window) = &self else {
+            // The window lives in another event loop, so its iframes aren't visible here; walk
+            // its child navigables instead. Only children whose WindowProxy is known to this
+            // event loop with that name can match, which covers the common case of frames
+            // reaching a same-site sibling through a cross-origin parent (reCAPTCHA's
+            // `parent.frames[name]`). Like Gecko and Blink, the child's origin isn't checked.
+            return (0..self.iframe_count())
+                .filter_map(|index| self.window_proxy_for_child_navigable_at_index(index))
+                .find(|window_proxy| window_proxy.get_name() == name);
+        };
         window
             .Document()
             .iframes()
