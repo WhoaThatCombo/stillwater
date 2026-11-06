@@ -1185,6 +1185,22 @@ impl Servo {
             .send(EmbedderToConstellationMessage::CreateMemoryReport(snd));
     }
 
+    /// Run a full, shrinking JavaScript garbage collection in every page's script thread.
+    /// Embedders can call this when the browser goes idle, to return memory that would
+    /// otherwise only be reclaimed by the next allocation-triggered collection.
+    pub fn collect_garbage(&self) {
+        self.0
+            .constellation_proxy
+            .send(EmbedderToConstellationMessage::CollectGarbage);
+    }
+
+    /// Free as much memory as possible: collect garbage everywhere and drop rendering caches.
+    /// Meant for when the system is low on memory; the next frames are slower to render.
+    pub fn notify_memory_pressure(&self) {
+        self.collect_garbage();
+        self.paint().notify_memory_pressure();
+    }
+
     pub fn execute_webdriver_command(&self, command: WebDriverCommandMsg) {
         self.0
             .constellation_proxy

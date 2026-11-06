@@ -1442,6 +1442,11 @@ where
             EmbedderToConstellationMessage::CreateMemoryReport(sender) => {
                 self.mem_profiler_chan.send(ProfilerMsg::Report(sender));
             },
+            EmbedderToConstellationMessage::CollectGarbage => {
+                for event_loop in self.event_loops() {
+                    let _ = event_loop.send(ScriptThreadMessage::TriggerGarbageCollection);
+                }
+            },
             EmbedderToConstellationMessage::SendImageKeysForPipeline(pipeline_id, image_keys) => {
                 if let Some(pipeline) = self.pipelines.get(&pipeline_id) {
                     if pipeline

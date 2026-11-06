@@ -813,6 +813,13 @@ impl Paint {
         self.shutdown_state() != ShutdownState::FinishedShuttingDown
     }
 
+    /// Free as much cached rendering memory as possible, e.g. when the system is low on memory.
+    pub fn notify_memory_pressure(&self) {
+        for painter in &self.painters {
+            painter.borrow().notify_memory_pressure();
+        }
+    }
+
     pub fn toggle_webrender_debug(&self, option: WebRenderDebugOption) {
         for painter in &self.painters {
             painter.borrow_mut().toggle_webrender_debug(option);

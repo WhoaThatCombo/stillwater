@@ -55,10 +55,12 @@ use http::header::REFRESH;
 use hyper_serde::Serde;
 use js::context::{JSContext, NoGC};
 use js::glue::GetWindowProxyClass;
-use js::jsapi::{GCReason, JSContext as UnsafeJSContext};
+use js::jsapi::{GCOptions, GCReason, JSContext as UnsafeJSContext};
 use js::jsval::UndefinedValue;
 use js::rust::ParentRuntime;
-use js::rust::wrappers2::{JS_AddInterruptCallback, JS_GC, SetWindowProxyClass};
+use js::rust::wrappers2::{
+    JS_AddInterruptCallback, NonIncrementalGC, PrepareForFullGC, SetWindowProxyClass,
+};
 use layout_api::{LayoutConfig, LayoutFactory, RestyleReason, ScriptThreadFactory};
 use media::WindowGLContext;
 use metrics::MAX_TASK_NS;
@@ -2008,7 +2010,9 @@ impl ScriptThread {
                 self.forward_accessibility_action(pipeline_id, action_request);
             },
             ScriptThreadMessage::TriggerGarbageCollection => unsafe {
-                JS_GC(cx, GCReason::API);
+                // A shrinking GC also gives empty GC chunks back to the system.
+                PrepareForFullGC(cx);
+                NonIncrementalGC(cx, GCOptions::Shrink, GCReason::API);
             },
             ScriptThreadMessage::SetNetworkOnlineState(online) => {
                 self.handle_set_network_online_state(online);
