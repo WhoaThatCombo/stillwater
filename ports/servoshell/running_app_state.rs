@@ -765,6 +765,17 @@ impl RunningAppState {
 }
 
 impl WebViewDelegate for RunningAppState {
+    fn request_navigation(&self, webview: WebView, request: servo::NavigationRequest) {
+        // Alt+click on a link opens it in Glance instead of navigating the tab.
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        if crate::desktop::panes::divert_to_glance(&request.url) {
+            request.deny();
+            self.window_for_webview(&webview).set_needs_update();
+            return;
+        }
+        let _ = &webview;
+        request.allow();
+    }
     fn screen_geometry(&self, webview: WebView) -> Option<servo::ScreenGeometry> {
         Some(self.platform_window_for_webview(&webview).screen_geometry())
     }

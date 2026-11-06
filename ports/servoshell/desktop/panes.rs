@@ -9,10 +9,11 @@
 //! rendering context. Panes are created on demand and dropped (freeing their renderer)
 //! when closed.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Waker;
+use std::time::{Duration, Instant};
 
 use dpi::PhysicalSize;
 use euclid::Scale;
@@ -26,6 +27,32 @@ use url::Url;
 use crate::desktop::event_loop::RepaintEventLoopWaker;
 use crate::running_app_state::RunningAppState;
 
+thread_local! {
+    /// Set by an Alt+click on the page: the navigation it causes opens in Glance instead.
+    static GLANCE_ARMED: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// A link to open in Glance on the next GUI update.
+    static GLANCE_URL: RefCell<Option<Url>> = const { RefCell::new(None) };
+}
+
+/// The next navigation of the active tab (within a moment) opens in Glance.
+pub(crate) fn arm_glance() {
+    GLANCE_ARMED.with(|armed| armed.set(Some(Instant::now() + Duration::from_millis(1500))));
+}
+
+/// If a Glance is armed, divert `url` into it and return true (the navigation is denied).
+pub(crate) fn divert_to_glance(url: &Url) -> bool {
+    let armed = GLANCE_ARMED.with(|armed| armed.take()).is_some_and(|until| Instant::now() < until);
+    if armed && matches!(url.scheme(), "http" | "https") {
+        GLANCE_URL.with(|pending| *pending.borrow_mut() = Some(url.clone()));
+        return true;
+    }
+    false
+}
+
+pub(crate) fn take_glance_url() -> Option<Url> {
+    GLANCE_URL.with(|pending| pending.borrow_mut().take())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum PaneKind {
     Split,
@@ -35,8 +62,6 @@ pub(crate) enum PaneKind {
 /// State the pane's delegate shares with the window.
 struct PaneShared {
     cursor: Cell<Cursor>,
-    /// Title, URL or load state changed; the sidebar needs a fresh state.
-    changed: Cell<bool>,
     waker: Waker,
 }
 
@@ -45,8 +70,8 @@ struct PaneDelegate {
 }
 
 impl PaneDelegate {
+    /// Title, URL or load state changed: redraw so the sidebar picks it up.
     fn changed(&self) {
-        self.shared.changed.set(true);
         self.shared.waker.wake_by_ref();
     }
 }
@@ -82,7 +107,6 @@ impl WebViewDelegate for PaneDelegate {
 }
 
 pub(crate) struct Pane {
-    pub(crate) kind: PaneKind,
     pub(crate) webview: WebView,
     rendering_context: Rc<OffscreenRenderingContext>,
     shared: Rc<PaneShared>,
@@ -103,7 +127,6 @@ impl Pane {
         );
         let shared = Rc::new(PaneShared {
             cursor: Cell::new(Cursor::Default),
-            changed: Cell::new(true),
             waker: Waker::from(Arc::new(waker)),
         });
         let webview = WebViewBuilder::new(state.servo(), rendering_context.clone())
@@ -116,8 +139,8 @@ impl Pane {
             .build();
         webview.notify_theme_change(theme);
         webview.show();
+        let _ = kind;
         Self {
-            kind,
             webview,
             rendering_context,
             shared,
@@ -151,10 +174,6 @@ impl Pane {
         self.shared.cursor.get()
     }
 
-    /// Whether the pane's title/URL changed since the last call.
-    pub(crate) fn take_changed(&self) -> bool {
-        self.shared.changed.replace(false)
-    }
 
     pub(crate) fn url(&self) -> Option<Url> {
         self.webview.url()

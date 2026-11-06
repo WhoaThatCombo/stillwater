@@ -49,7 +49,8 @@ use crate::desktop::accelerated_gl_media::setup_gl_accelerated_media;
 use crate::desktop::diagnostics;
 use crate::desktop::dialog::Dialog;
 use crate::desktop::event_loop::{AppEvent, RepaintEventLoopWaker};
-use crate::desktop::gui::Gui;
+use crate::desktop::gui::{Gui, PaneRequest};
+use crate::desktop::panes::PaneKind;
 use crate::desktop::sidebar::Sidebar;
 use crate::desktop::keyutils::CMD_OR_CONTROL;
 use crate::prefs::ServoShellPreferences;
@@ -69,6 +70,8 @@ pub struct HeadedWindow {
     gui: RefCell<Gui>,
     screen_size: Size2D<u32, DeviceIndependentPixel>,
     webview_relative_mouse_point: Cell<Point2D<f32, DevicePixel>>,
+    /// The split / Glance pane under the mouse, and the mouse position inside it.
+    pane_mouse: Cell<Option<(PaneKind, Point2D<f32, DevicePixel>)>>,
     /// The inner size of the window in physical pixels which excludes OS decorations.
     /// It equals viewport size + (0, toolbar height).
     inner_size: Cell<PhysicalSize<u32>>,
@@ -222,6 +225,7 @@ impl HeadedWindow {
             event_loop,
             event_loop_proxy.clone(),
             rendering_context.clone(),
+            window_rendering_context.clone(),
             sidebar,
         ));
 
@@ -231,6 +235,7 @@ impl HeadedWindow {
             gui,
             winit_window,
             webview_relative_mouse_point: Cell::new(Point2D::zero()),
+            pane_mouse: Cell::new(None),
             fullscreen: Cell::new(false),
             fullscreen_from_document: Cell::new(false),
             inner_size: Cell::new(inner_size),
@@ -705,6 +710,194 @@ impl HeadedWindow {
         }
     }
 
+    /// Deliver input that belongs to the split view or Glance panes. Returns true if consumed.
+    fn handle_pane_event(
+        &self,
+        state: &Rc<RunningAppState>,
+        window: &Rc<ServoShellWindow>,
+        event: &WindowEvent,
+    ) -> bool {
+        let gui = self.gui.borrow();
+        let glance_open = gui.glance_open();
+        let Some(point) = self.last_mouse_position.get() else {
+            return false;
+        };
+        // The pane buttons and the top bar are egui's.
+        let on_ui = gui.pane_controls_contain(point) || gui.top_bar_contains(point);
+        let scale = self.hidpi_scale_factor();
+        let to_servo_button = |button: &MouseButton| match button {
+            MouseButton::Left => ServoMouseButton::Primary,
+            MouseButton::Right => ServoMouseButton::Secondary,
+            MouseButton::Middle => ServoMouseButton::Auxiliary,
+            MouseButton::Back => ServoMouseButton::Back,
+            MouseButton::Forward => ServoMouseButton::Forward,
+            MouseButton::Other(value) => ServoMouseButton::Other(*value),
+        };
+
+        match event {
+            WindowEvent::CursorMoved { .. } => {
+                let hit = (!on_ui).then(|| gui.pane_at(point)).flatten();
+                let previous = self.pane_mouse.get();
+                match hit {
+                    Some((kind, local)) => {
+                        let local = local * scale;
+                        if let Some((previous_kind, _)) = previous &&
+                            previous_kind != kind &&
+                            let Some(webview) = gui.pane_webview(previous_kind)
+                        {
+                            webview.notify_input_event(InputEvent::MouseLeftViewport(
+                                MouseLeftViewportEvent::default(),
+                            ));
+                        }
+                        if previous.is_none() &&
+                            let Some(active) = window.active_webview()
+                        {
+                            active.notify_input_event(InputEvent::MouseLeftViewport(
+                                MouseLeftViewportEvent::default(),
+                            ));
+                        }
+                        self.pane_mouse.set(Some((kind, local)));
+                        if let Some(cursor) = gui.pane_cursor(kind) {
+                            self.set_cursor(cursor);
+                        }
+                        if let Some(webview) = gui.pane_webview(kind) {
+                            webview.notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(
+                                local.into(),
+                            )));
+                        }
+                        true
+                    },
+                    None => {
+                        if let Some((kind, _)) = self.pane_mouse.take() &&
+                            let Some(webview) = gui.pane_webview(kind)
+                        {
+                            webview.notify_input_event(InputEvent::MouseLeftViewport(
+                                MouseLeftViewportEvent::default(),
+                            ));
+                            self.set_cursor(Cursor::Default);
+                        }
+                        // While a Glance is open the page behind it is inert.
+                        glance_open && !on_ui && !gui.is_outside_content_rect(point)
+                    },
+                }
+            },
+            WindowEvent::MouseInput {
+                state: element_state,
+                button,
+                ..
+            } => {
+                if on_ui {
+                    return false;
+                }
+                let pressed = *element_state == ElementState::Pressed;
+                if let Some((kind, local)) = self.pane_mouse.get() {
+                    let Some(webview) = gui.pane_webview(kind) else {
+                        return false;
+                    };
+                    if pressed {
+                        diagnostics::log(format!("click: {kind:?} pane at {local:?}"));
+                        gui.sidebar.set_focused(false, window);
+                        if gui.pane_focus() != Some(kind) {
+                            gui.set_pane_focus(Some(kind), window);
+                            window.set_needs_update();
+                        }
+                        match button {
+                            MouseButton::Back => {
+                                webview.go_back(1);
+                                return true;
+                            },
+                            MouseButton::Forward => {
+                                webview.go_forward(1);
+                                return true;
+                            },
+                            _ => {},
+                        }
+                    }
+                    let action = if pressed {
+                        MouseButtonAction::Down
+                    } else {
+                        MouseButtonAction::Up
+                    };
+                    webview.notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                        action,
+                        to_servo_button(button),
+                        local.into(),
+                    )));
+                    return true;
+                }
+                if glance_open && !gui.is_outside_content_rect(point) {
+                    // Clicking beside the Glance closes it.
+                    if pressed {
+                        gui.request_pane(PaneRequest::Close(PaneKind::Glance));
+                        window.set_needs_update();
+                    }
+                    return true;
+                }
+                if pressed && !gui.is_outside_content_rect(point) {
+                    // A click on the main page takes focus back from the panes…
+                    if gui.pane_focus().is_some() {
+                        gui.set_pane_focus(None, window);
+                        window.set_needs_update();
+                    }
+                    // …and Alt+click on a link opens it in Glance.
+                    if *button == MouseButton::Left &&
+                        self.modifiers_state.get().alt_key()
+                    {
+                        crate::desktop::panes::arm_glance();
+                    }
+                }
+                false
+            },
+            WindowEvent::MouseWheel { delta, .. } => {
+                let Some((kind, local)) = self.pane_mouse.get() else {
+                    return glance_open && !gui.is_outside_content_rect(point);
+                };
+                let Some(webview) = gui.pane_webview(kind) else {
+                    return false;
+                };
+                let (x, y) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => {
+                        ((x * LINE_WIDTH) as f64, (y * LINE_HEIGHT) as f64)
+                    },
+                    MouseScrollDelta::PixelDelta(delta) => (delta.x, delta.y),
+                };
+                let delta = WheelDelta {
+                    x,
+                    y,
+                    z: 0.0,
+                    mode: WheelMode::DeltaPixel,
+                };
+                webview.notify_input_event(InputEvent::Wheel(WheelEvent::new(delta, local.into())));
+                true
+            },
+            WindowEvent::KeyboardInput { event, .. } => {
+                let Some(kind) = gui.pane_focus() else {
+                    return false;
+                };
+                let Some(webview) = gui.pane_webview(kind) else {
+                    return false;
+                };
+                let keyboard_event = keyboard_event_from_winit(event, self.modifiers_state.get());
+                // Esc closes a Glance.
+                if kind == PaneKind::Glance &&
+                    keyboard_event.event.state == KeyState::Down &&
+                    keyboard_event.event.key == Key::Named(NamedKey::Escape)
+                {
+                    gui.request_pane(PaneRequest::Close(PaneKind::Glance));
+                    window.set_needs_update();
+                    return true;
+                }
+                drop(gui);
+                if self.handle_intercepted_key_bindings(state.clone(), window, &keyboard_event) {
+                    return true;
+                }
+                webview.notify_input_event(InputEvent::Keyboard(keyboard_event));
+                true
+            },
+            _ => false,
+        }
+    }
+
     pub(crate) fn handle_winit_window_event(
         &self,
         state: Rc<RunningAppState>,
@@ -812,7 +1005,10 @@ impl HeadedWindow {
         let dialog_open = window
             .active_webview()
             .is_some_and(|webview| self.has_active_dialog_for_webview(webview.id()));
-        if !dialog_open && self.handle_sidebar_event(&state, &window, &event) {
+        if !dialog_open &&
+            (self.handle_sidebar_event(&state, &window, &event) ||
+                self.handle_pane_event(&state, &window, &event))
+        {
             if let WindowEvent::CursorMoved { .. } = event {
                 // egui still needs to know where the mouse is to hide tooltips.
                 let _ = self
@@ -836,10 +1032,10 @@ impl HeadedWindow {
                 }
             ) &&
             should_forward_mouse_event_to_egui() &&
-            !self
-                .last_mouse_position
-                .get()
-                .is_some_and(|point| self.gui.borrow().top_bar_contains(point))
+            !self.last_mouse_position.get().is_some_and(|point| {
+                let gui = self.gui.borrow();
+                gui.top_bar_contains(point) || gui.pane_controls_contain(point)
+            })
         {
             let now = std::time::Instant::now();
             let double = self

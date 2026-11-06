@@ -17,6 +17,7 @@ mod gui;
 pub(crate) mod headed_window;
 mod headless_window;
 mod keyutils;
+pub(crate) mod panes;
 mod protocols;
 mod report;
 mod settings;

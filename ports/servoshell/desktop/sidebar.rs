@@ -28,6 +28,7 @@ use crate::desktop::event_loop::RepaintEventLoopWaker;
 use crate::desktop::settings::{Settings, ThemeChoice};
 use crate::desktop::updater::{UpdateInfo, UpdateStatus};
 use crate::desktop::workspaces::Workspaces;
+use crate::desktop::panes::PaneKind;
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
 use crate::window::ServoShellWindow;
 
@@ -44,7 +45,7 @@ const MESSAGE_PREFIX: &str = "__sidebar__";
 const SIDEBAR_URL: &str = "servo:sidebar/index.html";
 
 /// Window operations requested by the sidebar's own caption buttons.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum WindowAction {
     Minimize,
     ToggleMaximize,
@@ -56,6 +57,10 @@ pub(crate) enum WindowAction {
     CheckForUpdates,
     /// Report a tab (or the active one) as a broken site.
     ReportSite(Option<WebViewId>),
+    /// Show a page in split view beside the active tab, or in Glance over it.
+    OpenPane(PaneKind, url::Url),
+    /// Close the split view or Glance pane.
+    ClosePane(PaneKind),
 }
 
 struct SidebarDelegate {
@@ -121,6 +126,10 @@ pub(crate) struct Sidebar {
     settings: RefCell<Settings>,
     /// Result of a manual update check, shown in the settings panel.
     update_check: Option<String>,
+    /// The split / Glance pane with keyboard focus: the URL bar and navigation act on it.
+    pane_focus: Option<WebView>,
+    /// (title, url) of the open split and Glance panes.
+    panes: (Option<(String, String)>, Option<(String, String)>),
 }
 
 impl Sidebar {
@@ -153,6 +162,8 @@ impl Sidebar {
             update: None,
             update_status: None,
             ready: false,
+            pane_focus: None,
+            panes: (None, None),
             settings: RefCell::new(settings),
             update_check: None,
         }
@@ -208,6 +219,17 @@ impl Sidebar {
             self.maximized = maximized;
             self.last_pushed_state = None;
         }
+    }
+
+    /// Tell the sidebar which pane has focus and what the split / Glance panes show.
+    pub(crate) fn set_panes(
+        &mut self,
+        focus: Option<WebView>,
+        split: Option<(String, String)>,
+        glance: Option<(String, String)>,
+    ) {
+        self.pane_focus = focus;
+        self.panes = (split, glance);
     }
 
     /// Queue a command as if the sidebar page had sent it (used by keyboard shortcuts).
@@ -419,12 +441,56 @@ impl Sidebar {
                     let target = crate::parser::location_bar_input_to_url(argument, template)
                         .map(|url| url.to_string())
                         .unwrap_or_else(|| argument.to_owned());
-                    window.queue_user_interface_command(UserInterfaceCommand::Go(target));
+                    match (&self.pane_focus, url::Url::parse(&target)) {
+                        (Some(pane), Ok(url)) => pane.load(url),
+                        _ => window.queue_user_interface_command(UserInterfaceCommand::Go(target)),
+                    }
                     self.set_focused(false, window);
                 },
-                "back" => window.queue_user_interface_command(UserInterfaceCommand::Back),
-                "forward" => window.queue_user_interface_command(UserInterfaceCommand::Forward),
-                "reload" => window.queue_user_interface_command(UserInterfaceCommand::Reload),
+                // Navigation acts on the focused split / Glance pane, if there is one.
+                "back" => match &self.pane_focus {
+                    Some(pane) => {
+                        pane.go_back(1);
+                    },
+                    None => window.queue_user_interface_command(UserInterfaceCommand::Back),
+                },
+                "forward" => match &self.pane_focus {
+                    Some(pane) => {
+                        pane.go_forward(1);
+                    },
+                    None => window.queue_user_interface_command(UserInterfaceCommand::Forward),
+                },
+                "reload" => match &self.pane_focus {
+                    Some(pane) => pane.reload(),
+                    None => window.queue_user_interface_command(UserInterfaceCommand::Reload),
+                },
+                // Open a tab in split view (the tab moves there) or a pinned tab's page.
+                "split-tab" => {
+                    if let Some(id) = self.webview_for_tab(window, argument) &&
+                        let Some(url) = window.webview_by_id(id).and_then(|webview| webview.url())
+                    {
+                        if window.active_webview().is_some_and(|active| active.id() == id) {
+                            // Splitting the active tab: keep it, and show a copy beside it.
+                            self.window_actions.push(WindowAction::OpenPane(PaneKind::Split, url));
+                        } else {
+                            self.workspaces.close_tab(window, id);
+                            self.window_actions.push(WindowAction::OpenPane(PaneKind::Split, url));
+                        }
+                    }
+                },
+                "split-pin" => {
+                    if let Some(url) = self.workspaces.pin_url(workspace) {
+                        self.window_actions.push(WindowAction::OpenPane(PaneKind::Split, url));
+                    }
+                },
+                // Preview a link in Glance (Alt+click does this from the page).
+                "glance-open" => {
+                    if let Ok(url) = url::Url::parse(argument) {
+                        self.window_actions.push(WindowAction::OpenPane(PaneKind::Glance, url));
+                    }
+                },
+                "split-close" => self.window_actions.push(WindowAction::ClosePane(PaneKind::Split)),
+                "glance-close" => self.window_actions.push(WindowAction::ClosePane(PaneKind::Glance)),
                 "new-tab" => {
                     self.workspaces.open_tab(window);
                     self.focus_url(window);
@@ -550,6 +616,14 @@ impl Sidebar {
 
         let active = window.active_webview();
         let active_id = active.as_ref().map(WebView::id);
+        // The URL bar and navigation buttons follow the focused split / Glance pane.
+        let navigated = self.pane_focus.clone().or_else(|| active.clone());
+        let pane_json = |pane: &Option<(String, String)>| {
+            pane.as_ref()
+                .map(|(title, url)| serde_json::json!({ "title": title, "url": url }))
+        };
+        let split = pane_json(&self.panes.0);
+        let glance = pane_json(&self.panes.1);
         self.workspaces.refresh_pins(window, &self.favicons);
         let current_tabs = self.workspaces.regular_tabs(window);
         let mut tabs = Vec::with_capacity(current_tabs.len());
@@ -573,9 +647,12 @@ impl Sidebar {
             "tabs": tabs,
             "essentials": self.workspaces.essentials_json(window, active_id),
             "pinned": self.workspaces.pinned_json(window, active_id),
-            "url": active.as_ref().and_then(|webview| webview.url()).map(|url| url.to_string()).unwrap_or_default(),
-            "canGoBack": active.as_ref().is_some_and(|webview| webview.can_go_back()),
-            "canGoForward": active.as_ref().is_some_and(|webview| webview.can_go_forward()),
+            "url": navigated.as_ref().and_then(|webview| webview.url()).map(|url| url.to_string()).unwrap_or_default(),
+            "canGoBack": navigated.as_ref().is_some_and(|webview| webview.can_go_back()),
+            "canGoForward": navigated.as_ref().is_some_and(|webview| webview.can_go_forward()),
+            "split": split,
+            "glance": glance,
+            "paneFocused": self.pane_focus.is_some(),
             "compact": self.compact.get(),
             "workspaces": self.workspaces.to_json(),
             "background": background,

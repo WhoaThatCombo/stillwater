@@ -16,6 +16,7 @@ use std::fs;
     target_os = "macos"
 ))]
 use std::path::Path;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -45,18 +46,27 @@ use euclid::{Point2D, Rect, Scale, Size2D, Vector2D};
 use log::info;
 use servo::{
     DeviceIndependentPixel, DevicePixel, Image, LoadStatus, OffscreenRenderingContext, PixelFormat,
-    RenderingContext, WebViewId,
+    RenderingContext, WebViewId, WindowRenderingContext,
 };
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::Window;
 
-use crate::desktop::event_loop::AppEvent;
+use crate::desktop::event_loop::{AppEvent, RepaintEventLoopWaker};
+use crate::desktop::panes::{Pane, PaneKind};
 use crate::desktop::headed_window;
 use crate::desktop::sidebar::{CONTENT_RADIUS, Sidebar, WindowAction, png_data_url};
 use crate::desktop::report;
+
+/// A change to the split view / Glance panes, applied on the next update.
+pub(crate) enum PaneRequest {
+    Open(PaneKind, url::Url),
+    Close(PaneKind),
+    GlanceToTab,
+    GlanceToSplit,
+}
 use crate::desktop::updater::{self, UpdateStatus};
-use crate::running_app_state::RunningAppState;
+use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
 use crate::window::{PlatformWindow, ServoShellWindow};
 
 /// The user interface of a headed servoshell. egui is only used as a thin compositor
@@ -87,6 +97,20 @@ pub struct Gui {
     /// Zen's hover-reveal top bar with the window buttons, while it's showing.
     top_bar_rect: Option<egui::Rect>,
 
+    /// Needed to create render surfaces for extra panes.
+    window_rendering_context: Rc<WindowRenderingContext>,
+    /// Split view's second page, beside the active tab.
+    split: Option<Pane>,
+    /// Glance: a link preview floating over the page.
+    glance: Option<Pane>,
+    /// Pane changes requested since the last update (applied in `update`).
+    pane_requests: RefCell<Vec<PaneRequest>>,
+    /// Which pane has keyboard focus (`None` = the active tab).
+    pane_focus: Cell<Option<PaneKind>>,
+    split_rect: Option<egui::Rect>,
+    glance_rect: Option<egui::Rect>,
+    /// Where the pane buttons are drawn, so clicks there go to egui.
+    pane_control_rects: RefCell<Vec<egui::Rect>>,
     /// Tabs whose page has drawn at least once (their surfaces start out white).
     painted_webviews: HashSet<WebViewId>,
 }
@@ -209,6 +233,7 @@ impl Gui {
         event_loop: &ActiveEventLoop,
         event_loop_proxy: EventLoopProxy<AppEvent>,
         rendering_context: Rc<OffscreenRenderingContext>,
+        window_rendering_context: Rc<WindowRenderingContext>,
         sidebar: Sidebar,
     ) -> Self {
         rendering_context
@@ -251,6 +276,14 @@ impl Gui {
             pending_accesskit_updates: vec![],
             shown: false,
             top_bar_rect: None,
+            window_rendering_context,
+            split: None,
+            glance: None,
+            pane_requests: Default::default(),
+            pane_focus: Cell::new(None),
+            split_rect: None,
+            glance_rect: None,
+            pane_control_rects: Default::default(),
             painted_webviews: HashSet::new(),
         }
     }
@@ -301,6 +334,130 @@ impl Gui {
             .is_some_and(|rect| rect.contains(pos2(position.x, position.y)))
     }
 
+    /// Ask for a pane change; it happens on the next update.
+    pub(crate) fn request_pane(&self, request: PaneRequest) {
+        self.pane_requests.borrow_mut().push(request);
+    }
+
+    pub(crate) fn glance_open(&self) -> bool {
+        self.glance.is_some()
+    }
+
+    fn pane(&self, kind: PaneKind) -> Option<&Pane> {
+        match kind {
+            PaneKind::Split => self.split.as_ref(),
+            PaneKind::Glance => self.glance.as_ref(),
+        }
+    }
+
+    /// The extra pane under `position` (Glance first), with the point relative to it.
+    pub(crate) fn pane_at(
+        &self,
+        position: Point2D<f32, DeviceIndependentPixel>,
+    ) -> Option<(PaneKind, Point2D<f32, DeviceIndependentPixel>)> {
+        let point = pos2(position.x, position.y);
+        let hit = |rect: Option<egui::Rect>, kind| {
+            rect.filter(|rect| rect.contains(point))
+                .map(|rect| (kind, Point2D::new(point.x - rect.min.x, point.y - rect.min.y)))
+        };
+        if self.glance.is_some() {
+            return hit(self.glance_rect, PaneKind::Glance);
+        }
+        hit(self.split_rect, PaneKind::Split)
+    }
+
+    pub(crate) fn pane_webview(&self, kind: PaneKind) -> Option<servo::WebView> {
+        self.pane(kind).map(|pane| pane.webview.clone())
+    }
+
+    pub(crate) fn pane_cursor(&self, kind: PaneKind) -> Option<servo::Cursor> {
+        self.pane(kind).map(Pane::cursor)
+    }
+
+    pub(crate) fn pane_focus(&self) -> Option<PaneKind> {
+        self.pane_focus.get().filter(|kind| self.pane(*kind).is_some())
+    }
+
+    /// Give keyboard focus to a pane, or to the active tab (`None`).
+    pub(crate) fn set_pane_focus(&self, focus: Option<PaneKind>, window: &ServoShellWindow) {
+        self.pane_focus.set(focus);
+        if let Some(active) = window.active_webview() {
+            active.set_focused(focus.is_none());
+        }
+        for kind in [PaneKind::Split, PaneKind::Glance] {
+            if let Some(pane) = self.pane(kind) {
+                pane.webview.set_focused(focus == Some(kind));
+            }
+        }
+    }
+
+    /// Whether `point` is on a pane's buttons (handled by egui, not the page).
+    pub(crate) fn pane_controls_contain(&self, point: Point2D<f32, DeviceIndependentPixel>) -> bool {
+        let point = pos2(point.x, point.y);
+        self.pane_control_rects.borrow().iter().any(|rect| rect.contains(point))
+    }
+
+    /// Open, close or convert panes requested since the last update.
+    fn apply_pane_requests(
+        &mut self,
+        state: &RunningAppState,
+        window: &ServoShellWindow,
+        headed_window: &headed_window::HeadedWindow,
+    ) {
+        if let Some(url) = crate::desktop::panes::take_glance_url() {
+            self.pane_requests.borrow_mut().push(PaneRequest::Open(PaneKind::Glance, url));
+        }
+        let requests = std::mem::take(&mut *self.pane_requests.borrow_mut());
+        for request in requests {
+            match request {
+                PaneRequest::Open(kind, url) => {
+                    let pane = Pane::new(
+                        kind,
+                        url,
+                        state,
+                        &self.window_rendering_context,
+                        RepaintEventLoopWaker::new(headed_window.event_loop_proxy(), headed_window.id()),
+                        headed_window.theme(),
+                        window.platform_window().hidpi_scale_factor(),
+                    );
+                    match kind {
+                        PaneKind::Split => self.split = Some(pane),
+                        PaneKind::Glance => self.glance = Some(pane),
+                    }
+                    self.set_pane_focus(Some(kind), window);
+                },
+                PaneRequest::Close(kind) => {
+                    match kind {
+                        PaneKind::Split => self.split = None,
+                        PaneKind::Glance => self.glance = None,
+                    }
+                    if self.pane_focus.get() == Some(kind) {
+                        self.set_pane_focus(None, window);
+                    }
+                },
+                PaneRequest::GlanceToTab => {
+                    if let Some(url) = self.glance.take().and_then(|pane| pane.url()) {
+                        window.queue_user_interface_command(UserInterfaceCommand::NewWebViewWithUrl(url));
+                    }
+                    self.set_pane_focus(None, window);
+                },
+                PaneRequest::GlanceToSplit => {
+                    if let Some(url) = self.glance.take().and_then(|pane| pane.url()) {
+                        self.pane_requests.borrow_mut().push(PaneRequest::Open(PaneKind::Split, url));
+                        self.apply_pane_requests(state, window, headed_window);
+                    }
+                },
+            }
+        }
+        // Tell the sidebar about the panes (titles, URLs, which one has focus).
+        let summary = |pane: &Pane| (pane.title(), pane.url().map(|url| url.to_string()).unwrap_or_default());
+        self.sidebar.set_panes(
+            self.pane_focus().and_then(|kind| self.pane_webview(kind)),
+            self.split.as_ref().map(summary),
+            self.glance.as_ref().map(summary),
+        );
+    }
+
     pub(crate) fn sidebar_relative_point(
         &self,
         position: Point2D<f32, DeviceIndependentPixel>,
@@ -348,6 +505,8 @@ impl Gui {
                         report::open_externally(&report::issue_url(&url, &errors));
                     }
                 },
+                WindowAction::OpenPane(kind, url) => self.request_pane(PaneRequest::Open(kind, url)),
+                WindowAction::ClosePane(kind) => self.request_pane(PaneRequest::Close(kind)),
                 WindowAction::CheckForUpdates => {
                     updater::check_now(headed_window.event_loop_proxy());
                 },
@@ -368,6 +527,7 @@ impl Gui {
                 },
             }
         }
+        self.apply_pane_requests(state, window, headed_window);
         self.sidebar
             .set_window_state(!winit_window.is_decorated(), winit_window.is_maximized());
         self.sidebar.push_state(window);
@@ -383,8 +543,15 @@ impl Gui {
             content_rect,
             painted_webviews,
             top_bar_rect,
+            split,
+            glance,
+            split_rect,
+            glance_rect,
+            pane_requests,
+            pane_control_rects,
             ..
         } = self;
+        pane_control_rects.borrow_mut().clear();
 
         let winit_window = headed_window.winit_window();
         context.run(winit_window, |ctx| {
@@ -396,10 +563,26 @@ impl Gui {
             // TODO: While in fullscreen add some way to mitigate the increased phishing risk
             // when not displaying the URL bar: https://github.com/servo/servo/issues/32443
             let full_rect = ctx.available_rect_before_wrap();
-            let (new_sidebar_rect, new_content_rect) =
+            let (new_sidebar_rect, content_area) =
                 sidebar.layout(full_rect, headed_window.is_fullscreen_from_document());
             *sidebar_rect = new_sidebar_rect;
+            // Split view: the active tab on the left, the split pane on the right.
+            let (new_content_rect, new_split_rect) = match split {
+                Some(_) => {
+                    let gap = crate::desktop::sidebar::CONTENT_MARGIN;
+                    let half = ((content_area.width() - gap) / 2.0).floor();
+                    (
+                        egui::Rect::from_min_size(content_area.min, egui::vec2(half, content_area.height())),
+                        Some(egui::Rect::from_min_max(
+                            pos2(content_area.min.x + half + gap, content_area.min.y),
+                            content_area.max,
+                        )),
+                    )
+                },
+                None => (content_area, None),
+            };
             *content_rect = new_content_rect;
+            *split_rect = new_split_rect;
 
             let [r, g, b] = sidebar.background();
             let background = Color32::from_rgb(r, g, b);
@@ -453,6 +636,28 @@ impl Gui {
 
             window.repaint_webviews();
 
+            // The split pane, beside the active tab.
+            if let (Some(pane), Some(rect)) = (split.as_ref(), new_split_rect) {
+                pane.paint(rect, scale);
+                if pane.webview.load_status() != LoadStatus::Started {
+                    add_surface(ctx, LayerId::background(), rect, pane.rendering_context());
+                }
+                // Its close button shows while the pointer is near the pane's top edge.
+                let pointer = ctx.input(|input| input.pointer.hover_pos());
+                let near_top = pointer.is_some_and(|p| {
+                    egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 48.0)).contains(p)
+                });
+                let at = pos2(rect.max.x - 40.0, rect.min.y + 8.0);
+                let controls = egui::Rect::from_min_size(at, egui::vec2(32.0, 32.0)).expand(4.0);
+                if near_top || pointer.is_some_and(|p| controls.contains(p)) {
+                    pane_control_rects.borrow_mut().push(controls);
+                    if pane_controls(ctx, "split-controls", at, &[PaneButton::Close], theme)
+                        == Some(PaneButton::Close)
+                    {
+                        pane_requests.borrow_mut().push(PaneRequest::Close(PaneKind::Split));
+                    }
+                }
+            }
             // A page's render surface is white until the page first draws; show the window
             // background instead of a white flash until then (once per tab).
             let active = window.active_webview();
@@ -480,15 +685,58 @@ impl Gui {
 
             // Round the corners of the web content like Zen does, by painting a thick
             // background-coloured stroke whose inner edge is the rounded content rect.
-            if new_content_rect != full_rect {
+            if content_area != full_rect {
                 let thickness = CONTENT_RADIUS * 2.0;
-                ctx.layer_painter(LayerId::new(Order::Middle, Id::new("content-corners")))
-                    .rect_stroke(
-                        new_content_rect.expand(thickness / 2.0),
+                let gap = crate::desktop::sidebar::CONTENT_MARGIN;
+                let painter = ctx.layer_painter(LayerId::new(Order::Middle, Id::new("content-corners")));
+                for rect in [Some(new_content_rect), new_split_rect].into_iter().flatten() {
+                    painter.with_clip_rect(rect.expand(gap / 2.0)).rect_stroke(
+                        rect.expand(thickness / 2.0),
                         CornerRadius::same((CONTENT_RADIUS + thickness / 2.0) as u8),
                         Stroke::new(thickness, background),
                         StrokeKind::Middle,
                     );
+                }
+            }
+
+            // Glance: a link preview floating over the dimmed page, with its controls beside it.
+            *glance_rect = None;
+            if let Some(pane) = glance.as_ref() {
+                let rect = egui::Rect::from_center_size(
+                    content_area.center(),
+                    egui::vec2(
+                        (content_area.width() * 0.8).floor(),
+                        (content_area.height() * 0.9).floor(),
+                    ),
+                );
+                ctx.layer_painter(LayerId::new(Order::Middle, Id::new("glance-backdrop")))
+                    .rect_filled(
+                        content_area,
+                        CornerRadius::same(CONTENT_RADIUS as u8),
+                        Color32::from_black_alpha(120),
+                    );
+                pane.paint(rect, scale);
+                let layer = LayerId::new(Order::Foreground, Id::new("glance"));
+                if pane.webview.load_status() != LoadStatus::Started {
+                    add_surface(ctx, layer, rect, pane.rendering_context());
+                } else {
+                    ctx.layer_painter(layer).rect_filled(rect, CornerRadius::ZERO, background);
+                }
+                let at = pos2(rect.max.x + 10.0, rect.min.y);
+                let buttons = [PaneButton::Close, PaneButton::OpenAsTab, PaneButton::Split];
+                pane_control_rects.borrow_mut().push(egui::Rect::from_min_size(
+                    at,
+                    egui::vec2(32.0, buttons.len() as f32 * 40.0),
+                ).expand(4.0));
+                match pane_controls(ctx, "glance-controls", at, &buttons, theme) {
+                    Some(PaneButton::Close) => {
+                        pane_requests.borrow_mut().push(PaneRequest::Close(PaneKind::Glance))
+                    },
+                    Some(PaneButton::OpenAsTab) => pane_requests.borrow_mut().push(PaneRequest::GlanceToTab),
+                    Some(PaneButton::Split) => pane_requests.borrow_mut().push(PaneRequest::GlanceToSplit),
+                    None => {},
+                }
+                *glance_rect = Some(rect);
             }
 
             // Zen's top bar: the window buttons slide in when the mouse touches the top edge
@@ -497,7 +745,7 @@ impl Gui {
                 let winit_window = headed_window.winit_window();
                 let frameless = !winit_window.is_decorated() && !headed_window.is_fullscreen_from_document();
                 let bar = egui::Rect::from_min_max(
-                    pos2(new_content_rect.min.x, full_rect.min.y),
+                    pos2(content_area.min.x, full_rect.min.y),
                     pos2(full_rect.max.x, full_rect.min.y + TOP_BAR_HEIGHT),
                 );
                 let pointer = ctx.input(|input| input.pointer.hover_pos());
@@ -767,4 +1015,121 @@ fn draw_top_bar(
                 }
             }
         });
+}
+
+/// Composite an offscreen rendering context's latest frame into `rect` on `layer`.
+fn add_surface(
+    ctx: &egui::Context,
+    layer: LayerId,
+    rect: egui::Rect,
+    rendering_context: &Rc<OffscreenRenderingContext>,
+) {
+    let Some(render_to_parent) = rendering_context.render_to_parent_callback() else {
+        return;
+    };
+    ctx.layer_painter(layer).add(PaintCallback {
+        rect,
+        callback: Arc::new(CallbackFn::new(move |info, painter| {
+            let clip = info.viewport_in_pixels();
+            let rect_in_parent = Rect::new(
+                Point2D::new(clip.left_px, clip.from_bottom_px),
+                Size2D::new(clip.width_px, clip.height_px),
+            );
+            render_to_parent(painter.gl(), rect_in_parent)
+        })),
+    });
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PaneButton {
+    Close,
+    OpenAsTab,
+    Split,
+}
+
+/// A column of round icon buttons for a pane, starting at `at`. Returns the one clicked.
+fn pane_controls(
+    ctx: &egui::Context,
+    id: &str,
+    at: egui::Pos2,
+    buttons: &[PaneButton],
+    theme: servo::Theme,
+) -> Option<PaneButton> {
+    let (fill, hover, foreground) = match theme {
+        servo::Theme::Dark => (
+            Color32::from_rgb(43, 42, 51),
+            Color32::from_rgb(62, 61, 72),
+            Color32::from_rgb(235, 235, 240),
+        ),
+        servo::Theme::Light => (
+            Color32::from_rgb(250, 250, 252),
+            Color32::from_rgb(232, 232, 238),
+            Color32::from_rgb(30, 30, 36),
+        ),
+    };
+    let size = 32.0;
+    let mut clicked = None;
+    egui::Area::new(Id::new(id))
+        .order(Order::Tooltip)
+        .fixed_pos(at)
+        .show(ctx, |ui| {
+            let painter = ui.painter().clone();
+            for (index, button) in buttons.iter().enumerate() {
+                let rect = egui::Rect::from_min_size(
+                    pos2(at.x, at.y + index as f32 * (size + 8.0)),
+                    egui::vec2(size, size),
+                );
+                let response = ui
+                    .interact(rect, Id::new((id, index)), egui::Sense::click())
+                    .on_hover_text(match button {
+                        PaneButton::Close => "Close",
+                        PaneButton::OpenAsTab => "Open in new tab",
+                        PaneButton::Split => "Open in split view",
+                    });
+                painter.circle_filled(
+                    rect.center(),
+                    size / 2.0,
+                    if response.hovered() { hover } else { fill },
+                );
+                painter.circle_stroke(
+                    rect.center(),
+                    size / 2.0,
+                    Stroke::new(1.0_f32, Color32::from_black_alpha(40)),
+                );
+                let stroke = Stroke::new(1.5_f32, foreground);
+                let c = rect.center();
+                match button {
+                    PaneButton::Close => {
+                        painter.line_segment([pos2(c.x - 5.0, c.y - 5.0), pos2(c.x + 5.0, c.y + 5.0)], stroke);
+                        painter.line_segment([pos2(c.x - 5.0, c.y + 5.0), pos2(c.x + 5.0, c.y - 5.0)], stroke);
+                    },
+                    PaneButton::OpenAsTab => {
+                        // A box with an arrow leaving its top-right corner.
+                        painter.rect_stroke(
+                            egui::Rect::from_min_max(pos2(c.x - 6.0, c.y - 4.0), pos2(c.x + 4.0, c.y + 6.0)),
+                            CornerRadius::same(2),
+                            stroke,
+                            StrokeKind::Middle,
+                        );
+                        painter.line_segment([pos2(c.x - 1.0, c.y + 1.0), pos2(c.x + 7.0, c.y - 7.0)], stroke);
+                        painter.line_segment([pos2(c.x + 2.0, c.y - 7.0), pos2(c.x + 7.0, c.y - 7.0)], stroke);
+                        painter.line_segment([pos2(c.x + 7.0, c.y - 7.0), pos2(c.x + 7.0, c.y - 2.0)], stroke);
+                    },
+                    PaneButton::Split => {
+                        // Two panes side by side.
+                        painter.rect_stroke(
+                            egui::Rect::from_center_size(c, egui::vec2(14.0, 11.0)),
+                            CornerRadius::same(2),
+                            stroke,
+                            StrokeKind::Middle,
+                        );
+                        painter.line_segment([pos2(c.x, c.y - 5.5), pos2(c.x, c.y + 5.5)], stroke);
+                    },
+                }
+                if response.clicked() {
+                    clicked = Some(*button);
+                }
+            }
+        });
+    clicked
 }

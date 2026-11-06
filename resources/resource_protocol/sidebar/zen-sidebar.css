@@ -810,3 +810,18 @@ button.secondary:hover {
 .separator[hidden] {
   display: none;
 }
+
+/* Split view: the page beside the active tab, shown under the tab list. */
+.split-row {
+  margin-top: 6px;
+}
+
+.split-icon {
+  box-sizing: border-box;
+  border: 1.5px solid currentColor;
+  border-radius: 3px;
+  width: 15px;
+  height: 12px;
+  opacity: 0.75;
+  background: linear-gradient(currentColor, currentColor) center / 1.5px 100% no-repeat;
+}

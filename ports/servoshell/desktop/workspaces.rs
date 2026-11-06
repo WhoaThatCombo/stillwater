@@ -550,6 +550,12 @@ impl Workspaces {
     }
 
     /// Show a pinned tab, loading it first if it's unloaded.
+    /// The page a pinned tab opens.
+    pub(crate) fn pin_url(&self, pin_id: u32) -> Option<url::Url> {
+        let pin = self.pins.iter().find(|pin| pin.id == pin_id)?;
+        url::Url::parse(&pin.url).ok()
+    }
+
     pub(crate) fn open_pin(&mut self, window: &ServoShellWindow, pin_id: u32) {
         let Some(pin) = self.pins.iter().find(|pin| pin.id == pin_id) else {
             return;

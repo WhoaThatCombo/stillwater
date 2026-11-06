@@ -146,6 +146,7 @@ function tabMenu(tab, label) {
     { label: "Pin tab", run: () => send("pin", tab.id) },
     { label: "Add to Essentials", run: () => send("essential", tab.id) },
     { label: "Rename", run: () => startRename(label, tabLabel(tab), (title) => send("tab-rename", `${tab.id}\t${title}`)) },
+    { label: "Open in split view", run: () => send("split-tab", tab.id) },
     ...otherSpaces().map((space) => ({ label: `Move to ${space.name}`, run: () => send("tab-move-space", `${tab.id}\t${space.id}`) })),
     { label: "Report site isn't working", run: () => send("report-site", tab.id) },
     "-",
@@ -173,6 +174,7 @@ function pinMenu(pin, label, essential) {
     items.push({ label: "Move up", run: () => send("pin-move", `${pin.pinId}\t-1`) });
     items.push({ label: "Move down", run: () => send("pin-move", `${pin.pinId}\t1`) });
   }
+  items.push("-", { label: "Open in split view", run: () => send("split-pin", pin.pinId) });
   if (items.length) items.push("-");
   items.push({
     label: essential ? "Remove from Essentials" : "Add to Essentials",
@@ -224,6 +226,22 @@ function renderRow(item, isPin) {
     else send("close", item.id);
   });
   attachMenu(row, items);
+  return row;
+}
+
+// The page shown in split view, under the tab list.
+function renderSplitRow(split) {
+  const row = document.createElement("div");
+  row.className = "tab split-row" + (state.paneFocused && !state.glance ? " selected" : "");
+  row.title = split.url;
+  const icon = document.createElement("span");
+  icon.className = "tab-icon split-icon";
+  const label = document.createElement("span");
+  label.className = "tab-label";
+  label.textContent = split.title || split.url;
+  const close = iconButton("tab-close", "", "Close split view", () => send("split-close", ""));
+  row.append(icon, label, close);
+  attachMenu(row, () => [{ label: "Close split view", run: () => send("split-close", "") }]);
   return row;
 }
 
@@ -369,7 +387,9 @@ function render() {
   if (!document.querySelector(".rename-input")) {
     renderEssentials();
     renderPinned();
-    tabs.replaceChildren(...state.tabs.map((tab) => renderRow(tab, false)));
+    const rows = state.tabs.map((tab) => renderRow(tab, false));
+    if (state.split) rows.push(renderSplitRow(state.split));
+    tabs.replaceChildren(...rows);
   }
   $("back").disabled = !state.canGoBack;
   $("forward").disabled = !state.canGoForward;
