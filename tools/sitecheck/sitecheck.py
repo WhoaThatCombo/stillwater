@@ -178,6 +178,9 @@ def check_site(url: str, category: str, args, run_dir: Path) -> Result:
             result.network_errors.append(kind.group(1) if kind else line[-160:])
         if "panicked" in line:
             result.panics.append(line[-200:])
+        elif "servoshell::panic_hook" in line and "Panic hook called" not in line:
+            # Stillwater's panic hook logs the message instead of Rust's "panicked at".
+            result.panics.append(line[-200:])
         match = SCRIPT_ERROR.search(line)
         if match:
             errors.append(match.group(4).strip())
