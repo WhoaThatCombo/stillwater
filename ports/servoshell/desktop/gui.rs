@@ -16,6 +16,7 @@ use std::fs;
     target_os = "macos"
 ))]
 use std::path::Path;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -43,8 +44,8 @@ use euclid::{Point2D, Rect, Scale, Size2D, Vector2D};
 ))]
 use log::info;
 use servo::{
-    DeviceIndependentPixel, DevicePixel, Image, OffscreenRenderingContext, PixelFormat,
-    RenderingContext,
+    DeviceIndependentPixel, DevicePixel, Image, LoadStatus, OffscreenRenderingContext, PixelFormat,
+    RenderingContext, WebViewId,
 };
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
@@ -78,6 +79,12 @@ pub struct Gui {
     /// AccessKit tree updates pending the next egui tick.
     /// This allows us to ensure that graft nodes are sent before the subtrees they graft.
     pending_accesskit_updates: Vec<accesskit::TreeUpdate>,
+
+    /// Whether the window has been shown yet (it stays hidden until its first frame).
+    shown: bool,
+
+    /// Tabs whose page has drawn at least once (their surfaces start out white).
+    painted_webviews: HashSet<WebViewId>,
 }
 
 #[cfg(any(
@@ -217,7 +224,8 @@ impl Gui {
         context
             .egui_winit
             .init_accesskit(event_loop, winit_window, event_loop_proxy);
-        winit_window.set_visible(true);
+        // The window is shown after its first frame is painted (see the paint method),
+        // once it has real content, so it never flashes an empty white frame at startup.
 
         context.egui_ctx.options_mut(|options| {
             // Disable the builtin egui handlers for the Ctrl+Plus, Ctrl+Minus and Ctrl+0
@@ -237,6 +245,8 @@ impl Gui {
             content_rect: egui::Rect::NOTHING,
             status_text: None,
             pending_accesskit_updates: vec![],
+            shown: false,
+            painted_webviews: HashSet::new(),
         }
     }
 
@@ -344,6 +354,7 @@ impl Gui {
             sidebar,
             sidebar_rect,
             content_rect,
+            painted_webviews,
             ..
         } = self;
 
@@ -414,7 +425,18 @@ impl Gui {
 
             window.repaint_webviews();
 
-            if let Some(render_to_parent) = rendering_context.render_to_parent_callback() {
+            // A page's render surface is white until the page first draws; show the window
+            // background instead of a white flash until then (once per tab).
+            let active = window.active_webview();
+            if let Some(webview) = &active &&
+                webview.load_status() == LoadStatus::Complete
+            {
+                painted_webviews.insert(webview.id());
+            }
+            painted_webviews.retain(|id| window.webview_by_id(*id).is_some());
+            let content_ready = active.is_some_and(|webview| painted_webviews.contains(&webview.id()));
+
+            if content_ready && let Some(render_to_parent) = rendering_context.render_to_parent_callback() {
                 ctx.layer_painter(LayerId::background()).add(PaintCallback {
                     rect: new_content_rect,
                     callback: Arc::new(CallbackFn::new(move |info, painter| {
@@ -443,7 +465,8 @@ impl Gui {
 
             if let Some(sidebar_rect) = new_sidebar_rect {
                 sidebar.paint(sidebar_rect, scale);
-                if let Some(render_to_parent) =
+                // Likewise, wait for the sidebar page to load before showing its surface.
+                if sidebar.is_ready() && let Some(render_to_parent) =
                     sidebar.rendering_context().render_to_parent_callback()
                 {
                     ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("sidebar")))
@@ -489,6 +512,10 @@ impl Gui {
             .prepare_for_rendering();
         self.context.paint(window);
         self.rendering_context.parent_context().present();
+        if !self.shown {
+            self.shown = true;
+            window.set_visible(true);
+        }
     }
 
     fn update_status_text(&mut self, window: &ServoShellWindow) -> bool {

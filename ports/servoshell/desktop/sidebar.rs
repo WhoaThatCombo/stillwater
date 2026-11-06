@@ -111,6 +111,8 @@ pub(crate) struct Sidebar {
     maximized: bool,
     update: Option<UpdateInfo>,
     update_status: Option<UpdateStatus>,
+    /// The sidebar page has loaded and received its first state.
+    ready: bool,
 }
 
 impl Sidebar {
@@ -138,12 +140,18 @@ impl Sidebar {
             maximized: false,
             update: None,
             update_status: None,
+            ready: false,
         }
     }
 
     /// Window operations requested since the last call (caption buttons, dragging).
     pub(crate) fn take_window_actions(&mut self) -> Vec<WindowAction> {
         std::mem::take(&mut self.window_actions)
+    }
+
+    /// Whether the sidebar page has loaded (used to show the window without a blank frame).
+    pub(crate) fn is_ready(&self) -> bool {
+        self.ready
     }
 
     pub(crate) fn set_update_available(&mut self, update: UpdateInfo) {
@@ -364,7 +372,10 @@ impl Sidebar {
             let (workspace, text) = argument.split_once('\t').unwrap_or((argument, ""));
             let workspace: u32 = workspace.parse().unwrap_or(0);
             match command {
-                "ready" => self.last_pushed_state = None,
+                "ready" => {
+                    self.last_pushed_state = None;
+                    self.ready = true;
+                },
                 "go" => {
                     window.queue_user_interface_command(UserInterfaceCommand::Go(argument.into()));
                     self.set_focused(false, window);

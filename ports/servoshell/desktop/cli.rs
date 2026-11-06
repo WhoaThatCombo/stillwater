@@ -42,8 +42,10 @@ pub fn main() {
     };
 
     // Like a normal browser, hand the URL to an already-running Stillwater and exit.
+    // STILLWATER_NO_SINGLE_INSTANCE lets a test or development copy run beside an installed one.
     let single_instance = !servoshell_preferences.headless &&
-        servoshell_preferences.webdriver_port.get().is_none();
+        servoshell_preferences.webdriver_port.get().is_none() &&
+        env::var_os("STILLWATER_NO_SINGLE_INSTANCE").is_none();
     if single_instance &&
         single_instance::forward_to_running_instance(
             servoshell_preferences.url.as_deref().unwrap_or_default(),

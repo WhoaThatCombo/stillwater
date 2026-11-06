@@ -11,7 +11,7 @@ use std::{env, fs};
 
 use servo::protocol_handler::ProtocolRegistry;
 use servo::{
-    EventLoopWaker, Opts, Preferences, ServoBuilder, ServoUrl, UserContentManager, UserScript,
+    EventLoopWaker, LoadStatus, Opts, Preferences, ServoBuilder, ServoUrl, UserContentManager, UserScript,
 };
 use url::Url;
 use winit::application::ApplicationHandler;
@@ -173,12 +173,40 @@ impl App {
         )
     }
 
+    /// Whether Servo has work in flight that needs the event loop to keep turning: a page
+    /// is loading or animating, or we're within a short grace period after launch or input.
+    ///
+    /// servoshell used to stay awake as a side effect of egui's toolbar requesting repaints.
+    /// Stillwater's toolbar is an HTML page, so without this the loop can fall asleep with
+    /// frames pending and the window stays white until the mouse moves.
+    fn busy(&self) -> bool {
+        if self.tick_until.is_some_and(|until| Instant::now() < until) {
+            return true;
+        }
+        let AppState::Running(state) = &self.state else {
+            return false;
+        };
+        state.windows().iter().any(|window| {
+            window.webviews().iter().any(|(_, webview)| {
+                webview.animating() || !matches!(webview.load_status(), LoadStatus::Complete)
+            })
+        })
+    }
+
+    /// Keep the loop alive for at least duration from now.
+    fn keep_awake_for(&mut self, duration: std::time::Duration) {
+        let until = Instant::now() + duration;
+        if self.tick_until.is_none_or(|current| current < until) {
+            self.tick_until = Some(until);
+        }
+    }
+
     fn control_flow(&self) -> ControlFlow {
-        match self.tick_until {
-            Some(until) if Instant::now() < until => {
-                ControlFlow::WaitUntil(Instant::now() + std::time::Duration::from_millis(30))
-            },
-            _ => ControlFlow::Wait,
+        if self.busy() {
+            // ~60 Hz while busy; sleep fully when idle so an idle browser costs no CPU.
+            ControlFlow::WaitUntil(Instant::now() + std::time::Duration::from_millis(16))
+        } else {
+            ControlFlow::Wait
         }
     }
 
@@ -199,6 +227,9 @@ impl App {
 impl ApplicationHandler<AppEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.init(Some(event_loop));
+        // Startup creates the window, the sidebar and the first page: stay awake for it.
+        self.keep_awake_for(std::time::Duration::from_secs(5));
+        event_loop.set_control_flow(self.control_flow());
     }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
@@ -222,6 +253,10 @@ impl ApplicationHandler<AppEvent> for App {
         window_id: WindowId,
         window_event: WindowEvent,
     ) {
+        // Input can start work (navigation, scrolling, sidebar changes) that needs a few frames.
+        if !matches!(window_event, WindowEvent::RedrawRequested) {
+            self.keep_awake_for(std::time::Duration::from_millis(750));
+        }
         let now = Instant::now();
         trace_winit_event!(
             window_event,
@@ -314,7 +349,7 @@ impl ApplicationHandler<AppEvent> for App {
         }
 
         if opened_url {
-            self.tick_until = Some(Instant::now() + std::time::Duration::from_secs(3));
+            self.keep_awake_for(std::time::Duration::from_secs(3));
         }
         if !self.pump_servo_event_loop(event_loop.into()) {
             event_loop.exit();
@@ -339,3 +374,4 @@ fn load_userscripts(userscripts_directory: Option<&Path>) -> std::io::Result<Vec
     }
     Ok(userscripts)
 }
+
