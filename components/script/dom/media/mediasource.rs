@@ -86,8 +86,16 @@ struct Feed {
 const EPSILON: f64 = 0.02;
 
 /// The most video pixels per second `isTypeSupported` admits (when a type gives its size):
-/// software decoding plus conversion of the frames must keep up in real time.
-const MAX_PIXELS_PER_SECOND: f64 = 3840.0 * 2160.0 * 60.0;
+/// software decoding plus conversion of the frames must keep up in real time, and stay cheap.
+/// 4K60 VP9 does keep up on a 32-thread machine (~59 fps, ~4.5 cores), but YouTube then picks
+/// it even for a 1280x800 window, for ~600 MB more memory than 1080p; 1440p60 takes ~2 cores.
+const MAX_PIXELS_PER_SECOND: f64 = 2560.0 * 1440.0 * 60.0;
+
+/// The longest video side `isTypeSupported` admits (1440p, landscape or portrait).
+const MAX_VIDEO_SIDE: f64 = 2560.0;
+
+/// The highest frame rate `isTypeSupported` admits.
+const MAX_FRAMERATE: f64 = 60.0;
 
 /// Whether one `codecs` entry can be played from an MP4 or WebM `SourceBuffer`.
 fn codec_supported(codec: &str, webm: bool, audio_only: bool) -> bool {
@@ -184,6 +192,12 @@ impl MediaSource {
                 "cryptoblockformat" => return false,
                 _ => {},
             }
+        }
+        // Each limit also applies on its own: YouTube first asks with width=99999 alone (and
+        // height=99999, framerate=9999), and if those pass it decides the parameters are ignored
+        // and stops asking per format.
+        if width > MAX_VIDEO_SIDE || height > MAX_VIDEO_SIDE || framerate > MAX_FRAMERATE {
+            return false;
         }
         let framerate = if framerate > 0.0 { framerate } else { 30.0 };
         width * height * framerate <= MAX_PIXELS_PER_SECOND
