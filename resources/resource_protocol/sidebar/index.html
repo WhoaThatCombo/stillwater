@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Sidebar</title>
+  <link rel="stylesheet" href="servo:sidebar/zen-sidebar.css">
+</head>
+<body>
+  <header id="toolbar">
+    <button id="back" class="icon" title="Back">&#xE72B;</button>
+    <button id="forward" class="icon" title="Forward">&#xE72A;</button>
+    <button id="reload" class="icon" title="Reload">&#xE72C;</button>
+    <span class="spacer"></span>
+    <button id="compact" class="icon" title="Toggle compact mode (Ctrl+Alt+C)">&#xE89F;</button>
+  </header>
+
+  <div id="urlbar">
+    <span class="icon urlbar-icon">&#xE721;</span>
+    <input id="url" type="text" spellcheck="false" autocomplete="off"
+           placeholder="Search or enter address">
+  </div>
+
+  <div id="workspace-header">
+    <button id="ws-icon" class="icon ws-icon" title="Change icon"></button>
+    <button id="ws-name" title="Rename space"></button>
+    <input id="ws-name-input" type="text" spellcheck="false" autocomplete="off" hidden>
+    <span class="spacer"></span>
+    <button id="ws-color" class="ws-color" title="Change colour"></button>
+    <button id="ws-delete" class="icon" title="Delete space">&#xE74D;</button>
+  </div>
+
+  <main id="tabs"></main>
+
+  <button id="new-tab" class="tab new-tab">
+    <span class="icon tab-icon">&#xE710;</span>
+    <span class="tab-label">New Tab</span>
+  </button>
+
+  <footer id="workspaces"></footer>
+
+  <script src="servo:sidebar/sidebar.js"></script>
+</body>
+</html>

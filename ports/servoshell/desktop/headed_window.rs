@@ -11,7 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use euclid::{Angle, Length, Point2D, Rect, Rotation3D, Scale, Size2D, UnknownUnit, Vector3D};
+use euclid::{Angle, Point2D, Rect, Rotation3D, Scale, Size2D, UnknownUnit, Vector2D, Vector3D};
 use keyboard_types::ShortcutMatcher;
 use log::{debug, info};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
@@ -49,12 +49,13 @@ use crate::desktop::accelerated_gl_media::setup_gl_accelerated_media;
 use crate::desktop::dialog::Dialog;
 use crate::desktop::event_loop::{AppEvent, RepaintEventLoopWaker};
 use crate::desktop::gui::Gui;
+use crate::desktop::sidebar::Sidebar;
 use crate::desktop::keyutils::CMD_OR_CONTROL;
 use crate::prefs::ServoShellPreferences;
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
 use crate::window::{
     LINE_HEIGHT, LINE_WIDTH, MIN_WINDOW_INNER_SIZE, PlatformWindow, ServoShellWindow,
-    ServoShellWindowId, TopLevelWebViewCreationRequest,
+    ServoShellWindowId,
 };
 
 pub(crate) const INITIAL_WINDOW_TITLE: &str = "Servo";
@@ -103,6 +104,8 @@ pub struct HeadedWindow {
     visible_input_method: Cell<Option<EmbedderControlId>>,
     /// The position of the mouse cursor after the most recent `MouseMove` event.
     last_mouse_position: Cell<Option<Point2D<f32, DeviceIndependentPixel>>>,
+    /// The mouse position relative to the sidebar, if the mouse is over the sidebar.
+    sidebar_mouse_point: Cell<Option<Point2D<f32, DevicePixel>>>,
 }
 
 impl HeadedWindow {
@@ -111,7 +114,7 @@ impl HeadedWindow {
         servoshell_preferences: &ServoShellPreferences,
         event_loop: &ActiveEventLoop,
         event_loop_proxy: EventLoopProxy<AppEvent>,
-        initial_url: Url,
+        _initial_url: Url,
     ) -> Rc<Self> {
         let no_native_titlebar = servoshell_preferences.no_native_titlebar;
         let inner_size = servoshell_preferences.initial_window_size;
@@ -186,12 +189,17 @@ impl HeadedWindow {
             .expect("Could not make window RenderingContext current");
 
         let rendering_context = Rc::new(window_rendering_context.offscreen_context(inner_size));
+        let window_id: u64 = winit_window.id().into();
+        let sidebar = Sidebar::new(
+            Rc::new(window_rendering_context.offscreen_context(inner_size)),
+            RepaintEventLoopWaker::new(event_loop_proxy.clone(), window_id.into()),
+        );
         let gui = RefCell::new(Gui::new(
             &winit_window,
             event_loop,
             event_loop_proxy.clone(),
             rendering_context.clone(),
-            initial_url,
+            sidebar,
         ));
 
         debug!("Created window {:?}", winit_window.id());
@@ -217,6 +225,7 @@ impl HeadedWindow {
             dialogs: Default::default(),
             visible_input_method: Default::default(),
             last_mouse_position: Default::default(),
+            sidebar_mouse_point: Default::default(),
         })
     }
 
@@ -301,7 +310,7 @@ impl HeadedWindow {
     /// Helper function to handle mouse move events.
     fn handle_mouse_move_event(&self, webview: &WebView, position: PhysicalPosition<f64>) {
         let mut point = winit_position_to_euclid_point(position).to_f32();
-        point.y -= (self.toolbar_height() * self.hidpi_scale_factor()).0;
+        point -= self.content_origin() * self.hidpi_scale_factor();
 
         let previous_point = self.webview_relative_mouse_point.get();
         self.webview_relative_mouse_point.set(point);
@@ -340,11 +349,13 @@ impl HeadedWindow {
             return false;
         };
 
+        // Tab and workspace shortcuts go through the sidebar so they respect workspaces.
+        let post = |message: &str| self.gui.borrow().sidebar.post(message);
+        let workspace = Modifiers::CONTROL | Modifiers::ALT;
+
         let mut handled = true;
         ShortcutMatcher::from_event(key_event.event.clone())
-            .shortcut(CMD_OR_CONTROL, 'W', || {
-                window.close_webview(active_webview.id());
-            })
+            .shortcut(CMD_OR_CONTROL, 'W', || post("close-active"))
             .shortcut(Modifiers::CONTROL, Key::Named(NamedKey::F9), || {
                 active_webview.capture_webrender();
             })
@@ -385,42 +396,47 @@ impl HeadedWindow {
                 Key::Named(NamedKey::Escape),
                 || active_webview.exit_fullscreen(),
             )
-            // Select the first 8 tabs via shortcuts
-            .shortcut(CMD_OR_CONTROL, '1', || window.activate_webview_by_index(0))
-            .shortcut(CMD_OR_CONTROL, '2', || window.activate_webview_by_index(1))
-            .shortcut(CMD_OR_CONTROL, '3', || window.activate_webview_by_index(2))
-            .shortcut(CMD_OR_CONTROL, '4', || window.activate_webview_by_index(3))
-            .shortcut(CMD_OR_CONTROL, '5', || window.activate_webview_by_index(4))
-            .shortcut(CMD_OR_CONTROL, '6', || window.activate_webview_by_index(5))
-            .shortcut(CMD_OR_CONTROL, '7', || window.activate_webview_by_index(6))
-            .shortcut(CMD_OR_CONTROL, '8', || window.activate_webview_by_index(7))
-            // Cmd/Ctrl 9 is a bit different in that it focuses the last tab instead of the 9th
-            .shortcut(CMD_OR_CONTROL, '9', || {
-                let len = window.webviews().len();
-                if len > 0 {
-                    window.activate_webview_by_index(len - 1)
-                }
-            })
+            // Ctrl+Alt+1..9 switch workspaces (checked before the Ctrl+digit tab shortcuts).
+            .shortcut(workspace, '1', || post("ws-index\t0"))
+            .shortcut(workspace, '2', || post("ws-index\t1"))
+            .shortcut(workspace, '3', || post("ws-index\t2"))
+            .shortcut(workspace, '4', || post("ws-index\t3"))
+            .shortcut(workspace, '5', || post("ws-index\t4"))
+            .shortcut(workspace, '6', || post("ws-index\t5"))
+            .shortcut(workspace, '7', || post("ws-index\t6"))
+            .shortcut(workspace, '8', || post("ws-index\t7"))
+            .shortcut(workspace, '9', || post("ws-index\t8"))
+            // Select the first 8 tabs of the current workspace; Ctrl+9 selects the last one.
+            .shortcut(CMD_OR_CONTROL, '1', || post("tab-index\t0"))
+            .shortcut(CMD_OR_CONTROL, '2', || post("tab-index\t1"))
+            .shortcut(CMD_OR_CONTROL, '3', || post("tab-index\t2"))
+            .shortcut(CMD_OR_CONTROL, '4', || post("tab-index\t3"))
+            .shortcut(CMD_OR_CONTROL, '5', || post("tab-index\t4"))
+            .shortcut(CMD_OR_CONTROL, '6', || post("tab-index\t5"))
+            .shortcut(CMD_OR_CONTROL, '7', || post("tab-index\t6"))
+            .shortcut(CMD_OR_CONTROL, '8', || post("tab-index\t7"))
+            .shortcut(CMD_OR_CONTROL, '9', || post("tab-index\tlast"))
             .shortcut(Modifiers::CONTROL, Key::Named(NamedKey::PageDown), || {
-                if let Some(index) = window.get_active_webview_index() {
-                    window.activate_webview_by_index((index + 1) % window.webviews().len())
-                }
+                post("tab-next")
             })
             .shortcut(Modifiers::CONTROL, Key::Named(NamedKey::PageUp), || {
-                if let Some(index) = window.get_active_webview_index() {
-                    let len = window.webviews().len();
-                    window.activate_webview_by_index((index + len - 1) % len);
-                }
+                post("tab-prev")
             })
-            .shortcut(CMD_OR_CONTROL, 'T', || {
-                let url = Url::parse("servo:newtab")
-                    .expect("Should be able to unconditionally parse 'servo:newtab' as URL");
-                window.create_and_activate_toplevel_webview(
-                    state.clone(),
-                    TopLevelWebViewCreationRequest::WithUrl(url),
-                );
-            })
+            .shortcut(CMD_OR_CONTROL, 'T', || post("new-tab"))
             .shortcut(CMD_OR_CONTROL, 'Q', || state.schedule_exit())
+            .shortcut(CMD_OR_CONTROL, 'L', || self.gui.borrow().sidebar.focus_url(window))
+            .optional_shortcut(
+                cfg!(not(target_os = "macos")),
+                Modifiers::ALT,
+                'D',
+                || self.gui.borrow().sidebar.focus_url(window),
+            )
+            // Zen's compact mode shortcut.
+            .shortcut(Modifiers::CONTROL | Modifiers::ALT, 'C', || {
+                self.gui.borrow().sidebar.toggle_compact();
+                window.set_needs_update();
+                self.winit_window.request_redraw();
+            })
             .otherwise(|| handled = false);
         handled
     }
@@ -448,8 +464,8 @@ impl HeadedWindow {
         self.winit_window.set_ime_allowed(true);
         self.winit_window.set_ime_cursor_area(
             LogicalPosition::new(
-                position.min.x,
-                position.min.y + (self.toolbar_height().0 as i32),
+                position.min.x + (self.content_origin().x as i32),
+                position.min.y + (self.content_origin().y as i32),
             ),
             LogicalSize::new(
                 position.max.x - position.min.x,
@@ -504,8 +520,118 @@ impl HeadedWindow {
         dialogs.contains_key(&webview_id)
     }
 
-    fn toolbar_height(&self) -> Length<f32, DeviceIndependentPixel> {
-        self.gui.borrow().toolbar_height()
+    fn content_origin(&self) -> Vector2D<f32, DeviceIndependentPixel> {
+        self.gui.borrow().content_origin()
+    }
+
+    /// Deliver mouse and keyboard events that belong to the sidebar `WebView`. Returns true
+    /// if the event was consumed by the sidebar.
+    fn handle_sidebar_event(
+        &self,
+        state: &Rc<RunningAppState>,
+        window: &Rc<ServoShellWindow>,
+        event: &WindowEvent,
+    ) -> bool {
+        let gui = self.gui.borrow();
+        let Some(sidebar_webview) = gui.sidebar.webview().cloned() else {
+            return false;
+        };
+        let scale = self.hidpi_scale_factor();
+
+        match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                let point = winit_position_to_euclid_point(*position).to_f32() / scale;
+                if gui.sidebar.update_peek(point) {
+                    window.set_needs_update();
+                    self.winit_window.request_redraw();
+                }
+                // The layout is only refreshed on the next redraw; use the last one.
+                let Some(local_point) = gui.sidebar_relative_point(point) else {
+                    if self.sidebar_mouse_point.take().is_some() {
+                        sidebar_webview.notify_input_event(InputEvent::MouseLeftViewport(
+                            MouseLeftViewportEvent::default(),
+                        ));
+                    }
+                    return false;
+                };
+                let local_point = local_point * scale;
+                if self.sidebar_mouse_point.replace(Some(local_point)).is_none() &&
+                    let Some(active) = window.active_webview()
+                {
+                    active.notify_input_event(InputEvent::MouseLeftViewport(
+                        MouseLeftViewportEvent::default(),
+                    ));
+                }
+                self.set_cursor(gui.sidebar.cursor());
+                sidebar_webview
+                    .notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(local_point.into())));
+                true
+            },
+            WindowEvent::MouseInput {
+                state: element_state,
+                button,
+                ..
+            } => {
+                let Some(point) = self.sidebar_mouse_point.get() else {
+                    // A click on the page takes keyboard focus away from the sidebar.
+                    if *element_state == ElementState::Pressed {
+                        gui.sidebar.set_focused(false, window);
+                    }
+                    return false;
+                };
+                if *element_state == ElementState::Pressed {
+                    gui.sidebar.set_focused(true, window);
+                }
+                let mouse_button = match button {
+                    MouseButton::Left => ServoMouseButton::Primary,
+                    MouseButton::Right => ServoMouseButton::Secondary,
+                    MouseButton::Middle => ServoMouseButton::Auxiliary,
+                    MouseButton::Back => ServoMouseButton::Back,
+                    MouseButton::Forward => ServoMouseButton::Forward,
+                    MouseButton::Other(value) => ServoMouseButton::Other(*value),
+                };
+                let action = match element_state {
+                    ElementState::Pressed => MouseButtonAction::Down,
+                    ElementState::Released => MouseButtonAction::Up,
+                };
+                sidebar_webview.notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                    action,
+                    mouse_button,
+                    point.into(),
+                )));
+                true
+            },
+            WindowEvent::MouseWheel { delta, .. } => {
+                let Some(point) = self.sidebar_mouse_point.get() else {
+                    return false;
+                };
+                let (x, y) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => {
+                        ((x * LINE_WIDTH) as f64, (y * LINE_HEIGHT) as f64)
+                    },
+                    MouseScrollDelta::PixelDelta(delta) => (delta.x, delta.y),
+                };
+                let delta = WheelDelta {
+                    x,
+                    y,
+                    z: 0.0,
+                    mode: WheelMode::DeltaPixel,
+                };
+                sidebar_webview
+                    .notify_input_event(InputEvent::Wheel(WheelEvent::new(delta, point.into())));
+                true
+            },
+            WindowEvent::KeyboardInput { event, .. } if gui.sidebar.is_focused() => {
+                let keyboard_event = keyboard_event_from_winit(event, self.modifiers_state.get());
+                drop(gui);
+                if self.handle_intercepted_key_bindings(state.clone(), window, &keyboard_event) {
+                    return true;
+                }
+                sidebar_webview.notify_input_event(InputEvent::Keyboard(keyboard_event));
+                true
+            },
+            _ => false,
+        }
     }
 
     pub(crate) fn handle_winit_window_event(
@@ -549,8 +675,23 @@ impl HeadedWindow {
             // Otherwise, if the cursor is over the egui interface, forward the event.
             self.last_mouse_position
                 .get()
-                .is_none_or(|point| self.gui.borrow().is_in_egui_toolbar_rect(point))
+                .is_none_or(|point| self.gui.borrow().is_outside_content_rect(point))
         };
+
+        // The sidebar gets first pick of input, unless a dialog is capturing it.
+        let dialog_open = window
+            .active_webview()
+            .is_some_and(|webview| self.has_active_dialog_for_webview(webview.id()));
+        if !dialog_open && self.handle_sidebar_event(&state, &window, &event) {
+            if let WindowEvent::CursorMoved { .. } = event {
+                // egui still needs to know where the mouse is to hide tooltips.
+                let _ = self
+                    .gui
+                    .borrow_mut()
+                    .on_window_event(&self.winit_window, &event);
+            }
+            return;
+        }
 
         // Handle the event
         let mut consumed = false;
@@ -805,13 +946,12 @@ impl PlatformWindow for HeadedWindow {
 
     fn screen_geometry(&self) -> ScreenGeometry {
         let hidpi_factor = self.hidpi_scale_factor();
-        let toolbar_size = Size2D::new(0.0, (self.toolbar_height() * self.hidpi_scale_factor()).0);
         let screen_size = self.screen_size.to_f32() * hidpi_factor;
 
         // FIXME: In reality, this should subtract screen space used by the system interface
         // elements, but it is difficult to get this value with `winit` currently. See:
         // See https://github.com/rust-windowing/winit/issues/2494
-        let available_screen_size = screen_size - toolbar_size;
+        let available_screen_size = screen_size;
 
         let window_rect = DeviceIntRect::from_origin_and_size(
             winit_position_to_euclid_point(self.winit_window.outer_position().unwrap_or_default()),
@@ -1073,7 +1213,7 @@ impl PlatformWindow for HeadedWindow {
             EmbedderControl::SelectElement(prompt) => {
                 // FIXME: Reading the toolbar height is needed here to properly position the select dialog.
                 // But if the toolbar height changes while the dialog is open then the position won't be updated
-                let offset = self.gui.borrow().toolbar_height();
+                let offset = self.gui.borrow().content_origin();
                 self.add_dialog(
                     webview_id,
                     Dialog::new_select_element_dialog(prompt, offset),
@@ -1082,7 +1222,7 @@ impl PlatformWindow for HeadedWindow {
             EmbedderControl::ColorPicker(color_picker) => {
                 // FIXME: Reading the toolbar height is needed here to properly position the select dialog.
                 // But if the toolbar height changes while the dialog is open then the position won't be updated
-                let offset = self.gui.borrow().toolbar_height();
+                let offset = self.gui.borrow().content_origin();
                 self.add_dialog(
                     webview_id,
                     Dialog::new_color_picker_dialog(color_picker, offset),
@@ -1102,7 +1242,7 @@ impl PlatformWindow for HeadedWindow {
                 self.add_dialog(webview_id, Dialog::new_simple_dialog(simple_dialog));
             },
             EmbedderControl::ContextMenu(prompt) => {
-                let offset = self.gui.borrow().toolbar_height();
+                let offset = self.gui.borrow().content_origin();
                 self.add_dialog(webview_id, Dialog::new_context_menu(prompt, offset));
             },
         }

@@ -44,6 +44,11 @@ impl ProtocolHandler for ServoProtocolHandler {
         let url = request.current_url();
 
         match url.path() {
+            // The Zen-style sidebar UI: `servo:sidebar/<file>`.
+            path if path.starts_with("sidebar/") => {
+                let path = format!("/{path}");
+                ResourceProtocolHandler::response_for_path(request, done_chan, context, &path)
+            },
             "config" => ResourceProtocolHandler::response_for_path(
                 request,
                 done_chan,

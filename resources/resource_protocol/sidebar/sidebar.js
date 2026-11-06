@@ -1,0 +1,187 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+// Talks to servoshell (desktop/sidebar.rs):
+//   page -> Rust: console.log("__sidebar__<command>\t<argument>")
+//   Rust -> page: window.sidebar.setState({...})
+
+"use strict";
+
+const send = (command, argument = "") => console.log(`__sidebar__${command}\t${argument}`);
+
+const $ = (id) => document.getElementById(id);
+const url = $("url");
+const urlbar = $("urlbar");
+const tabs = $("tabs");
+let state = { tabs: [], url: "", canGoBack: false, canGoForward: false, compact: false };
+
+function tabLabel(tab) {
+  if (tab.title) return tab.title;
+  if (!tab.url || tab.url === "servo:newtab") return "New Tab";
+  try {
+    return new URL(tab.url).host || tab.url;
+  } catch (_) {
+    return tab.url;
+  }
+}
+
+function tabIcon(tab) {
+  if (tab.favicon) {
+    const img = document.createElement("img");
+    img.className = "tab-icon";
+    img.src = tab.favicon;
+    return img;
+  }
+  const letter = document.createElement("span");
+  letter.className = "tab-icon letter";
+  letter.textContent = tabLabel(tab).trim().charAt(0).toUpperCase() || "•";
+  return letter;
+}
+
+function renderTab(tab) {
+  const row = document.createElement("div");
+  row.className = "tab" + (tab.active ? " selected" : "") + (tab.loading ? " loading" : "");
+  row.title = tab.url;
+
+  const label = document.createElement("span");
+  label.className = "tab-label";
+  label.textContent = tabLabel(tab);
+
+  const close = document.createElement("button");
+  close.className = "tab-close icon";
+  close.title = "Close tab";
+  close.textContent = "";
+  close.addEventListener("click", (event) => {
+    event.stopPropagation();
+    send("close", tab.id);
+  });
+
+  row.append(tabIcon(tab), label, close);
+  row.addEventListener("click", () => send("activate", tab.id));
+  row.addEventListener("mouseup", (event) => {
+    if (event.button === 1) send("close", tab.id); // middle click
+  });
+  return row;
+}
+
+function currentWorkspace() {
+  const { list, current } = state.workspaces;
+  return list.find((workspace) => workspace.id === current) || list[0];
+}
+
+function renderWorkspaces() {
+  const workspace = currentWorkspace();
+  const root = document.documentElement;
+  document.body.style.background = state.background;
+  if (workspace.color) root.style.setProperty("--ws-accent", workspace.color);
+  else root.style.removeProperty("--ws-accent");
+
+  $("ws-icon").textContent = workspace.icon;
+  $("ws-name").textContent = workspace.name;
+  $("ws-delete").disabled = state.workspaces.list.length < 2;
+
+  const strip = state.workspaces.list.map((space, index) => {
+    const button = document.createElement("button");
+    button.className = "workspace" + (space.id === workspace.id ? " active" : "");
+    button.title = `${space.name} (Ctrl+Alt+${index + 1})`;
+    button.textContent = space.icon;
+    button.addEventListener("click", () => send("ws-switch", space.id));
+    return button;
+  });
+  const add = document.createElement("button");
+  add.className = "workspace add";
+  add.title = "New space";
+  add.textContent = "";
+  add.addEventListener("click", () => send("ws-new"));
+  $("workspaces").replaceChildren(...strip, add);
+}
+
+function render() {
+  if (state.workspaces) renderWorkspaces();
+  tabs.replaceChildren(...state.tabs.map(renderTab));
+  $("back").disabled = !state.canGoBack;
+  $("forward").disabled = !state.canGoForward;
+  $("compact").textContent = state.compact ? "" : "";
+  document.body.classList.toggle("compact", state.compact);
+  if (document.activeElement !== url) {
+    url.value = state.url === "servo:newtab" ? "" : state.url;
+  }
+}
+
+window.sidebar = {
+  setState(newState) {
+    state = newState;
+    render();
+  },
+  focusUrl() {
+    url.focus();
+    url.select();
+  },
+};
+
+url.addEventListener("focus", () => urlbar.classList.add("focused"));
+url.addEventListener("blur", () => urlbar.classList.remove("focused"));
+url.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && url.value.trim()) {
+    send("go", url.value.trim());
+    url.blur();
+  } else if (event.key === "Escape") {
+    url.value = state.url;
+    url.blur();
+    send("blur");
+  }
+});
+
+$("back").addEventListener("click", () => send("back"));
+$("forward").addEventListener("click", () => send("forward"));
+$("reload").addEventListener("click", () => send("reload"));
+$("compact").addEventListener("click", () => send("toggle-compact"));
+$("new-tab").addEventListener("click", () => send("new-tab"));
+
+// Workspace header: click icon / colour dot to cycle them, click the name to rename.
+$("ws-icon").addEventListener("click", () => send("ws-icon", currentWorkspace().id));
+$("ws-color").addEventListener("click", () => send("ws-color", currentWorkspace().id));
+
+const nameButton = $("ws-name");
+const nameInput = $("ws-name-input");
+function finishRename(commit) {
+  if (nameInput.hidden) return;
+  if (commit && nameInput.value.trim()) {
+    send("ws-rename", `${currentWorkspace().id}\t${nameInput.value.trim()}`);
+  }
+  nameInput.hidden = true;
+  nameButton.hidden = false;
+}
+nameButton.addEventListener("click", () => {
+  nameInput.value = currentWorkspace().name;
+  nameButton.hidden = true;
+  nameInput.hidden = false;
+  nameInput.focus();
+  nameInput.select();
+});
+nameInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") finishRename(true);
+  else if (event.key === "Escape") finishRename(false);
+});
+nameInput.addEventListener("blur", () => finishRename(true));
+
+// Deleting a space closes its tabs, so ask for a second click (no confirm() in the sidebar).
+const deleteButton = $("ws-delete");
+let disarmTimer = 0;
+deleteButton.addEventListener("click", () => {
+  if (deleteButton.classList.contains("armed")) {
+    clearTimeout(disarmTimer);
+    deleteButton.classList.remove("armed");
+    send("ws-delete", currentWorkspace().id);
+    return;
+  }
+  deleteButton.classList.add("armed");
+  deleteButton.title = "Click again to delete this space and its tabs";
+  disarmTimer = setTimeout(() => {
+    deleteButton.classList.remove("armed");
+    deleteButton.title = "Delete space";
+  }, 3000);
+});
+
+send("ready");

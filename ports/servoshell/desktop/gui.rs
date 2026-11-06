@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::collections::HashMap;
 #[cfg(any(
     target_os = "windows",
     target_os = "linux",
@@ -22,11 +21,9 @@ use std::sync::Arc;
 
 use accesskit::Affine;
 use dpi::PhysicalSize;
-use egui::text::{CCursor, CCursorRange};
-use egui::text_edit::TextEditState;
 use egui::{
-    Button, FontDefinitions, Id, Key, Label, LayerId, Modifiers, Order, PaintCallback, Panel, Vec2,
-    WidgetInfo, WidgetType, pos2,
+    Color32, CornerRadius, FontDefinitions, Id, Label, LayerId, Order, PaintCallback, Stroke,
+    StrokeKind, pos2,
 };
 #[cfg(any(
     target_os = "windows",
@@ -37,7 +34,7 @@ use egui::{
 use egui::{FontData, FontFamily};
 use egui_glow::{CallbackFn, EguiGlow};
 use egui_winit::EventResponse;
-use euclid::{Length, Point2D, Rect, Scale, Size2D};
+use euclid::{Point2D, Rect, Scale, Size2D, Vector2D};
 #[cfg(any(
     target_os = "windows",
     target_os = "linux",
@@ -45,62 +42,41 @@ use euclid::{Length, Point2D, Rect, Scale, Size2D};
     target_os = "macos"
 ))]
 use log::info;
-use log::warn;
 use servo::{
-    DeviceIndependentPixel, DevicePixel, Image, LoadStatus, OffscreenRenderingContext, PixelFormat,
-    RenderingContext, WebView, WebViewId,
+    DeviceIndependentPixel, DevicePixel, Image, OffscreenRenderingContext, PixelFormat,
+    RenderingContext,
 };
-use url::Url;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::Window;
 
 use crate::desktop::event_loop::AppEvent;
 use crate::desktop::headed_window;
-use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
-use crate::window::{ServoShellWindow, TopLevelWebViewCreationRequest};
+use crate::desktop::sidebar::{CONTENT_RADIUS, Sidebar, png_data_url};
+use crate::running_app_state::RunningAppState;
+use crate::window::{PlatformWindow, ServoShellWindow};
 
-/// The user interface of a headed servoshell. Currently this is implemented via
-/// egui.
+/// The user interface of a headed servoshell. egui is only used as a thin compositor
+/// (plus native dialogs); the browser chrome itself is the HTML [`Sidebar`].
 pub struct Gui {
     rendering_context: Rc<OffscreenRenderingContext>,
     context: EguiGlow,
-    toolbar_height: Length<f32, DeviceIndependentPixel>,
 
-    location: String,
+    /// The Zen-style sidebar, rendered by Servo.
+    pub(crate) sidebar: Sidebar,
 
-    /// Whether the location has been edited by the user without clicking Go.
-    location_dirty: bool,
+    /// Where the sidebar was last drawn, in device-independent pixels, if visible.
+    sidebar_rect: Option<egui::Rect>,
 
-    /// The [`LoadStatus`] of the active `WebView`.
-    load_status: LoadStatus,
+    /// Where the web content was last drawn, in device-independent pixels.
+    content_rect: egui::Rect,
 
     /// The text to display in the status bar on the bottom of the window.
     status_text: Option<String>,
 
-    /// Whether or not the current `WebView` can navigate backward.
-    can_go_back: bool,
-
-    /// Whether or not the current `WebView` can navigate forward.
-    can_go_forward: bool,
-
-    /// Handle to the GPU texture of the favicon.
-    ///
-    /// These need to be cached across egui draw calls.
-    favicon_textures: HashMap<WebViewId, (egui::TextureHandle, egui::load::SizedTexture)>,
-
     /// AccessKit tree updates pending the next egui tick.
     /// This allows us to ensure that graft nodes are sent before the subtrees they graft.
     pending_accesskit_updates: Vec<accesskit::TreeUpdate>,
-}
-
-fn truncate_with_ellipsis(input: &str, max_length: usize) -> String {
-    if input.chars().count() > max_length {
-        let truncated: String = input.chars().take(max_length.saturating_sub(1)).collect();
-        format!("{}…", truncated)
-    } else {
-        input.to_string()
-    }
 }
 
 #[cfg(any(
@@ -213,13 +189,15 @@ impl Drop for Gui {
     }
 }
 
+
+
 impl Gui {
     pub(crate) fn new(
         winit_window: &Window,
         event_loop: &ActiveEventLoop,
         event_loop_proxy: EventLoopProxy<AppEvent>,
         rendering_context: Rc<OffscreenRenderingContext>,
-        initial_url: Url,
+        sidebar: Sidebar,
     ) -> Self {
         rendering_context
             .make_current()
@@ -253,14 +231,10 @@ impl Gui {
         Self {
             rendering_context,
             context,
-            toolbar_height: Default::default(),
-            location: initial_url.to_string(),
-            location_dirty: false,
-            load_status: LoadStatus::Complete,
+            sidebar,
+            sidebar_rect: None,
+            content_rect: egui::Rect::NOTHING,
             status_text: None,
-            can_go_back: false,
-            can_go_forward: false,
-            favicon_textures: Default::default(),
             pending_accesskit_updates: vec![],
         }
     }
@@ -287,109 +261,31 @@ impl Gui {
         self.context.on_window_event(winit_window, event)
     }
 
-    /// The height of the top toolbar of this user inteface ie the distance from the top of the
-    /// window to the position of the `WebView`.
-    pub(crate) fn toolbar_height(&self) -> Length<f32, DeviceIndependentPixel> {
-        self.toolbar_height
+    /// The offset of the web content from the top-left of the window.
+    pub(crate) fn content_origin(&self) -> Vector2D<f32, DeviceIndependentPixel> {
+        if self.content_rect == egui::Rect::NOTHING {
+            return Vector2D::zero();
+        }
+        Vector2D::new(self.content_rect.min.x, self.content_rect.min.y)
     }
 
-    /// Return true iff the given position is over the egui toolbar.
-    pub(crate) fn is_in_egui_toolbar_rect(
+    /// Return true iff the given position is not over the web content (i.e. over the margins
+    /// around it, which belong to egui).
+    pub(crate) fn is_outside_content_rect(
         &self,
         position: Point2D<f32, DeviceIndependentPixel>,
     ) -> bool {
-        position.y < self.toolbar_height.get()
+        !self.content_rect.contains(pos2(position.x, position.y))
     }
 
-    /// Create a frameless button with square sizing, as used in the toolbar.
-    fn toolbar_button(text: &str) -> egui::Button<'_> {
-        egui::Button::new(text)
-            .frame(false)
-            .min_size(Vec2 { x: 20.0, y: 20.0 })
-    }
-
-    /// Draws a browser tab, checking for clicks and queues appropriate [`UserInterfaceCommand`]s.
-    /// Using a custom widget here would've been nice, but it doesn't seem as though egui
-    /// supports that, so we arrange multiple Widgets in a way that they look connected.
-    fn browser_tab(
-        ui: &mut egui::Ui,
-        window: &ServoShellWindow,
-        webview: WebView,
-        favicon_texture: Option<egui::load::SizedTexture>,
-    ) {
-        let label = match (webview.page_title(), webview.url()) {
-            (Some(title), _) if !title.is_empty() => title,
-            (_, Some(url)) => url.to_string(),
-            _ => "New Tab".into(),
-        };
-
-        let inactive_bg_color = ui.visuals().window_fill;
-        let active_bg_color = ui.visuals().widgets.active.weak_bg_fill;
-        let active = window.active_webview().map(|webview| webview.id()) == Some(webview.id());
-
-        // Setup a tab frame that will contain the favicon, title and close button
-        let mut tab_frame = egui::Frame::NONE.corner_radius(4).begin(ui);
-        {
-            tab_frame.content_ui.add_space(5.0);
-
-            let visuals = tab_frame.content_ui.visuals_mut();
-            // Remove the stroke so we don't see the border between the close button and the label
-            visuals.widgets.active.bg_stroke.width = 0.0;
-            visuals.widgets.hovered.bg_stroke.width = 0.0;
-            // Now we make sure the fill color is always the same, irrespective of state, that way
-            // we can make sure that both the label and close button have the same background color
-            visuals.widgets.noninteractive.weak_bg_fill = inactive_bg_color;
-            visuals.widgets.inactive.weak_bg_fill = inactive_bg_color;
-            visuals.widgets.hovered.weak_bg_fill = active_bg_color;
-            visuals.widgets.active.weak_bg_fill = active_bg_color;
-            visuals.selection.bg_fill = active_bg_color;
-            visuals.selection.stroke.color = visuals.widgets.active.fg_stroke.color;
-            visuals.widgets.hovered.fg_stroke.color = visuals.widgets.active.fg_stroke.color;
-
-            // Expansion would also show that they are 2 separate widgets
-            visuals.widgets.active.expansion = 0.0;
-            visuals.widgets.hovered.expansion = 0.0;
-
-            if let Some(favicon) = favicon_texture {
-                tab_frame.content_ui.add(
-                    egui::Image::from_texture(favicon)
-                        .fit_to_exact_size(egui::vec2(16.0, 16.0))
-                        .bg_fill(egui::Color32::TRANSPARENT),
-                );
-            }
-
-            let tab = tab_frame
-                .content_ui
-                // No frame: its interact rect is taller than the tab, so only the tab frame is filled.
-                .add(Button::selectable(active, truncate_with_ellipsis(&label, 20)).frame(false))
-                .on_hover_ui(|ui| {
-                    ui.label(&label);
-                });
-
-            let close_button = tab_frame
-                .content_ui
-                .add(egui::Button::new("X").fill(egui::Color32::TRANSPARENT));
-            close_button.widget_info(|| {
-                let mut info = WidgetInfo::new(WidgetType::Button);
-                info.label = Some("Close".into());
-                info
-            });
-            if close_button.clicked() || close_button.middle_clicked() || tab.middle_clicked() {
-                window
-                    .queue_user_interface_command(UserInterfaceCommand::CloseWebView(webview.id()));
-            } else if !active && tab.clicked() {
-                window.activate_webview(webview.id());
-            }
-        }
-
-        let response = tab_frame.allocate_space(ui);
-        let fill_color = if active || response.hovered() {
-            active_bg_color
-        } else {
-            inactive_bg_color
-        };
-        tab_frame.frame.fill = fill_color;
-        tab_frame.end(ui);
+    /// If `position` is over the visible sidebar, return it relative to the sidebar's origin.
+    pub(crate) fn sidebar_relative_point(
+        &self,
+        position: Point2D<f32, DeviceIndependentPixel>,
+    ) -> Option<Point2D<f32, DeviceIndependentPixel>> {
+        let rect = self.sidebar_rect?;
+        rect.contains(pos2(position.x, position.y))
+            .then(|| Point2D::new(position.x - rect.min.x, position.y - rect.min.y))
     }
 
     /// Update the user interface, but do not paint the updated state.
@@ -399,222 +295,44 @@ impl Gui {
         window: &ServoShellWindow,
         headed_window: &headed_window::HeadedWindow,
     ) {
+        let theme = headed_window.theme();
+        let hidpi_scale = window.platform_window().hidpi_scale_factor();
+        self.sidebar.ensure_webview(state, theme, hidpi_scale);
+        load_pending_favicons(window, &mut self.sidebar);
+        self.sidebar.handle_messages(window);
+        self.sidebar.push_state(window);
+
         self.rendering_context
             .make_current()
             .expect("Could not make RenderingContext current");
         let Self {
             rendering_context,
             context,
-            toolbar_height,
-            location,
-            location_dirty,
-            favicon_textures,
+            sidebar,
+            sidebar_rect,
+            content_rect,
             ..
         } = self;
 
         let winit_window = headed_window.winit_window();
         context.run(winit_window, |ctx| {
-            load_pending_favicons(ctx, window, favicon_textures);
-
-            // TODO: While in fullscreen add some way to mitigate the increased phishing risk
-            // when not displaying the URL bar: https://github.com/servo/servo/issues/32443
-            // Show toolbar unless fullscreen is from document (web API)
-            if !headed_window.is_fullscreen_from_document() {
-                let frame = egui::Frame::default()
-                    .fill(ctx.style().visuals.window_fill)
-                    .inner_margin(4.0);
-                Panel::top("toolbar").frame(frame).show_inside(ctx, |ui| {
-                    ui.allocate_ui_with_layout(
-                        ui.available_size(),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            let back_button =
-                                ui.add_enabled(self.can_go_back, Gui::toolbar_button("⏴"));
-                            back_button.widget_info(|| {
-                                let mut info = WidgetInfo::new(WidgetType::Button);
-                                info.label = Some("Back".into());
-                                info
-                            });
-                            if back_button.clicked() {
-                                *location_dirty = false;
-                                window.queue_user_interface_command(UserInterfaceCommand::Back);
-                            }
-
-                            let forward_button =
-                                ui.add_enabled(self.can_go_forward, Gui::toolbar_button("⏵"));
-                            forward_button.widget_info(|| {
-                                let mut info = WidgetInfo::new(WidgetType::Button);
-                                info.label = Some("Forward".into());
-                                info
-                            });
-                            if forward_button.clicked() {
-                                *location_dirty = false;
-                                window.queue_user_interface_command(UserInterfaceCommand::Forward);
-                            }
-
-                            match self.load_status {
-                                LoadStatus::Started | LoadStatus::HeadParsed => {
-                                    let stop_button = ui.add(Gui::toolbar_button("X"));
-                                    stop_button.widget_info(|| {
-                                        let mut info = WidgetInfo::new(WidgetType::Button);
-                                        info.label = Some("Stop".into());
-                                        info
-                                    });
-                                    if stop_button.clicked() {
-                                        warn!("Do not support stop yet.");
-                                    }
-                                },
-                                LoadStatus::Complete | LoadStatus::Stopped => {
-                                    let reload_button = ui.add(Gui::toolbar_button("↻"));
-                                    reload_button.widget_info(|| {
-                                        let mut info = WidgetInfo::new(WidgetType::Button);
-                                        info.label = Some("Reload".into());
-                                        info
-                                    });
-                                    if reload_button.clicked() {
-                                        *location_dirty = false;
-                                        window.queue_user_interface_command(
-                                            UserInterfaceCommand::Reload,
-                                        );
-                                    }
-                                },
-                            }
-                            ui.add_space(2.0);
-
-                            ui.allocate_ui_with_layout(
-                                ui.available_size(),
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    let mut experimental_preferences_enabled =
-                                        state.experimental_preferences_enabled();
-                                    let prefs_toggle = ui
-                                        .toggle_value(&mut experimental_preferences_enabled, "☢")
-                                        .on_hover_text("Enable experimental prefs");
-                                    prefs_toggle.widget_info(|| {
-                                        let mut info = WidgetInfo::new(WidgetType::Button);
-                                        info.label = Some("Enable experimental preferences".into());
-                                        info.selected = Some(experimental_preferences_enabled);
-                                        info
-                                    });
-                                    if prefs_toggle.clicked() {
-                                        state.set_experimental_preferences_enabled(
-                                            experimental_preferences_enabled,
-                                        );
-                                        *location_dirty = false;
-                                        window.queue_user_interface_command(
-                                            UserInterfaceCommand::ReloadAll,
-                                        );
-                                    }
-
-                                    let location_id = egui::Id::new("location_input");
-                                    let location_field = ui.add_sized(
-                                        ui.available_size(),
-                                        egui::TextEdit::singleline(location)
-                                            .id(location_id)
-                                            .hint_text("Search or enter address"),
-                                    );
-
-                                    if location_field.changed() {
-                                        *location_dirty = true;
-                                    }
-                                    // Handle adddress bar shortcut.
-                                    if ui.input(|i| {
-                                        if cfg!(target_os = "macos") {
-                                            i.clone().consume_key(Modifiers::COMMAND, Key::L)
-                                        } else {
-                                            i.clone().consume_key(Modifiers::COMMAND, Key::L) ||
-                                                i.clone().consume_key(Modifiers::ALT, Key::D)
-                                        }
-                                    }) {
-                                        // The focus request immediately makes gained_focus return true.
-                                        location_field.request_focus();
-                                    }
-                                    // Select address bar text when it's focused (click or shortcut).
-                                    if location_field.gained_focus() &&
-                                        let Some(mut state) =
-                                            TextEditState::load(ui.ctx(), location_id)
-                                    {
-                                        // Select the whole input.
-                                        state.cursor.set_char_range(Some(CCursorRange::two(
-                                            CCursor::new(0),
-                                            CCursor::new(location.len()),
-                                        )));
-                                        state.store(ui.ctx(), location_id);
-                                    }
-                                    // Navigate to address when enter is pressed in the address bar.
-                                    if location_field.lost_focus() &&
-                                        ui.input(|i| i.clone().key_pressed(Key::Enter))
-                                    {
-                                        window.queue_user_interface_command(
-                                            UserInterfaceCommand::Go(location.clone()),
-                                        );
-                                    }
-                                },
-                            );
-                        },
-                    );
-                });
-
-                // A simple Tab header strip
-                let outer = Panel::top("tabs").show_inside(ctx, |ui| {
-                    // Add scroll for overflowing tabs
-                    egui::ScrollArea::horizontal()
-                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                        .show(ui, |ui| {
-                            ui.allocate_ui_with_layout(
-                                ui.available_size(),
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    for (id, webview) in window.webviews().into_iter() {
-                                        let favicon = favicon_textures
-                                            .get(&id)
-                                            .map(|(_, favicon)| favicon)
-                                            .copied();
-                                        Self::browser_tab(ui, window, webview, favicon);
-                                    }
-
-                                    let new_tab_button = ui.add(Gui::toolbar_button("+"));
-                                    new_tab_button.widget_info(|| {
-                                        let mut info = WidgetInfo::new(WidgetType::Button);
-                                        info.label = Some("New tab".into());
-                                        info
-                                    });
-                                    if new_tab_button.clicked() {
-                                        window.queue_user_interface_command(
-                                            UserInterfaceCommand::NewWebView,
-                                        );
-                                    }
-
-                                    let new_window_button = ui.add(Gui::toolbar_button("⊞"));
-                                    new_window_button.widget_info(|| {
-                                        let mut info = WidgetInfo::new(WidgetType::Button);
-                                        info.label = Some("New window".into());
-                                        info
-                                    });
-                                    if new_window_button.clicked() {
-                                        let url = Url::parse("servo:newtab").expect("Should be able to unconditionally parse 'servo:newtab' as URL");
-                                        window.queue_user_interface_command(
-                                            UserInterfaceCommand::NewWindow(TopLevelWebViewCreationRequest::WithUrl(url)),
-                                        );
-                                    }
-                                },
-                            );
-                        })
-                });
-
-                *toolbar_height = Length::new(outer.response.rect.max.y);
-            } else {
-                *toolbar_height = Length::default();
-            }
-
             let scale =
                 Scale::<_, DeviceIndependentPixel, DevicePixel>::new(ctx.pixels_per_point());
 
             headed_window.for_each_active_dialog(window, |dialog| dialog.update(ctx));
 
-            // If the top parts of the GUI changed size, then update the size of the WebView and also
-            // the size of its RenderingContext.
-            let available_rect = ctx.available_rect_before_wrap();
+            // TODO: While in fullscreen add some way to mitigate the increased phishing risk
+            // when not displaying the URL bar: https://github.com/servo/servo/issues/32443
+            let full_rect = ctx.available_rect_before_wrap();
+            let (new_sidebar_rect, new_content_rect) =
+                sidebar.layout(full_rect, headed_window.is_fullscreen_from_document());
+            *sidebar_rect = new_sidebar_rect;
+            *content_rect = new_content_rect;
+
+            let [r, g, b] = sidebar.background();
+            let background = Color32::from_rgb(r, g, b);
+            ctx.layer_painter(LayerId::background())
+                .rect_filled(full_rect, 0.0, background);
 
             // Build a graft node for each WebView.
             let affine = {
@@ -623,8 +341,8 @@ impl Gui {
                 // the window, and scales it to the same scale as the rest of the nodes in egui's
                 // AccessKit tree.
                 let scale = (1.0 / window.platform_window().hidpi_scale_factor().get()) as f64;
-                let x = available_rect.min.x as f64;
-                let y = available_rect.min.y as f64;
+                let x = new_content_rect.min.x as f64;
+                let y = new_content_rect.min.y as f64;
                 Affine::new([scale, 0.0, 0.0, scale, x, y])
             };
             for (webview_id, webview) in window.webviews() {
@@ -638,7 +356,10 @@ impl Gui {
                     });
                 }
             }
-            let size = Size2D::new(available_rect.width(), available_rect.height()) * scale;
+
+            // If the layout changed size, then update the size of the WebView and also
+            // the size of its RenderingContext.
+            let size = Size2D::new(new_content_rect.width(), new_content_rect.height()) * scale;
             if let Some(webview) = window.active_webview() &&
                 size != webview.size()
             {
@@ -653,7 +374,7 @@ impl Gui {
                     ctx.clone(),
                     LayerId::new(Order::Tooltip, Id::new("tooltip")),
                     "tooltip layer".into(),
-                    pos2(available_rect.max.x, available_rect.max.y),
+                    pos2(new_content_rect.min.x, new_content_rect.max.y),
                 )
                 .show(|ui| ui.add(Label::new(status_text.clone()).extend()));
             }
@@ -662,7 +383,7 @@ impl Gui {
 
             if let Some(render_to_parent) = rendering_context.render_to_parent_callback() {
                 ctx.layer_painter(LayerId::background()).add(PaintCallback {
-                    rect: available_rect,
+                    rect: new_content_rect,
                     callback: Arc::new(CallbackFn::new(move |info, painter| {
                         let clip = info.viewport_in_pixels();
                         let rect_in_parent = Rect::new(
@@ -672,6 +393,39 @@ impl Gui {
                         render_to_parent(painter.gl(), rect_in_parent)
                     })),
                 });
+            }
+
+            // Round the corners of the web content like Zen does, by painting a thick
+            // background-coloured stroke whose inner edge is the rounded content rect.
+            if new_content_rect != full_rect {
+                let thickness = CONTENT_RADIUS * 2.0;
+                ctx.layer_painter(LayerId::new(Order::Middle, Id::new("content-corners")))
+                    .rect_stroke(
+                        new_content_rect.expand(thickness / 2.0),
+                        CornerRadius::same((CONTENT_RADIUS + thickness / 2.0) as u8),
+                        Stroke::new(thickness, background),
+                        StrokeKind::Middle,
+                    );
+            }
+
+            if let Some(sidebar_rect) = new_sidebar_rect {
+                sidebar.paint(sidebar_rect, scale);
+                if let Some(render_to_parent) =
+                    sidebar.rendering_context().render_to_parent_callback()
+                {
+                    ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("sidebar")))
+                        .add(PaintCallback {
+                            rect: sidebar_rect,
+                            callback: Arc::new(CallbackFn::new(move |info, painter| {
+                                let clip = info.viewport_in_pixels();
+                                let rect_in_parent = Rect::new(
+                                    Point2D::new(clip.left_px, clip.from_bottom_px),
+                                    Size2D::new(clip.width_px, clip.height_px),
+                                );
+                                render_to_parent(painter.gl(), rect_in_parent)
+                            })),
+                        });
+                }
             }
         });
 
@@ -704,43 +458,6 @@ impl Gui {
         self.rendering_context.parent_context().present();
     }
 
-    /// Updates the location field from the given [`RunningAppState`], unless the user has started
-    /// editing it without clicking Go, returning true iff it has changed (needing an egui update).
-    fn update_location_in_toolbar(&mut self, window: &ServoShellWindow) -> bool {
-        // User edited without clicking Go?
-        if self.location_dirty {
-            return false;
-        }
-
-        let current_url_string = window
-            .active_webview()
-            .and_then(|webview| Some(webview.url()?.to_string()));
-        match current_url_string {
-            Some(location) if location != self.location => {
-                self.location = location;
-                true
-            },
-            _ => false,
-        }
-    }
-
-    fn update_load_status(&mut self, window: &ServoShellWindow) -> bool {
-        let state_status = window
-            .active_webview()
-            .map(|webview| webview.load_status())
-            .unwrap_or(LoadStatus::Complete);
-        let old_status = std::mem::replace(&mut self.load_status, state_status);
-        let status_changed = old_status != self.load_status;
-
-        // When the load status changes, we want the new changes to the URL to start
-        // being reflected in the location bar.
-        if status_changed {
-            self.location_dirty = false;
-        }
-
-        status_changed
-    }
-
     fn update_status_text(&mut self, window: &ServoShellWindow) -> bool {
         let state_status = window
             .active_webview()
@@ -749,27 +466,11 @@ impl Gui {
         old_status != self.status_text
     }
 
-    fn update_can_go_back_and_forward(&mut self, window: &ServoShellWindow) -> bool {
-        let (can_go_back, can_go_forward) = window
-            .active_webview()
-            .map(|webview| (webview.can_go_back(), webview.can_go_forward()))
-            .unwrap_or((false, false));
-        let old_can_go_back = std::mem::replace(&mut self.can_go_back, can_go_back);
-        let old_can_go_forward = std::mem::replace(&mut self.can_go_forward, can_go_forward);
-        old_can_go_back != self.can_go_back || old_can_go_forward != self.can_go_forward
-    }
-
-    /// Updates all fields taken from the given [`ServoShellWindow`], such as the location field.
-    /// Returns true iff the egui needs an update.
+    /// Updates all fields taken from the given [`ServoShellWindow`] and pushes fresh state to
+    /// the sidebar page. Returns true iff the egui needs an update.
     pub(crate) fn update_webview_data(&mut self, window: &ServoShellWindow) -> bool {
-        // Note: We must use the "bitwise OR" (|) operator here instead of "logical OR" (||)
-        //       because logical OR would short-circuit if any of the functions return true.
-        //       We want to ensure that all functions are called. The "bitwise OR" operator
-        //       does not short-circuit.
-        self.update_load_status(window) |
-            self.update_location_in_toolbar(window) |
-            self.update_status_text(window) |
-            self.update_can_go_back_and_forward(window)
+        self.sidebar.push_state(window);
+        self.update_status_text(window)
     }
 
     /// Returns true if a redraw is required after handling the provided event.
@@ -835,12 +536,9 @@ fn embedder_image_to_egui_image(image: &Image) -> egui::ColorImage {
     }
 }
 
-/// Uploads all favicons that have not yet been processed to the GPU.
-fn load_pending_favicons(
-    ctx: &egui::Context,
-    window: &ServoShellWindow,
-    texture_cache: &mut HashMap<WebViewId, (egui::TextureHandle, egui::load::SizedTexture)>,
-) {
+
+/// Converts all favicons that have not yet been processed into PNG data URLs for the sidebar.
+fn load_pending_favicons(window: &ServoShellWindow, sidebar: &mut Sidebar) {
     for id in window.take_pending_favicon_loads() {
         let Some(webview) = window.webview_by_id(id) else {
             continue;
@@ -849,15 +547,16 @@ fn load_pending_favicons(
             continue;
         };
 
-        let egui_image = embedder_image_to_egui_image(&favicon);
-        let handle = ctx.load_texture(format!("favicon-{id:?}"), egui_image, Default::default());
-        let texture = egui::load::SizedTexture::new(
-            handle.id(),
-            egui::vec2(favicon.width as f32, favicon.height as f32),
-        );
-
-        // We don't need the handle anymore but we can't drop it either since that would cause
-        // the texture to be freed.
-        texture_cache.insert(id, (handle, texture));
+        let image = embedder_image_to_egui_image(&favicon);
+        let rgba = image
+            .pixels
+            .iter()
+            .flat_map(|pixel| pixel.to_srgba_unmultiplied())
+            .collect();
+        if let Some(data_url) =
+            png_data_url(image.size[0] as u32, image.size[1] as u32, rgba)
+        {
+            sidebar.set_favicon(id, data_url);
+        }
     }
 }
