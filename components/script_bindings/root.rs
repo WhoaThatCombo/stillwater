@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::rc::Rc;
@@ -394,6 +394,10 @@ where
 /// [cstack]: https://developer.mozilla.org/en-US/docs/Mozilla/Projects/SpiderMonkey/Internals/GC/Exact_Stack_Rooting
 pub struct RootCollection {
     roots: UnsafeCell<Vec<*const dyn JSTraceable>>,
+    /// Where the last root was removed from. Dropping a `Vec` of roots removes them front to
+    /// back, so the next one is usually in the slot after it; checking there first keeps that
+    /// O(1) instead of a search through every root.
+    last_removed: Cell<usize>,
 }
 
 impl RootCollection {
@@ -402,6 +406,7 @@ impl RootCollection {
     pub const fn new() -> RootCollection {
         RootCollection {
             roots: UnsafeCell::new(vec![]),
+            last_removed: Cell::new(0),
         }
     }
 
@@ -415,11 +420,17 @@ impl RootCollection {
     unsafe fn unroot(&self, object: *const dyn JSTraceable) {
         assert_in_script();
         let roots = unsafe { &mut *self.roots.get() };
-        match roots
-            .iter()
-            .rposition(|r| std::ptr::addr_eq(*r as *const (), object as *const ()))
-        {
+        let is_object =
+            |r: &*const dyn JSTraceable| std::ptr::addr_eq(*r as *const (), object as *const ());
+        let next = self.last_removed.get() + 1;
+        let found = if roots.get(next).is_some_and(is_object) {
+            Some(next)
+        } else {
+            roots.iter().rposition(is_object)
+        };
+        match found {
             Some(idx) => {
+                self.last_removed.set(idx);
                 // Partial inlining of `Vec::swap_remove` to avoid having to read and return the value since
                 // we don't care about it, doing less work in our case.
                 // SAFETY: the copy source and destination are derived from valid positions in the vector.

@@ -11,6 +11,12 @@ use crate::realms::enter_auto_realm;
 
 pub(crate) fn load_script(head: &HTMLHeadElement) {
     let doc = head.owner_document();
+    // Only for a page shown in the window, and only once. A `<head>` also appears in documents
+    // made by DOMParser or createHTMLDocument (and a page may insert another one); running the
+    // user scripts for those would run them against the window's page again each time.
+    if !doc.has_browsing_context() || !doc.take_user_scripts_turn() {
+        return;
+    }
     let userscripts = doc.window().userscripts().to_owned();
     if userscripts.is_empty() {
         return;

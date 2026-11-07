@@ -602,6 +602,9 @@ pub(crate) struct Document {
     active_parser_was_aborted: Cell<bool>,
     /// Whether the unload event has already been fired.
     fired_unload: Cell<bool>,
+    /// Whether the embedder's user scripts have been queued for this document. They run once,
+    /// when its first `<head>` is inserted.
+    user_scripts_queued: Cell<bool>,
     /// List of responsive images
     responsive_images: DomRefCell<Vec<Dom<HTMLImageElement>>>,
 
@@ -1112,6 +1115,11 @@ impl Document {
     }
 
     #[inline]
+    /// Returns true the first time it is called: the embedder's user scripts should be queued.
+    pub(crate) fn take_user_scripts_turn(&self) -> bool {
+        !self.user_scripts_queued.replace(true)
+    }
+
     pub(crate) fn has_browsing_context(&self) -> bool {
         self.has_browsing_context
     }
@@ -4473,6 +4481,7 @@ impl Document {
             salvageable: Cell::new(true),
             active_parser_was_aborted: Cell::new(false),
             fired_unload: Cell::new(false),
+            user_scripts_queued: Cell::new(false),
             responsive_images: Default::default(),
             navigation_timing: Default::default(),
             resource_fetch_timing: RefCell::new(None),
