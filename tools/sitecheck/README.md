@@ -2,9 +2,16 @@
 
 Sweeps websites through Stillwater (Servo) and explains why the ones that don't work fail.
 
-Each site loads headlessly in its own isolated Stillwater, with its own log, cache and profile.
-A probe script injected into every page (`probe/probe.js`) reports what the page actually shows,
-and Stillwater's output supplies network failures, script errors and crashes.
+Each site loads headlessly in its own isolated Stillwater, with its own log, cache and profile,
+driven over WebDriver. A probe script injected into every page (`probe/probe.js`) collects
+script errors from the start, and once the page has loaded sitecheck asks it what the page
+shows and takes a screenshot. Stillwater's output supplies network failures, rejected CSS and
+crashes. A site takes 6 to 10 seconds unless it's slow to load.
+
+A page that keeps Stillwater busy makes the probe wait: some real sites run one script for
+40 s. Stillwater stops scripts that run for over 60 s without a break
+(`STILLWATER_SLOW_SCRIPT_SECONDS`), so a page stuck in an endless loop can't stall a run. `--legacy` uses the old method instead: Stillwater's `-o`
+screenshot and the probe's console output, with every site taking the full `--seconds`.
 
 ## Run it
 
@@ -46,6 +53,24 @@ Fixing the top entries in Servo helps the most sites.
 
 Screenshots are taken 6 s after the page loads (`--shot-delay`), since many pages fade their
 content in.
+
+## Driving Stillwater from your own tests
+
+`driver.py` is the small WebDriver client sitecheck uses, with no dependencies:
+
+```python
+from driver import Stillwater
+
+with Stillwater(exe, profile_dir, log_file) as browser:
+    browser.navigate("https://example.com/")
+    print(browser.execute("return document.title"))
+    browser.screenshot("shot.png")
+```
+
+Stillwater speaks standard W3C WebDriver (Servo's implementation), so other clients such as
+Selenium or WebdriverIO should work too, though only `driver.py` has been tried: start it with `--webdriver=4444` (add `--headless` for no window) and connect to
+`http://127.0.0.1:4444`. Set `STILLWATER_CONFIG_DIR` to a scratch folder so tests don't touch
+your own profile.
 
 ## Broken-site reports
 

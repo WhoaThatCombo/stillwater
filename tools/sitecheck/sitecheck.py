@@ -34,6 +34,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from driver import Stillwater, WebDriverError  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 DEFAULT_EXE = REPO / "target" / "release" / ("servoshell.exe" if os.name == "nt" else "servoshell")
@@ -171,23 +174,19 @@ def check_site(url: str, category: str, args, run_dir: Path) -> Result:
         "STILLWATER_NO_UPDATE_CHECK": "1",
         # script::dom::window logs every CSS declaration/rule Stillwater rejects.
         "RUST_LOG": "warn,script::dom::window=info",
-        # Screenshot a while after load: many pages fade their content in.
-        "STILLWATER_SCREENSHOT_DELAY_MS": str(int(args.shot_delay * 1000)),
     })
-    command = [
-        str(args.exe), "--headless", "--window-size=1280x800", "-o", str(png),
+    browser_args = [
         f"--userscripts={HERE / 'probe'}",
         f"--pref=network_http_disk_cache={profile / 'cache'}",
-        *args.extra, url,
+        *args.extra,
     ]
     started = time.monotonic()
     with open(site_dir / "output.txt", "wb") as output:
-        process = subprocess.Popen(command, env=env, stdout=output, stderr=subprocess.STDOUT)
-        try:
-            process.wait(timeout=args.seconds)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+        if args.legacy:
+            run_legacy(url, args, env, browser_args, png, output)
+            probe = None
+        else:
+            probe = run_webdriver(url, args, env, browser_args, profile, log, png, output)
     result.seconds = round(time.monotonic() - started, 1)
     shutil.rmtree(profile, ignore_errors=True)
 
@@ -202,15 +201,17 @@ def check_site(url: str, category: str, args, run_dir: Path) -> Result:
         if "page load Complete" in line and result.complete is None:
             result.complete = float(parts[0])
 
-    # What the probe saw (the last report wins: "settled" after "load").
-    probe = {}
-    for line in text:
-        index = line.find("__sitecheck__")
-        if index != -1:
-            try:
-                probe = json.loads(line[index + len("__sitecheck__"):])
-            except json.JSONDecodeError:
-                pass
+    # What the probe saw. In legacy mode it prints its reports; the last one wins ("settled"
+    # after "load").
+    if probe is None:
+        probe = {}
+        for line in text:
+            index = line.find("__sitecheck__")
+            if index != -1:
+                try:
+                    probe = json.loads(line[index + len("__sitecheck__"):])
+                except json.JSONDecodeError:
+                    pass
     result.title = probe.get("title", "")
     result.text_length = int(probe.get("textLength", 0) or 0)
     result.elements = int(probe.get("elements", 0) or 0)
@@ -256,9 +257,58 @@ def check_site(url: str, category: str, args, run_dir: Path) -> Result:
     return result
 
 
+def run_webdriver(url, args, env, browser_args, profile, log, png, output) -> dict:
+    """Load the page over WebDriver, ask the probe for its report, screenshot it."""
+    # Same total budget as legacy mode: the load, then the screenshot delay.
+    page_load = max(5.0, args.seconds - args.shot_delay)
+    # Some pages keep Servo busy for 40 s in one go and then work, so the probe may have to
+    # wait; Stillwater stops scripts stuck for longer than 60 s, letting the probe run.
+    browser = Stillwater(args.exe, profile, log, args=browser_args, env=env, output=output,
+                         page_load_seconds=page_load, script_seconds=75)
+    probe = {}
+    deadline = time.monotonic() + args.seconds + 15
+    try:
+        browser.start_session()
+        try:
+            browser.navigate(url)
+        except WebDriverError as error:
+            # A page that never finishes loading still gets probed and screenshotted.
+            if error.error != "timeout":
+                raise
+        # Many pages fade their content in after load.
+        time.sleep(args.shot_delay)
+        probe = browser.execute('return window.__sitecheck ? window.__sitecheck("settled") : null') or {}
+        # Screenshots wait for images and fonts to finish loading, and the WebDriver server
+        # gives up after 10 s; busy pages get a few tries.
+        while True:
+            try:
+                browser.screenshot(png)
+                break
+            except WebDriverError as error:
+                if error.error != "timeout" or time.monotonic() > deadline:
+                    raise
+    except (WebDriverError, OSError, ValueError) as error:
+        output.write(f"\nsitecheck: WebDriver: {error}\n".encode())
+    finally:
+        browser.quit()
+    return probe
+
+
+def run_legacy(url, args, env, browser_args, png, output) -> None:
+    """Load the page with `-o`: Stillwater screenshots it and exits; the probe prints its reports."""
+    env = dict(env, STILLWATER_SCREENSHOT_DELAY_MS=str(int(args.shot_delay * 1000)))
+    command = [str(args.exe), "--headless", "--window-size=1280x800", "-o", str(png), *browser_args, url]
+    process = subprocess.Popen(command, env=env, stdout=output, stderr=subprocess.STDOUT)
+    try:
+        process.wait(timeout=args.seconds)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def classify(result: Result, probe: dict, text: list[str]) -> None:
     error_page = any("Could not load the requested page" in line for line in text) or \
-        "Could not load" in (result.title or "")
+        any(phrase in (result.title or "") for phrase in ("Could not load", "Error loading page"))
     if result.panics:
         result.status, result.diagnosis = CRASH, "Stillwater crashed: " + result.panics[0]
     elif error_page or (not probe and result.network_errors and result.complete is None):
@@ -409,6 +459,8 @@ def main() -> int:
     parser.add_argument("--compare", help="label of a previous run to diff against")
     parser.add_argument("--exe", type=Path, default=DEFAULT_EXE, help="servoshell executable")
     parser.add_argument("--out", type=Path, default=HERE / "out", help="output folder")
+    parser.add_argument("--legacy", action="store_true",
+                        help="drive Stillwater with -o and console output instead of WebDriver")
     parser.add_argument("extra", nargs="*", help="extra Stillwater arguments (after --)")
     args = parser.parse_args()
 

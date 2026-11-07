@@ -158,6 +158,7 @@ use crate::event_loop::document_collection::DocumentCollection;
 use crate::event_loop::document_loader::DocumentLoader;
 use crate::event_loop::script_mutation_observers::ScriptMutationObservers;
 use crate::event_loop::script_window_proxies::ScriptWindowProxies;
+use crate::event_loop::slow_script::{SlowScriptWatchdog, WatchedHangMonitor};
 use crate::event_loop::svg_font::SvgFontResolver;
 use crate::event_loop::webdriver_handlers::{self, jsval_to_webdriver};
 use crate::fetch::network_listener::submit_timing;
@@ -329,7 +330,7 @@ pub struct ScriptThread {
 
     /// The dedicated means of communication with the background-hang-monitor for this script-thread.
     #[no_trace]
-    background_hang_monitor: Box<dyn BackgroundHangMonitor>,
+    background_hang_monitor: WatchedHangMonitor,
     /// A flag set to `true` by the BHM on exit, and checked from within the interrupt handler.
     closing: Arc<AtomicBool>,
 
@@ -454,8 +455,16 @@ unsafe extern "C" fn interrupt_callback(_cx: *mut UnsafeJSContext) -> bool {
     let res = ScriptThread::can_continue_running();
     if !res {
         ScriptThread::prepare_for_shutdown();
+        return false;
     }
-    res
+    // Stillwater: stop a script that has run too long without a break (see slow_script.rs).
+    // Returning false ends the script with an uncatchable error; the page carries on.
+    !with_script_thread(|script_thread| {
+        script_thread
+            .background_hang_monitor
+            .watchdog
+            .take_interrupt()
+    })
 }
 
 /// In the event of thread panic, all data on the stack runs its destructor. However, there
@@ -898,6 +907,10 @@ impl ScriptThread {
             Duration::from_millis(5000),
             Box::new(background_hang_monitor_exit_signal),
         );
+        let background_hang_monitor = WatchedHangMonitor {
+            inner: background_hang_monitor,
+            watchdog: SlowScriptWatchdog::new(runtime.thread_safe_js_context()),
+        };
 
         let (image_cache_sender, image_cache_receiver) = unbounded();
 

@@ -3,8 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 //
 // sitecheck probe, injected into every page via `servoshell --userscripts`.
-// Reports what the page actually shows as console lines starting with "__sitecheck__",
-// which sitecheck.py reads from Stillwater's output.
+// Reports what the page actually shows. sitecheck.py asks for the report over WebDriver
+// (window.__sitecheck); with --legacy it reads console lines starting with "__sitecheck__"
+// from Stillwater's output instead.
 
 (function () {
   "use strict";
@@ -37,15 +38,25 @@
   function oversized() {
     const limit = window.innerWidth * 1.3;
     const found = [];
+    // Big pages (10,000+ elements) can take seconds to measure; look at what fits in 2 s.
+    const deadline = performance.now() + 2000;
+    // Width each ancestor clips its content to (Infinity if it doesn't), measured once each.
+    const clips = new Map();
+    function clip(element) {
+      let width = clips.get(element);
+      if (width === undefined) {
+        width = getComputedStyle(element).overflowX !== "visible" ? element.getBoundingClientRect().width : Infinity;
+        clips.set(element, width);
+      }
+      return width;
+    }
     for (const element of document.querySelectorAll("body *")) {
-      if (found.length >= 5) break;
+      if (found.length >= 5 || performance.now() > deadline) break;
       const rect = element.getBoundingClientRect();
       if (rect.width <= limit || rect.bottom < 0 || rect.top > window.innerHeight * 3) continue;
       let visible = rect.width;
       for (let parent = element.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
-        if (getComputedStyle(parent).overflowX !== "visible") {
-          visible = Math.min(visible, parent.getBoundingClientRect().width);
-        }
+        visible = Math.min(visible, clip(parent));
       }
       if (visible <= window.innerWidth * 1.1) continue;
       const style = getComputedStyle(element);
@@ -56,7 +67,7 @@
     return found;
   }
 
-  function report(phase) {
+  function collect(phase) {
     try {
       const body = document.body;
       const text = body ? (body.innerText || body.textContent || "") : "";
@@ -83,11 +94,18 @@
           "PerformanceObserver", "AbortController", "TextDecoder", "crypto",
         ].filter((name) => typeof window[name] === "undefined"),
       };
-      log("__sitecheck__" + JSON.stringify(data));
+      return data;
     } catch (error) {
-      log("__sitecheck__" + JSON.stringify({ phase, probeError: String(error) }));
+      return { phase, probeError: String(error) };
     }
   }
+
+  function report(phase) {
+    log("__sitecheck__" + JSON.stringify(collect(phase)));
+  }
+
+  // sitecheck's WebDriver mode asks for the report itself (`return window.__sitecheck("settled")`).
+  Object.defineProperty(window, "__sitecheck", { value: collect });
 
   if (document.readyState === "complete") report("load");
   else window.addEventListener("load", () => report("load"));
