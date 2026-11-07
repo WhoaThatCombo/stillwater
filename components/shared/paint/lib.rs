@@ -544,6 +544,9 @@ impl PainterSurfmanDetailsMap {
     }
 }
 
+/// Stillwater: see `pixels::set_discardable_images_enabled`.
+pub use pixels::set_discardable_images_enabled;
+
 /// This trait is used as a bridge between the different GL clients
 /// in Servo that handles WebRender ExternalImages and the WebRender
 /// ExternalImageHandler API.
@@ -607,6 +610,9 @@ pub struct WebRenderExternalImageHandlers {
     /// This is shared with the WebGL, WebGPU, and hardware-accelerated media threads and
     /// all other instances of [`WebRenderExternalImageHandlers`] -- one per WebRender instance.
     id_manager: WebRenderExternalImageIdManager,
+    /// Stillwater: pixels of discardable images (see `pixels::ImageBytes`) WebRender has
+    /// locked, with how many times, kept alive until unlocked.
+    locked_images: FxHashMap<u64, (Arc<Vec<u8>>, usize)>,
 }
 
 impl WebRenderExternalImageHandlers {
@@ -616,6 +622,7 @@ impl WebRenderExternalImageHandlers {
             media_handler: Default::default(),
             webgpu_handler: Default::default(),
             id_manager,
+            locked_images: Default::default(),
         }
     }
 
@@ -647,6 +654,25 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
         _channel_index: u8,
         _is_composited: bool,
     ) -> ExternalImage<'_> {
+        if key.0 & pixels::DISCARDABLE_IMAGE_ID_BIT != 0 {
+            let entry = match self.locked_images.entry(key.0) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let Some(bytes) = pixels::lock_external_image(key.0) else {
+                        return ExternalImage {
+                            uv: TexelRect::new(0.0, 0.0, 0.0, 0.0),
+                            source: ExternalImageSource::Invalid,
+                        };
+                    };
+                    entry.insert((bytes, 0))
+                },
+            };
+            entry.1 += 1;
+            return ExternalImage {
+                uv: TexelRect::new(0.0, 0.0, 0.0, 0.0),
+                source: ExternalImageSource::RawData(&entry.0[..]),
+            };
+        }
         let handler_type = self
             .id_manager()
             .get(&key)
@@ -687,6 +713,15 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
     /// Unlock the external image. The WR should not read the image
     /// content after this call.
     fn unlock(&mut self, key: ExternalImageId, _channel_index: u8) {
+        if key.0 & pixels::DISCARDABLE_IMAGE_ID_BIT != 0 {
+            if let Some(entry) = self.locked_images.get_mut(&key.0) {
+                entry.1 -= 1;
+                if entry.1 == 0 {
+                    self.locked_images.remove(&key.0);
+                }
+            }
+            return;
+        }
         let handler_type = self
             .id_manager()
             .get(&key)

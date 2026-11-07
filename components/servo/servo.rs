@@ -1042,6 +1042,10 @@ impl Servo {
             ))
         }
 
+        // Stillwater: large decoded images can drop their pixels and decode them again. Their
+        // WebRender ids are looked up in this process, so only when content runs here too.
+        paint_api::set_discardable_images_enabled(!opts.multiprocess);
+
         // Important that this call is done in a single-threaded fashion, we
         // can't defer it after `create_constellation` has started.
         let js_engine_setup = if !opts.multiprocess {

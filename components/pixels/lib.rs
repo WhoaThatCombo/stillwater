@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 mod decoding;
+mod discardable;
 mod snapshot;
 
 use std::borrow::Cow;
@@ -27,6 +28,10 @@ use webrender_api::{
 };
 
 use crate::decoding::ServoImageDecoder;
+pub use crate::discardable::{
+    DISCARDABLE_IMAGE_ID_BIT, ImageBytes, discardable_decoded_bytes, lock_external_image,
+    set_discardable_images_enabled,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
 pub enum FilterQuality {
@@ -304,8 +309,9 @@ pub struct RasterImage {
     pub id: Option<ImageKey>,
     pub cors_status: CorsStatus,
     pub load_time: Option<CrossProcessInstant>,
-    #[conditional_malloc_size_of]
-    pub bytes: Arc<Vec<u8>>,
+    /// The pixels of all frames. Large still images can drop these and decode them again
+    /// (see [`ImageBytes`]); use [`ImageBytes::get`] to read them.
+    pub bytes: ImageBytes,
     pub frames: Vec<ImageFrame>,
     /// Whether or not all of the frames of this image are opaque.
     pub is_opaque: bool,
@@ -344,15 +350,21 @@ impl ImageFrame {
     }
 }
 
-/// A non-owning reference to the data of an [ImageFrame]
-pub struct ImageFrameView<'a> {
+/// The data of an [ImageFrame].
+pub struct ImageFrameView {
     pub delay: Option<Duration>,
-    pub bytes: &'a [u8],
+    /// The pixels of the whole image; this frame's are at `byte_range`.
+    pub image_bytes: Arc<Vec<u8>>,
+    pub byte_range: Range<usize>,
     pub width: u32,
     pub height: u32,
 }
 
-impl ImageFrameView<'_> {
+impl ImageFrameView {
+    pub fn bytes(&self) -> &[u8] {
+        &self.image_bytes[self.byte_range.clone()]
+    }
+
     pub fn delay(&self) -> Option<Duration> {
         self.delay.map(sensible_delay)
     }
@@ -363,20 +375,32 @@ impl RasterImage {
         self.frames.len() > 1
     }
 
-    fn frame_view<'image>(&'image self, frame: &ImageFrame) -> ImageFrameView<'image> {
+    fn frame_view(&self, frame: &ImageFrame) -> ImageFrameView {
         ImageFrameView {
             delay: frame.delay,
-            bytes: self.bytes.get(frame.byte_range.clone()).unwrap(),
+            image_bytes: self.bytes.get(),
+            byte_range: frame.byte_range.clone(),
             width: frame.width,
             height: frame.height,
         }
     }
 
-    pub fn frame(&self, index: usize) -> Option<ImageFrameView<'_>> {
+    pub fn frame(&self, index: usize) -> Option<ImageFrameView> {
         self.frames.get(index).map(|frame| self.frame_view(frame))
     }
 
-    pub fn first_frame(&self) -> ImageFrameView<'_> {
+    /// Stillwater: let a still image drop its pixels when memory is tight, keeping `encoded`
+    /// (the file it was decoded from) to decode them again. See [`ImageBytes`].
+    pub fn make_discardable(&mut self, encoded: &[u8]) {
+        if self.frames.len() != 1 ||
+            !matches!(self.format, PixelFormat::RGBA8 | PixelFormat::BGRA8)
+        {
+            return;
+        }
+        self.bytes.make_discardable(encoded, self.cors_status);
+    }
+
+    pub fn first_frame(&self) -> ImageFrameView {
         self.frame(0)
             .expect("All images should have at least one frame")
     }
@@ -399,7 +423,7 @@ impl RasterImage {
             size.cast(),
             format,
             alpha_mode,
-            self.bytes.clone(),
+            self.bytes.get(),
             self.frames[0].byte_range.clone(),
         )
     }
@@ -424,16 +448,17 @@ impl RasterImage {
         let (format, data, should_animate) = match self.format {
             PixelFormat::BGRA8 => (
                 WebRenderImageFormat::BGRA8,
-                GenericSharedMemory::from_arc_vec(self.bytes.clone()),
+                self.bytes.to_shared_memory(),
                 self.should_animate(),
             ),
             PixelFormat::RGBA8 => (
                 WebRenderImageFormat::RGBA8,
-                GenericSharedMemory::from_arc_vec(self.bytes.clone()),
+                self.bytes.to_shared_memory(),
                 self.should_animate(),
             ),
             PixelFormat::RGB8 => {
-                let frame_bytes = &self.bytes[frame.byte_range.clone()];
+                let all_bytes = self.bytes.get();
+                let frame_bytes = &all_bytes[frame.byte_range.clone()];
                 let mut bytes = Vec::with_capacity(frame_bytes.len() / 3 * 4);
                 for rgb in frame_bytes.chunks(3) {
                     bytes.extend_from_slice(&[rgb[2], rgb[1], rgb[0], 0xff]);
@@ -503,7 +528,7 @@ impl RasterImage {
             format: self.format,
             id: self.id,
             cors_status: self.cors_status,
-            bytes: Arc::new(GenericSharedMemory::from_arc_vec(self.bytes.clone())),
+            bytes: Arc::new(self.bytes.to_shared_memory()),
             frames: self.frames.clone(),
             is_opaque: self.is_opaque,
         })

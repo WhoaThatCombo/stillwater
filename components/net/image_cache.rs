@@ -119,7 +119,11 @@ fn decode_bytes_sync(
                 })
             })
     } else {
-        load_from_memory(bytes, cors).map(DecodedImage::Raster)
+        load_from_memory(bytes, cors).map(|mut image| {
+            // Stillwater: large still images may drop their pixels and decode them again.
+            image.make_discardable(bytes);
+            DecodedImage::Raster(image)
+        })
     };
 
     DecoderMsg { key, image }
@@ -131,6 +135,21 @@ fn set_webrender_image_key(
     image_key: WebRenderImageKey,
 ) {
     if image.id.is_some() {
+        return;
+    }
+
+    // Stillwater: discardable images are external images; WebRender asks for their pixels
+    // when it uploads them instead of keeping a copy.
+    if let Some(external) = image.bytes.external_image_data() &&
+        let Some(descriptor) = image.webrender_image_descriptor_and_offset_for_frame()
+    {
+        paint_api.add_image(
+            image_key,
+            descriptor,
+            SerializableImageData::External(external),
+            false,
+        );
+        image.id = Some(image_key);
         return;
     }
 
@@ -1230,7 +1249,7 @@ impl ImageCache for ImageCacheImpl {
                     },
                     format: PixelFormat::RGBA8,
                     frames: vec![frame],
-                    bytes: Arc::new(bytes),
+                    bytes: pixels::ImageBytes::new(Arc::new(bytes)),
                     id: None,
                     cors_status: vector_image.cors_status,
                     load_time: None,

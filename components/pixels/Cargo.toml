@@ -17,6 +17,7 @@ path = "lib.rs"
 euclid = { workspace = true }
 image = { workspace = true }
 log = { workspace = true }
+rustc-hash = { workspace = true }
 malloc_size_of = { workspace = true }
 malloc_size_of_derive = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

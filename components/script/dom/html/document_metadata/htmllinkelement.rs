@@ -24,7 +24,6 @@ use pixels::PixelFormat;
 use script_bindings::cell::DomRefCell;
 use script_bindings::root::Dom;
 use servo_arc::Arc;
-use servo_base::generic_channel::GenericSharedMemory;
 use servo_url::ServoUrl;
 use style::attr::AttrValue;
 use style::media_queries::MediaList as StyleMediaList;
@@ -900,9 +899,7 @@ impl HTMLLinkElement {
             let embedder_image = embedder_traits::Image::new(
                 frame.width,
                 frame.height,
-                std::sync::Arc::new(GenericSharedMemory::from_arc_vec(
-                    raster_image.bytes.clone(),
-                )),
+                std::sync::Arc::new(raster_image.bytes.to_shared_memory()),
                 raster_image.frames[0].byte_range.clone(),
                 format,
             );
