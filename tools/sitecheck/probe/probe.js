@@ -31,6 +31,31 @@
     if (errors.length < 30) errors.push("unhandled rejection: " + String(reason && (reason.message || reason)) + (where ? " @ " + where : ""));
   });
 
+  // Boxes much wider than the window that aren't clipped down to it. A real browser almost
+  // never shows these; in Stillwater they usually mean unsupported CSS let an image or video
+  // fall back to its natural size (GitHub's 2561px hero video, for one).
+  function oversized() {
+    const limit = window.innerWidth * 1.3;
+    const found = [];
+    for (const element of document.querySelectorAll("body *")) {
+      if (found.length >= 5) break;
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= limit || rect.bottom < 0 || rect.top > window.innerHeight * 3) continue;
+      let visible = rect.width;
+      for (let parent = element.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+        if (getComputedStyle(parent).overflowX !== "visible") {
+          visible = Math.min(visible, parent.getBoundingClientRect().width);
+        }
+      }
+      if (visible <= window.innerWidth * 1.1) continue;
+      const style = getComputedStyle(element);
+      if (style.visibility === "hidden" || style.opacity === "0") continue;
+      const name = element.tagName.toLowerCase() + (element.classList.length ? "." + element.classList[0] : "");
+      found.push(name.slice(0, 60) + " " + Math.round(rect.width) + "px");
+    }
+    return found;
+  }
+
   function report(phase) {
     try {
       const body = document.body;
@@ -48,6 +73,8 @@
         links: document.links.length,
         blocked,
         errors: errors.slice(0, 15),
+        oversized: oversized(),
+        scrollWidth: document.documentElement ? document.documentElement.scrollWidth : 0,
         // Web APIs pages commonly feature-detect; missing ones explain many breakages.
         missing: [
           "IntersectionObserver", "ResizeObserver", "MutationObserver", "customElements",

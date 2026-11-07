@@ -501,3 +501,16 @@ codegen-units = 1
 #
 # [patch."https://github.com/servo/<repository>"]
 # <crate> = { path = "/path/to/local/checkout" }
+
+# Stillwater: Servo's stylo plus a few patches (container query units, more media features).
+# Branch `stillwater` of https://github.com/WhoaThatCombo/stylo, based on the rev pinned above.
+# To work on it locally, point these at a checkout instead: `{ path = "../stylo/style" }` etc.
+[patch."https://github.com/servo/stylo"]
+selectors = { git = "https://github.com/WhoaThatCombo/stylo", rev = "46ffc6b2db0cfdd7dd993609a7797e94c9caf7ea" }
+servo_arc = { git = "https://github.com/WhoaThatCombo/stylo", rev = "46ffc6b2db0cfdd7dd993609a7797e94c9caf7ea" }
+stylo = { git = "https://github.com/WhoaThatCombo/stylo", rev = "46ffc6b2db0cfdd7dd993609a7797e94c9caf7ea" }
+stylo_atoms = { git = "https://github.com/WhoaThatCombo/stylo", rev = "46ffc6b2db0cfdd7dd993609a7797e94c9caf7ea" }
+stylo_dom = { git = "https://github.com/WhoaThatCombo/stylo", rev = "46ffc6b2db0cfdd7dd993609a7797e94c9caf7ea" }
+stylo_malloc_size_of = { git = "https://github.com/WhoaThatCombo/stylo", rev = "46ffc6b2db0cfdd7dd993609a7797e94c9caf7ea" }
+stylo_static_prefs = { git = "https://github.com/WhoaThatCombo/stylo", rev = "46ffc6b2db0cfdd7dd993609a7797e94c9caf7ea" }
+stylo_traits = { git = "https://github.com/WhoaThatCombo/stylo", rev = "46ffc6b2db0cfdd7dd993609a7797e94c9caf7ea" }

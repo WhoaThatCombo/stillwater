@@ -29,13 +29,23 @@ Results go to `tools/sitecheck/out/<label>/`: `report.html` (screenshots and dia
 | Works, slowly | Took more than 10 s to finish loading |
 | Partly works | Renders, but scripts fail (often a missing web feature) |
 | Broken | Very little content plus script errors |
+| Layout broken | Something on the page is far wider than the window, usually from unsupported CSS |
 | Blank page | Nothing visible rendered |
 | Blocked by a browser check | An anti-bot or "unsupported browser" page |
 | Network failure | The page itself failed to download (DNS, TLS, HTTP/2…) |
 | Crashed | Stillwater panicked |
 
-The report also ranks the **missing web features** guessed from script errors across all sites:
-fixing the top entries in Servo helps the most sites.
+The report also ranks, across all sites:
+
+- the **missing web features** guessed from script errors, and
+- the **unsupported CSS**: every declaration, selector and media query Stillwater rejected
+  (vendor-prefixed hacks left out). Rejected CSS is silently ignored, so it explains pages that
+  load fine but look wrong.
+
+Fixing the top entries in Servo helps the most sites.
+
+Screenshots are taken 6 s after the page loads (`--shot-delay`), since many pages fade their
+content in.
 
 ## Broken-site reports
 

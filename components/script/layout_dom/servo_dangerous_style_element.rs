@@ -490,7 +490,9 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
     }
 
     fn query_container_size(&self, _display: &Display) -> Size2D<Option<app_units::Au>> {
-        todo!();
+        // Layout doesn't size query containers yet. Reporting no size makes container query
+        // units (cqw, cqi...) fall back to the viewport, as they do when there's no container.
+        Size2D::new(None, None)
     }
 
     fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool {

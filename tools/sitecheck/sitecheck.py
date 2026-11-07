@@ -39,12 +39,13 @@ REPO = HERE.parent.parent
 DEFAULT_EXE = REPO / "target" / "release" / ("servoshell.exe" if os.name == "nt" else "servoshell")
 
 # Statuses, worst first.
-CRASH, NETWORK, BLOCKED, BLANK, BROKEN, PARTIAL, SLOW, OK = (
-    "crash", "network", "blocked", "blank", "broken", "partial", "slow", "ok")
-STATUS_ORDER = [CRASH, NETWORK, BLOCKED, BLANK, BROKEN, PARTIAL, SLOW, OK]
+CRASH, NETWORK, BLOCKED, BLANK, BROKEN, LAYOUT, PARTIAL, SLOW, OK = (
+    "crash", "network", "blocked", "blank", "broken", "layout", "partial", "slow", "ok")
+STATUS_ORDER = [CRASH, NETWORK, BLOCKED, BLANK, BROKEN, LAYOUT, PARTIAL, SLOW, OK]
 STATUS_LABEL = {
     CRASH: "Crashed", NETWORK: "Network failure", BLOCKED: "Blocked by a browser check",
-    BLANK: "Blank page", BROKEN: "Broken (script errors)", PARTIAL: "Partly works",
+    BLANK: "Blank page", BROKEN: "Broken (script errors)", LAYOUT: "Layout broken",
+    PARTIAL: "Partly works",
     SLOW: "Works, slowly", OK: "Works",
 }
 
@@ -57,6 +58,19 @@ API_PATTERNS = [
     re.compile(r"can't access property \"?([\w$]+)\"?"),
     re.compile(r"undefined has no properties"),
 ]
+# Stillwater logs each CSS declaration, rule or media query it rejects (see RUST_LOG below), like
+# "  12:40 Unsupported property declaration: 'text-wrap:pretty', OtherInvalidValue".
+CSS_ERROR = re.compile(r"^\s*\d+:\d+ ([A-Z][^:']+?): '?(.*?)'?, ([A-Za-z]+(?:\(.*\))?)\s*$")
+# Pseudo-classes and elements Stillwater supports; the rest of an invalid selector is the culprit.
+KNOWN_PSEUDOS = {
+    "not", "is", "where", "hover", "focus", "active", "visited", "link", "any-link", "checked",
+    "disabled", "enabled", "first-child", "last-child", "only-child", "nth-child", "nth-last-child",
+    "nth-of-type", "nth-last-of-type", "first-of-type", "last-of-type", "only-of-type", "root",
+    "empty", "before", "after", "placeholder", "selection", "focus-within", "focus-visible", "target",
+    "required", "optional", "valid", "invalid", "read-only", "read-write", "indeterminate", "lang",
+    "first-line", "first-letter", "marker", "default", "defined", "host", "slotted", "part",
+    "placeholder-shown", "autofill", "fullscreen", "scope", "in-range", "out-of-range", "dir",
+}
 NOISE_API = {"e", "t", "n", "r", "i", "o", "a", "s", "this", "undefined", "null", "window", "document"}
 
 
@@ -77,6 +91,8 @@ class Result:
     missing_apis: list[str] = field(default_factory=list)
     absent_globals: list[str] = field(default_factory=list)
     panics: list[str] = field(default_factory=list)
+    unsupported_css: list[str] = field(default_factory=list)
+    oversized: list[str] = field(default_factory=list)
     screenshot: str = ""
     blank_screenshot: bool = False
     seconds: float = 0.0
@@ -96,6 +112,34 @@ def api_name(message: str) -> str | None:
             name = match.group(1).split(".")[-1].strip("$\"'")
             if len(name) > 2 and name not in NOISE_API:
                 return name
+    return None
+
+
+def css_key(kind: str, body: str, reason: str) -> str | None:
+    """Group a rejected-CSS log line under the feature it's about, or None for vendor noise."""
+    body = body.strip().rstrip(";")
+    lower = body.lower()
+    if any(junk in lower for junk in ("-moz-", "-ms-", "-o-", "progid:", "expression(")) or body[:1] in "*_":
+        return None
+    if kind == "Unsupported property declaration":
+        prop, _, value = body.partition(":")
+        prop = prop.strip().lower()
+        if reason == "UnknownProperty" or not value:
+            return f"property {prop}"
+        value = re.sub(r"\s*!important", "", value.strip().lower())
+        value = re.sub(r"(?<![\w-])-?\d*\.?\d+", "0", value)
+        return f"{prop}: {value[:48]}"
+    if kind == "Invalid media rule":
+        features = re.findall(r"\(\s*([a-z-]+)\s*[:)<>=]", lower)
+        return "@media (" + ", ".join(dict.fromkeys(features)) + ")" if features else "@media " + lower[:40]
+    if body.startswith("@"):
+        return body.split()[0].split("(")[0].lower()
+    if kind == "Invalid rule":
+        pseudos = [name for name in re.findall(r"::?([a-z][a-z-]*)", lower)
+                   if name not in KNOWN_PSEUDOS and not name.startswith("-")]
+        return "selector :" + pseudos[0] if pseudos else None
+    if "descriptor" in kind:
+        return kind.split()[1] + " " + body.split(":")[0].strip().lower()
     return None
 
 
@@ -125,7 +169,10 @@ def check_site(url: str, category: str, args, run_dir: Path) -> Result:
         "STILLWATER_LOG_FILE": str(log),
         "STILLWATER_CONFIG_DIR": str(profile),
         "STILLWATER_NO_UPDATE_CHECK": "1",
-        "RUST_LOG": "warn",
+        # script::dom::window logs every CSS declaration/rule Stillwater rejects.
+        "RUST_LOG": "warn,script::dom::window=info",
+        # Screenshot a while after load: many pages fade their content in.
+        "STILLWATER_SCREENSHOT_DELAY_MS": str(int(args.shot_delay * 1000)),
     })
     command = [
         str(args.exe), "--headless", "--window-size=1280x800", "-o", str(png),
@@ -169,6 +216,7 @@ def check_site(url: str, category: str, args, run_dir: Path) -> Result:
     result.elements = int(probe.get("elements", 0) or 0)
     result.blocked_phrases = probe.get("blocked", []) or []
     result.absent_globals = probe.get("missing", []) or []
+    result.oversized = probe.get("oversized", []) or []
 
     # Errors from Stillwater's output.
     errors = []
@@ -184,6 +232,11 @@ def check_site(url: str, category: str, args, run_dir: Path) -> Result:
         match = SCRIPT_ERROR.search(line)
         if match:
             errors.append(match.group(4).strip())
+        css = CSS_ERROR.match(line)
+        if css:
+            key = css_key(*css.groups())
+            if key and key not in result.unsupported_css and len(result.unsupported_css) < 80:
+                result.unsupported_css.append(key)
     errors += probe.get("errors", []) or []
     seen = set()
     for message in errors:
@@ -223,6 +276,10 @@ def classify(result: Result, probe: dict, text: list[str]) -> None:
     elif result.text_length < 200 and result.script_errors and (result.blank_screenshot or result.elements < 300):
         result.status = BROKEN
         result.diagnosis = "Very little content and script errors: " + "; ".join(result.script_errors[:2])
+    elif result.oversized:
+        result.status = LAYOUT
+        result.diagnosis = ("Parts of the page are far wider than the window (" +
+                            ", ".join(result.oversized[:2]) + "), usually from unsupported CSS.")
     elif result.missing_apis or len(result.script_errors) >= 10:
         result.status = PARTIAL
         result.diagnosis = "Renders, but scripts fail" + (
@@ -253,6 +310,11 @@ def write_report(run_dir: Path, results: list[Result], label: str, previous: dic
         for api in r.missing_apis:
             api_sites.setdefault(api, []).append(slug(r.site))
     ranked = sorted(api_sites.items(), key=lambda item: -len(item[1]))
+    css_sites: dict[str, list[str]] = {}
+    for r in results:
+        for key in r.unsupported_css:
+            css_sites.setdefault(key, []).append(slug(r.site))
+    css_ranked = sorted(css_sites.items(), key=lambda item: -len(item[1]))
 
     def esc(value) -> str:
         return html.escape(str(value))
@@ -284,6 +346,7 @@ def write_report(run_dir: Path, results: list[Result], label: str, previous: dic
 </article>""")
 
     rows = "".join(f"<tr><td>{esc(api)}</td><td>{len(sites)}</td><td>{esc(', '.join(sites[:8]))}</td></tr>" for api, sites in ranked[:25])
+    css_rows = "".join(f"<tr><td><code>{esc(key)}</code></td><td>{len(sites)}</td><td>{esc(', '.join(sites[:8]))}</td></tr>" for key, sites in css_ranked[:60])
     summary = "".join(f'<li class="{s}"><b>{counts[s]}</b> {esc(STATUS_LABEL[s])}</li>' for s in STATUS_ORDER if counts[s])
     change_rows = "".join(
         f"<li class=\"{'better' if better else 'worse'}\">{esc(slug(site))}: {esc(STATUS_LABEL[a])} → {esc(STATUS_LABEL[b])}</li>"
@@ -308,7 +371,7 @@ h1 {{ margin:0 0 4px; font-weight:600; }} .muted {{ color:var(--muted); }}
 .diag {{ margin:6px 0 2px; }} .meta {{ margin:0; font-size:13px; color:var(--muted); }}
 details {{ font-size:13px; margin-top:6px; }} details ul {{ margin:4px 0; padding-left:18px; overflow-wrap:anywhere; }}
 .crash{{--c:#8e2bd4}} .network{{--c:#c43b2c}} .blocked{{--c:#d8731b}} .blank{{--c:#b8414f}} .broken{{--c:#c95a3a}}
-.partial{{--c:#c9a227}} .slow{{--c:#5b8bd6}} .ok{{--c:#2f9a62}}
+.layout{{--c:#c77d2b}} .partial{{--c:#c9a227}} .slow{{--c:#5b8bd6}} .ok{{--c:#2f9a62}}
 table {{ border-collapse:collapse; width:100%; background:var(--card); border-radius:10px; overflow:hidden; }}
 td, th {{ text-align:left; padding:6px 10px; border-bottom:1px solid var(--edge); font-size:14px; vertical-align:top; }}
 .better {{ color:#2f9a62; }} .worse {{ color:#c43b2c; }}
@@ -320,6 +383,11 @@ td, th {{ text-align:left; padding:6px 10px; border-bottom:1px solid var(--edge)
 <h2>Most common missing web features</h2>
 <p class="muted">Guessed from script errors. Fixing the top entries in Servo should help the most sites.</p>
 {f'<table><tr><th>Feature</th><th>Sites</th><th>Where</th></tr>{rows}</table>' if rows else '<p>None detected.</p>'}
+<h2>Most common unsupported CSS</h2>
+<p class="muted">Declarations, selectors and media queries Stillwater rejected, by number of sites using them
+(vendor-prefixed hacks left out). Rejected CSS is silently ignored, so popular entries here are likely
+causes of pages that look wrong.</p>
+{f'<table><tr><th>CSS</th><th>Sites</th><th>Where</th></tr>{css_rows}</table>' if css_rows else '<p>None detected.</p>'}
 <h2>Sites</h2>
 <div class="grid">{''.join(cards)}</div>
 </body></html>"""
@@ -335,6 +403,8 @@ def main() -> int:
     parser.add_argument("--category", action="append", help="only these catalog categories")
     parser.add_argument("--jobs", type=int, default=4, help="sites checked at once (default 4)")
     parser.add_argument("--seconds", type=int, default=25, help="time given to each site (default 25)")
+    parser.add_argument("--shot-delay", type=float, default=6,
+                        help="seconds after load to take the screenshot (default 6)")
     parser.add_argument("--label", default=time.strftime("run-%Y%m%d-%H%M%S"), help="name of this run")
     parser.add_argument("--compare", help="label of a previous run to diff against")
     parser.add_argument("--exe", type=Path, default=DEFAULT_EXE, help="servoshell executable")
@@ -366,6 +436,14 @@ def main() -> int:
             previous = {r["site"]: r["status"] for r in json.loads(previous_file.read_text("utf-8"))}
     report = write_report(run_dir, results, args.label, previous)
     working = sum(1 for r in results if r.status in (OK, SLOW, PARTIAL))
+    css_count: dict[str, int] = {}
+    for r in results:
+        for key in r.unsupported_css:
+            css_count[key] = css_count.get(key, 0) + 1
+    if css_count:
+        print("\nMost common unsupported CSS:")
+        for key, count in sorted(css_count.items(), key=lambda item: -item[1])[:15]:
+            print(f"  {count:4}  {key}")
     print(f"\n{working}/{len(results)} sites usable. Report: {report}")
     return 0
 

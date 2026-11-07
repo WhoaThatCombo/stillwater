@@ -239,6 +239,9 @@ pub(crate) struct RunningAppState {
     /// will be destroyed and shutdown will start at the end of the current event loop.
     exit_scheduled: Cell<bool>,
 
+    /// A screenshot deferred by `STILLWATER_SCREENSHOT_DELAY_MS`: when to take it, and of what.
+    deferred_screenshot: RefCell<Option<(std::time::Instant, WebView)>>,
+
     /// Whether the user has enabled experimental preferences.
     experimental_preferences_enabled: Cell<bool>,
 
@@ -306,6 +309,7 @@ impl RunningAppState {
             servo,
             achieved_stable_image: Default::default(),
             exit_scheduled: Default::default(),
+            deferred_screenshot: Default::default(),
             #[cfg(not(any(target_os = "android", target_env = "ohos")))]
             adblock: RefCell::new(crate::desktop::adblock::Adblock::new(
                 user_content_manager.clone(),
@@ -509,6 +513,17 @@ impl RunningAppState {
             window.handle_interface_commands(self, create_platform_window);
         }
 
+        let due = self
+            .deferred_screenshot
+            .borrow()
+            .as_ref()
+            .is_some_and(|(at, _)| std::time::Instant::now() >= *at);
+        if due {
+            if let Some((_, webview)) = self.deferred_screenshot.borrow_mut().take() {
+                self.take_output_screenshot(webview);
+            }
+        }
+
         if self.servoshell_preferences.exit_after_stable_image && self.achieved_stable_image.get() {
             self.schedule_exit();
         }
@@ -560,10 +575,27 @@ impl RunningAppState {
         }
 
         // Never request more than a single screenshot for now.
-        let achieved_stable_image = self.achieved_stable_image.clone();
-        if achieved_stable_image.get() {
+        if self.achieved_stable_image.get() || self.deferred_screenshot.borrow().is_some() {
             return;
         }
+
+        // Pages that fade their content in after loading look blank at load time, so tools
+        // like sitecheck can ask for the screenshot a while later.
+        let delay = std::env::var("STILLWATER_SCREENSHOT_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        if delay > 0 {
+            let at = std::time::Instant::now() + std::time::Duration::from_millis(delay);
+            *self.deferred_screenshot.borrow_mut() = Some((at, webview));
+            return;
+        }
+        self.take_output_screenshot(webview);
+    }
+
+    fn take_output_screenshot(&self, webview: WebView) {
+        let output_path = self.servoshell_preferences.output_image_path.clone();
+        let achieved_stable_image = self.achieved_stable_image.clone();
 
         webview.take_screenshot(None, move |image| {
             achieved_stable_image.set(true);
