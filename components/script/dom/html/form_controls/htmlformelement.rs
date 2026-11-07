@@ -1742,7 +1742,9 @@ impl FormSubmitterElement<'_> {
     }
 }
 
-pub(crate) trait FormControl: DomObject<ReflectorType = ()> + NodeTraits {
+pub(crate) trait FormControl:
+    DomObject<ReflectorType = script_bindings::reflector::AssociatedMemory> + NodeTraits
+{
     fn form_owner(&self) -> Option<DomRoot<HTMLFormElement>>;
     fn set_form_owner(&self, cx: &mut JSContext, form: Option<&HTMLFormElement>);
     fn to_html_element(&self) -> &HTMLElement;

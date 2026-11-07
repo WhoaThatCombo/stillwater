@@ -133,6 +133,10 @@ pub(crate) struct IntersectionObserver {
 
     /// Whether or not this [`IntersectionObserver`] is connected to its owning [`Document`].
     connected_to_document: Cell<bool>,
+
+    /// Stillwater: bumped by `disconnect()`, so that registrations left on elements this
+    /// observer stopped holding (see [`Self::release_removed_targets`]) know they're stale.
+    disconnect_generation: Cell<u32>,
 }
 
 impl IntersectionObserver {
@@ -156,6 +160,7 @@ impl IntersectionObserver {
             delay: Default::default(),
             track_visibility: Default::default(),
             connected_to_document: Cell::new(false),
+            disconnect_generation: Cell::new(0),
         }
     }
 
@@ -288,6 +293,17 @@ impl IntersectionObserver {
         if is_present {
             return;
         }
+        let existing = target
+            .get_intersection_observer_registration(self)
+            .map(|registration| registration.generation == self.disconnect_generation.get());
+        if existing == Some(true) {
+            // A removed target this observer let go of: keep observing it with its old state.
+            self.readd_target(target, no_gc);
+            return;
+        }
+        if existing == Some(false) {
+            target.remove_intersection_observer(self, no_gc);
+        }
 
         // Step 2
         // > Let intersectionObserverRegistration be an IntersectionObserverRegistration record with
@@ -313,6 +329,74 @@ impl IntersectionObserver {
             .add_rendering_update_reason(
                 RenderingUpdateReason::IntersectionObserverStartedObservingTarget,
             );
+    }
+
+    /// Stillwater: put a target that [`Self::release_removed_targets`] let go of back into
+    /// [[ObservationTargets]]. Its registration (and so its previous state) stayed on the element.
+    fn readd_target(&self, target: &Element, no_gc: &NoGC) {
+        if self
+            .observation_targets
+            .borrow()
+            .iter()
+            .any(|element| &**element == target)
+        {
+            return;
+        }
+        if self.observation_targets.borrow().is_empty() {
+            self.connect_to_owner();
+        }
+        self.observation_targets
+            .safe_borrow_mut(no_gc)
+            .push(Dom::from_ref(target));
+        target
+            .owner_window()
+            .Document()
+            .add_rendering_update_reason(
+                RenderingUpdateReason::IntersectionObserverStartedObservingTarget,
+            );
+    }
+
+    /// Stillwater: called when `target` is inserted into a document. If this observer let go of
+    /// it while it was removed, observe it again, as the spec's [[ObservationTargets]] never
+    /// dropped it.
+    pub(crate) fn target_reconnected(&self, target: &Element, no_gc: &NoGC) {
+        let current = target
+            .get_intersection_observer_registration(self)
+            .map(|registration| registration.generation == self.disconnect_generation.get());
+        match current {
+            Some(true) => self.readd_target(target, no_gc),
+            // `disconnect()` was called while the observer wasn't holding this target.
+            Some(false) => target.remove_intersection_observer(self, no_gc),
+            None => {},
+        }
+    }
+
+    /// Stillwater: stop holding targets that were removed from the document and have already
+    /// been reported as not intersecting. [[ObservationTargets]] is a strong list in Servo, so a
+    /// page that observes elements and drops them without `unobserve()` (feeds, ad and lazy-load
+    /// scripts) kept every one of them, and everything they hold, alive for good. Browsers hold
+    /// targets weakly. The element keeps its registration, so if it is inserted again
+    /// [`Self::target_reconnected`] puts it back and nothing observable changes: a removed
+    /// target stays not intersecting until it is reconnected.
+    fn release_removed_targets(&self, no_gc: &NoGC) {
+        let had_targets = !self.observation_targets.borrow().is_empty();
+        self.observation_targets
+            .safe_borrow_mut(no_gc)
+            .retain(|target| {
+                if target.upcast::<Node>().is_connected() {
+                    return true;
+                }
+                // Keep it until its last state (not intersecting) has been reported.
+                target
+                    .get_intersection_observer_registration(self)
+                    .is_none_or(|registration| {
+                        registration.previous_threshold_index.get().is_none() ||
+                            registration.previous_is_intersecting.get()
+                    })
+            });
+        if had_targets && self.observation_targets.borrow().is_empty() {
+            self.disconnect_from_owner();
+        }
     }
 
     /// <https://w3c.github.io/IntersectionObserver/#unobserve-target-element>
@@ -659,6 +743,7 @@ impl IntersectionObserver {
         time: CrossProcessInstant,
         root_bounds: Option<Rect<Au, CSSPixel>>,
     ) {
+        self.release_removed_targets(cx.no_gc());
         for target in &*self.observation_targets.borrow() {
             // Step 1
             // > Let registration be the IntersectionObserverRegistration record in target’s internal
@@ -821,6 +906,9 @@ impl IntersectionObserverMethods<crate::DomTypeHolder> for IntersectionObserver 
         });
         // > 2. Remove target from this’s internal [[ObservationTargets]] slot.
         self.observation_targets.safe_borrow_mut(no_gc).clear();
+        // Registrations on targets this observer let go of are now stale.
+        self.disconnect_generation
+            .set(self.disconnect_generation.get().wrapping_add(1));
 
         // We should remove this observer from the event loop.
         self.disconnect_from_owner();
@@ -864,6 +952,8 @@ pub(crate) struct IntersectionObserverRegistration {
     #[no_trace]
     last_update_time: Cell<CrossProcessInstant>,
     previous_is_visible: Cell<bool>,
+    /// Stillwater: the observer's `disconnect_generation` when this was created.
+    generation: u32,
 }
 
 impl IntersectionObserverRegistration {
@@ -879,6 +969,7 @@ impl IntersectionObserverRegistration {
             previous_is_intersecting: Cell::new(false),
             last_update_time: Cell::new(CrossProcessInstant::epoch()),
             previous_is_visible: Cell::new(false),
+            generation: observer.disconnect_generation.get(),
         }
     }
 }

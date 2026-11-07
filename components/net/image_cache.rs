@@ -8,6 +8,7 @@ use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use std::{mem, thread_local};
 
 use imsz::imsz_from_reader;
@@ -237,13 +238,27 @@ enum CacheResult<'a> {
 struct CompletedLoad {
     image_response: ImageResponse,
     id: PendingImageId,
+    /// Stillwater: since when nothing but this cache has held the decoded image.
+    unused_since: Option<Instant>,
 }
 
 impl CompletedLoad {
     fn new(image_response: ImageResponse, id: PendingImageId) -> CompletedLoad {
-        CompletedLoad { image_response, id }
+        CompletedLoad {
+            image_response,
+            id,
+            unused_since: None,
+        }
     }
 }
+
+/// Stillwater: how often a page's image cache looks for decoded images nothing uses any more.
+const UNUSED_IMAGE_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+/// Stillwater: how long a decoded image stays cached after the page stops using it, so that
+/// preloads (`new Image()`) and elements that are briefly detached keep theirs.
+const UNUSED_IMAGE_GRACE: Duration = Duration::from_secs(20);
+/// Stillwater: decoded images smaller than this (icons, avatars) are cheap to keep.
+const MIN_EVICTABLE_IMAGE_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, MallocSizeOf)]
 struct VectorImageData {
@@ -528,6 +543,9 @@ struct ImageCacheStore {
     /// Main struct to handle the cache of `WebRenderImageKey` and
     /// images that do not have a key yet.
     key_cache: KeyCache,
+
+    /// Stillwater: when [`Self::evict_unused_images`] last ran.
+    last_unused_image_sweep: Instant,
 }
 
 impl ImageCacheStore {
@@ -718,6 +736,46 @@ impl ImageCacheStore {
         for listener in pending_load.listeners {
             listener.respond(image_response.clone());
         }
+
+        self.evict_unused_images();
+    }
+
+    /// Stillwater: drop decoded raster images that nothing outside this cache has held for a
+    /// while. Elements showing an image (`<img>`, posters, layout's CSS image cache) keep their
+    /// own reference to it, so an image only this cache holds belongs to something that left the
+    /// page, like a post an infinite feed recycled. Without this, a page keeps every image it
+    /// ever decoded until it closes. If the URL is used again it is fetched (usually from the
+    /// HTTP cache) and decoded again.
+    fn evict_unused_images(&mut self) {
+        let now = Instant::now();
+        if now.duration_since(self.last_unused_image_sweep) < UNUSED_IMAGE_SWEEP_INTERVAL {
+            return;
+        }
+        self.last_unused_image_sweep = now;
+
+        let mut deletions: smallvec::SmallVec<[ImageUpdate; 1]> = smallvec::SmallVec::new();
+        self.completed_loads.retain(|_, load| {
+            let ImageResponse::Loaded(Image::Raster(image), _) = &load.image_response else {
+                return true;
+            };
+            if Arc::strong_count(image) > 1 || image.bytes.len() < MIN_EVICTABLE_IMAGE_BYTES {
+                load.unused_since = None;
+                return true;
+            }
+            let unused_since = *load.unused_since.get_or_insert(now);
+            if now.duration_since(unused_since) < UNUSED_IMAGE_GRACE {
+                return true;
+            }
+            if let Some(id) = image.id {
+                deletions.push(ImageUpdate::DeleteImage(id));
+            }
+            false
+        });
+        if !deletions.is_empty() {
+            debug!("Evicting {} unused decoded images", deletions.len());
+            self.paint_api
+                .update_images(self.webview_id.into(), deletions);
+        }
     }
 
     fn remove_loaded_image(
@@ -865,6 +923,7 @@ impl ImageCacheFactory for ImageCacheFactoryImpl {
                 webview_id,
                 key_cache: KeyCache::new(),
                 svg_rasterization_task_store: SvgRasterizationTaskStore::default(),
+                last_unused_image_sweep: Instant::now(),
             })),
             svg_id_image_id_map: Arc::new(Mutex::new(FxHashMap::default())),
             broken_image_icon_data: self.broken_image_icon_data.clone(),

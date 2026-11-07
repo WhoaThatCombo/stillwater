@@ -23,7 +23,9 @@ use rustc_hash::{FxBuildHasher, FxHashSet};
 use script_bindings::callback::{HasCallbackHolder, OwnerWindow, RootedCallback, TracedCallback};
 use script_bindings::cell::DomRefCell;
 use script_bindings::cformat;
-use script_bindings::reflector::{DomObject, Reflector, reflect_dom_object_with_proto};
+use script_bindings::reflector::{
+    AssociatedMemory, DomObject, Reflector, reflect_dom_object_with_proto,
+};
 use servo_constellation_traits::ConstellationInterest;
 use servo_url::ServoUrl;
 use style::str::HTML_SPACE_CHARACTERS;
@@ -436,7 +438,9 @@ type EventListenerMap = HashMapTracedValues<Atom, EventListeners, FxBuildHasher>
 
 #[dom_struct]
 pub struct EventTarget {
-    reflector_: Reflector,
+    /// Stillwater: `AssociatedMemory` lets elements tell the garbage collector about large
+    /// native memory they keep alive (see `HTMLImageElement::sync_image_memory`).
+    reflector_: Reflector<AssociatedMemory>,
     handlers: DomRefCell<Option<Box<EventListenerMap>>>,
 }
 

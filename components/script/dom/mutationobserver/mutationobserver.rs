@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::LazyCell;
+use std::cell::{Cell, LazyCell};
 
 use dom_struct::dom_struct;
 use html5ever::{LocalName, Namespace, ns};
@@ -32,7 +32,13 @@ pub(crate) struct MutationObserver {
     reflector_: Reflector,
     callback: TracedCallback<MutationCallback>,
     record_queue: DomRefCell<Vec<Dom<MutationRecord>>>,
+    /// <https://dom.spec.whatwg.org/#mutationobserver-node-list>. The spec makes this a list of
+    /// weak references. Stillwater keeps strong ones only for nodes in a document: removed nodes
+    /// are dropped from it (see [`Self::release_removed_nodes`]), and `disconnect()` reaches the
+    /// registrations they keep through [`Self::disconnect_generation`] instead.
     node_list: DomRefCell<Vec<Dom<Node>>>,
+    /// Stillwater: bumped by `disconnect()`. Registrations made before that are ignored.
+    disconnect_generation: Cell<u32>,
 }
 
 pub(crate) enum Mutation<'a> {
@@ -57,6 +63,15 @@ pub(crate) enum Mutation<'a> {
 pub(crate) struct RegisteredObserver {
     pub(crate) observer: Dom<MutationObserver>,
     options: ObserverOptions,
+    /// Stillwater: the observer's `disconnect_generation` when this was made or last renewed.
+    generation: u32,
+}
+
+impl RegisteredObserver {
+    /// Stillwater: false once the observer was disconnected after this registration was made.
+    fn is_current(&self) -> bool {
+        self.generation == self.observer.disconnect_generation.get()
+    }
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
@@ -87,7 +102,22 @@ impl MutationObserver {
             callback: callback.to_traced(),
             record_queue: DomRefCell::new(vec![]),
             node_list: DomRefCell::new(vec![]),
+            disconnect_generation: Cell::new(0),
         }
+    }
+
+    /// Stillwater: stop holding nodes that are no longer in a document. Their registrations stay
+    /// on them, so they keep being observed (that's driven from the node), and they can be
+    /// garbage collected once nothing else holds them, as with the spec's weak node list.
+    /// Runs when the list has doubled in size, so the cost stays linear.
+    fn release_removed_nodes(&self) {
+        let len = self.node_list.borrow().len();
+        if len < 32 || !len.is_power_of_two() {
+            return;
+        }
+        self.node_list
+            .borrow_mut()
+            .retain(|node| node.is_connected());
     }
 
     pub(crate) fn record_queue(&self) -> &DomRefCell<Vec<Dom<MutationRecord>>> {
@@ -123,6 +153,9 @@ impl MutationObserver {
 
             // Step 3 ... and then for each registered of node’s registered observer list:
             for registered in &*registered.unwrap() {
+                if !registered.is_current() {
+                    continue;
+                }
                 // 3.2 "1": node is not target and options["subtree"] is false
                 if *node != target && !registered.options.subtree {
                     continue;
@@ -309,6 +342,11 @@ impl MutationObserverMethods<crate::DomTypeHolder> for MutationObserver {
                 if registered.observer != self {
                     continue;
                 }
+                if !registered.is_current() {
+                    // Left over from before a disconnect(): observe the node again.
+                    registered.generation = self.disconnect_generation.get();
+                    self.node_list.borrow_mut().push(Dom::from_ref(target));
+                }
                 // TODO: remove matching transient registered observers
                 registered.options.attribute_old_value = attribute_old_value;
                 registered.options.attributes = attributes;
@@ -338,8 +376,10 @@ impl MutationObserverMethods<crate::DomTypeHolder> for MutationObserver {
                     attribute_filter,
                     child_list,
                 },
+                generation: self.disconnect_generation.get(),
             });
 
+            self.release_removed_nodes();
             self.node_list.borrow_mut().push(Dom::from_ref(target));
         }
 
@@ -368,6 +408,8 @@ impl MutationObserverMethods<crate::DomTypeHolder> for MutationObserver {
             .map(|node| node.as_rooted())
             .collect::<Vec<_>>();
         self.node_list.borrow_mut().clear();
+        self.disconnect_generation
+            .set(self.disconnect_generation.get().wrapping_add(1));
 
         for node in nodes {
             node.remove_mutation_observer(self);

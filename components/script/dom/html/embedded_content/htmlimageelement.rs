@@ -412,6 +412,7 @@ impl HTMLImageElement {
             current_request.state = State::CompletelyAvailable;
             current_request.load_time = Some(CrossProcessInstant::now());
         }
+        self.sync_image_memory();
 
         self.pending_request.safe_borrow_mut(cx.no_gc()).take();
 
@@ -508,6 +509,7 @@ impl HTMLImageElement {
                         .take()
                         .unwrap();
                 }
+                self.sync_image_memory();
                 self.image_request.set(ImageRequestPhase::Current);
 
                 // Step 3. Set the current request's state to broken.
@@ -600,6 +602,7 @@ impl HTMLImageElement {
                 self.pending_request.safe_borrow_mut(cx.no_gc()).take();
             },
         };
+        self.sync_image_memory();
 
         if matches!(state, State::Broken) {
             self.reject_image_decode_promises(cx);
@@ -992,6 +995,8 @@ impl HTMLImageElement {
                     // Step 7.4.6. Set the current request's current pixel density to selected pixel
                     // density.
                     current_request.current_pixel_density = selected_pixel_density;
+                    drop(current_request);
+                    self.sync_image_memory();
 
                     // Step 7.4.7. Queue an element task on the DOM manipulation task source given
                     // the img element and the following steps:
@@ -1299,6 +1304,7 @@ impl HTMLImageElement {
                     return
                 }
                 *this.current_request.safe_borrow_mut(cx.no_gc()) = this.pending_request.safe_borrow_mut(cx.no_gc()).take().expect("Should have a pending request");
+                this.sync_image_memory();
 
 
                 this.abort_request(cx, State::Unavailable, ImageRequestPhase::Pending);
@@ -1354,6 +1360,20 @@ impl HTMLImageElement {
             line_number: creator.return_line_number(),
             lazy_load_url: DomRefCell::new(None),
         }
+    }
+
+    /// Stillwater: report the decoded pixels of the current image to the JS engine as memory
+    /// held by this element. The garbage collector only schedules collections from memory it
+    /// knows about, and a removed `<img>` looks tiny to it while it keeps megabytes of pixels
+    /// (and the image cache's copy) alive. Without this, pages that recycle images, like
+    /// infinite feeds, pile up decoded images between collections.
+    fn sync_image_memory(&self) {
+        let size = match &self.current_request.borrow().image {
+            Some(Image::Raster(image)) => image.bytes.len(),
+            _ => 0,
+        };
+        // The reflector removes this again when the element is finalized.
+        script_bindings::reflector::DomObject::reflector(self).update_memory_size(self, size);
     }
 
     pub(crate) fn new(

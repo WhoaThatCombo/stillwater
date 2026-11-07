@@ -23,6 +23,7 @@ use crate::dom::bindings::codegen::Bindings::ResizeObserverBinding::{
 };
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::document::RenderingUpdateReason;
 use crate::dom::domrectreadonly::DOMRectReadOnly;
@@ -58,6 +59,28 @@ pub(crate) struct ResizeObserver {
     /// and [`[[skippedTargets]]`](https://drafts.csswg.org/resize-observer/#dom-resizeobserver-skippedtargets-slot)
     /// internal slots.
     observation_targets: DomRefCell<Vec<(ResizeObservation, Dom<Element>)>>,
+
+    /// Stillwater: whether the document's list of resize observers holds this observer. The
+    /// document lets go of observers that observe nothing (see
+    /// `Document::release_idle_resize_observers`); `observe()` puts them back.
+    in_document_list: Cell<bool>,
+
+    /// Stillwater: bumped by `disconnect()`, making observations parked on removed elements
+    /// (see [`ParkedResizeObservation`]) stale.
+    disconnect_generation: Cell<u32>,
+}
+
+/// Stillwater: a resize observation that its observer let go of because the target was removed
+/// from the document and has reported its last (0x0) size. Kept on the element, so that if the
+/// element is inserted again it goes back to the observer as if it had never left, while a
+/// removed element nothing else holds can be garbage collected (browsers hold resize
+/// observation targets weakly; Servo's list held them, and all they kept alive, for good).
+#[derive(JSTraceable, MallocSizeOf)]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
+pub(crate) struct ParkedResizeObservation {
+    observer: Dom<ResizeObserver>,
+    observation: ResizeObservation,
+    generation: u32,
 }
 
 impl ResizeObserver {
@@ -68,6 +91,97 @@ impl ResizeObserver {
             reflector_: Reflector::new(),
             callback: callback.to_traced(),
             observation_targets: Default::default(),
+            in_document_list: Cell::new(false),
+            disconnect_generation: Cell::new(0),
+        }
+    }
+
+    /// Stillwater: whether this observer has nothing to observe.
+    pub(crate) fn is_idle(&self) -> bool {
+        self.observation_targets.borrow().is_empty()
+    }
+
+    pub(crate) fn set_in_document_list(&self, value: bool) {
+        self.in_document_list.set(value);
+    }
+
+    fn ensure_in_document_list(&self, no_gc: &NoGC) {
+        if !self.in_document_list.get() {
+            self.global()
+                .as_window()
+                .Document()
+                .readd_resize_observer(no_gc, self);
+            self.in_document_list.set(true);
+        }
+    }
+
+    /// Stillwater: park observations of removed targets that have reported their last size on
+    /// the targets themselves. Called by the document before gathering observations.
+    pub(crate) fn release_removed_targets(&self, no_gc: &NoGC) {
+        let releasable = |(observation, target): &(ResizeObservation, Dom<Element>)| {
+            !target.upcast::<Node>().is_connected() &&
+                observation
+                    .last_reported_sizes
+                    .borrow()
+                    .first()
+                    .is_some_and(|size| size.inline_size() == 0. && size.block_size() == 0.)
+        };
+        if !self.observation_targets.borrow().iter().any(releasable) {
+            return;
+        }
+        let targets = std::mem::take(&mut *self.observation_targets.safe_borrow_mut(no_gc));
+        let mut kept = Vec::with_capacity(targets.len());
+        for entry in targets {
+            if !releasable(&entry) {
+                kept.push(entry);
+                continue;
+            }
+            let (observation, target) = entry;
+            target
+                .ensure_rare_data(no_gc)
+                .parked_resize_observations
+                .push(ParkedResizeObservation {
+                    observer: Dom::from_ref(self),
+                    observation,
+                    generation: self.disconnect_generation.get(),
+                });
+        }
+        *self.observation_targets.safe_borrow_mut(no_gc) = kept;
+    }
+
+    /// Stillwater: `target` was inserted into a document; take back what it parked.
+    pub(crate) fn target_reconnected(target: &Element, no_gc: &NoGC) {
+        let parked = match target.rare_data_mut_if_present(no_gc) {
+            Some(mut rare_data) if !rare_data.parked_resize_observations.is_empty() => {
+                std::mem::take(&mut rare_data.parked_resize_observations)
+            },
+            _ => return,
+        };
+        for entry in parked {
+            let observer = DomRoot::from_ref(&*entry.observer);
+            if entry.generation != observer.disconnect_generation.get() {
+                continue;
+            }
+            observer.ensure_in_document_list(no_gc);
+            observer
+                .observation_targets
+                .safe_borrow_mut(no_gc)
+                .push((entry.observation, Dom::from_ref(target)));
+            target
+                .owner_window()
+                .Document()
+                .add_rendering_update_reason(
+                    RenderingUpdateReason::ResizeObserverStartedObservingTarget,
+                );
+        }
+    }
+
+    /// Stillwater: drop an observation of `target` parked by this observer.
+    fn forget_parked(&self, target: &Element, no_gc: &NoGC) {
+        if let Some(mut rare_data) = target.rare_data_mut_if_present(no_gc) {
+            rare_data
+                .parked_resize_observations
+                .retain(|entry| &*entry.observer != self);
         }
     }
 
@@ -276,6 +390,7 @@ impl ResizeObserverMethods<crate::DomTypeHolder> for ResizeObserver {
         let rooted_observer = ResizeObserver::new(cx, window, proto, callback);
         let document = window.Document();
         document.add_resize_observer(cx, &rooted_observer);
+        rooted_observer.set_in_document_list(true);
         rooted_observer
     }
 
@@ -290,6 +405,9 @@ impl ResizeObserverMethods<crate::DomTypeHolder> for ResizeObserver {
         if is_present {
             self.Unobserve(no_gc, target);
         }
+        // A parked observation counts as present too.
+        self.forget_parked(target, no_gc);
+        self.ensure_in_document_list(no_gc);
 
         // Step 2. Let observedBox be the value of the box dictionary member of options.
         // Step 3. Let resizeObservation be new ResizeObservation(target, observedBox).
@@ -312,11 +430,14 @@ impl ResizeObserverMethods<crate::DomTypeHolder> for ResizeObserver {
         self.observation_targets
             .safe_borrow_mut(no_gc)
             .retain_mut(|(_obs, other)| !(&**other == target));
+        self.forget_parked(target, no_gc);
     }
 
     /// <https://drafts.csswg.org/resize-observer/#dom-resizeobserver-disconnect>
     fn Disconnect(&self, no_gc: &NoGC) {
         self.observation_targets.safe_borrow_mut(no_gc).clear();
+        self.disconnect_generation
+            .set(self.disconnect_generation.get().wrapping_add(1));
     }
 }
 
@@ -336,7 +457,7 @@ enum ObservationState {
 /// Note: `target` is kept out of here, to avoid having to root the `ResizeObservation`.
 /// <https://drafts.csswg.org/resize-observer/#dom-resizeobservation-target>
 #[derive(JSTraceable, MallocSizeOf)]
-struct ResizeObservation {
+pub(crate) struct ResizeObservation {
     /// <https://drafts.csswg.org/resize-observer/#dom-resizeobservation-observedbox>
     observed_box: ResizeObserverBoxOptions,
     /// <https://drafts.csswg.org/resize-observer/#dom-resizeobservation-lastreportedsizes>

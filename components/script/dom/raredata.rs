@@ -22,6 +22,7 @@ use crate::dom::intersectionobserver::IntersectionObserverRegistration;
 use crate::dom::mutationobserver::RegisteredObserver;
 use crate::dom::nodelist::NodeList;
 use crate::dom::range::Range;
+use crate::dom::resizeobserver::ParkedResizeObservation;
 use crate::dom::shadowroot::shadowroot::ShadowRoot;
 use crate::dom::types::Element;
 use crate::dom::window::LayoutValue;
@@ -84,6 +85,8 @@ pub(crate) struct ElementRareData {
     /// > Element objects have an internal [[RegisteredIntersectionObservers]] slot,
     /// > which is initialized to an empty list. This list holds IntersectionObserverRegistration records, which have:
     pub(crate) registered_intersection_observers: Vec<IntersectionObserverRegistration>,
+    /// Stillwater: resize observations this element's observers let go of while it was removed.
+    pub(crate) parked_resize_observations: Vec<ParkedResizeObservation>,
     pub(crate) cryptographic_nonce: String,
 
     /// <https://drafts.csswg.org/css-shadow-parts/#element-forwarded-part-name-list>

@@ -384,6 +384,20 @@ impl Element {
         RefMut::map(rare_data, |rare_data| rare_data.as_mut().unwrap())
     }
 
+    /// Stillwater: the rare data, mutably, if this element has any.
+    pub(crate) fn rare_data_mut_if_present<'a: 'b, 'b>(
+        &'a self,
+        no_gc: &'b NoGC,
+    ) -> Option<RefMut<'b, Box<ElementRareData>>> {
+        let rare_data = self.rare_data.safe_borrow_mut(no_gc);
+        if rare_data.is_none() {
+            return None;
+        }
+        Some(RefMut::map(rare_data, |rare_data| {
+            rare_data.as_mut().unwrap()
+        }))
+    }
+
     pub(crate) fn clean_up_style_data(&self) {
         self.style_data.borrow_mut().take();
     }
@@ -5079,6 +5093,23 @@ impl VirtualMethods for Element {
 
         if let Some(ref shadow_root) = self.shadow_root() {
             shadow_root.bind_to_tree(cx, context);
+        }
+
+        // Stillwater: observers let go of removed targets; take this one back.
+        if context.tree_connected {
+            let observers: Vec<DomRoot<IntersectionObserver>> = self
+                .registered_intersection_observers()
+                .map(|registrations| {
+                    registrations
+                        .iter()
+                        .map(|registration| DomRoot::from_ref(&*registration.observer))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for observer in observers {
+                observer.target_reconnected(self, cx.no_gc());
+            }
+            crate::dom::resizeobserver::ResizeObserver::target_reconnected(self, cx.no_gc());
         }
 
         if !context.is_in_tree() {

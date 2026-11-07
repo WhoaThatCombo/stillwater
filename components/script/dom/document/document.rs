@@ -3532,6 +3532,31 @@ impl Document {
             .push(Dom::from_ref(resize_observer));
     }
 
+    /// Stillwater: put back an observer [`Self::release_idle_resize_observers`] let go of.
+    pub(crate) fn readd_resize_observer(&self, no_gc: &NoGC, resize_observer: &ResizeObserver) {
+        self.resize_observers
+            .safe_borrow_mut(no_gc)
+            .push(Dom::from_ref(resize_observer));
+    }
+
+    /// Stillwater: park observations of removed targets on the targets, and stop holding
+    /// observers that observe nothing. The spec's lists don't keep these alive; Servo's did, so
+    /// every ResizeObserver a page ever made, and every element it observed, stayed in memory.
+    pub(crate) fn release_idle_resize_observers(&self, no_gc: &NoGC) {
+        for observer in self.resize_observers.borrow().iter() {
+            observer.release_removed_targets(no_gc);
+        }
+        self.resize_observers
+            .safe_borrow_mut(no_gc)
+            .retain(|observer| {
+                let idle = observer.is_idle();
+                if idle {
+                    observer.set_in_document_list(false);
+                }
+                !idle
+            });
+    }
+
     /// <https://drafts.csswg.org/resize-observer/#gather-active-observations-h>
     /// <https://drafts.csswg.org/resize-observer/#has-active-resize-observations>
     pub(crate) fn gather_active_resize_observations_at_depth(
@@ -3693,8 +3718,7 @@ impl Document {
         self.lazy_load_iframes.borrow_mut().retain(|iframe| {
             iframe.is_waiting_for_lazy_load() && iframe.upcast::<Node>().is_connected()
         });
-        if self.lazy_load_images.borrow().is_empty() && self.lazy_load_iframes.borrow().is_empty()
-        {
+        if self.lazy_load_images.borrow().is_empty() && self.lazy_load_iframes.borrow().is_empty() {
             return;
         }
         self.window()
@@ -3762,7 +3786,15 @@ impl Document {
             .reflow_for_non_flushing_update_the_rendering_queries(cx);
 
         // Step 1-2
-        for intersection_observer in &*self.intersection_observers.borrow() {
+        // Iterate over a copy: an observer that lets go of its last removed target leaves the
+        // list while it is being updated.
+        let observers: Vec<DomRoot<IntersectionObserver>> = self
+            .intersection_observers
+            .borrow()
+            .iter()
+            .map(|observer| DomRoot::from_ref(&**observer))
+            .collect();
+        for intersection_observer in &observers {
             self.update_single_intersection_observer_steps(cx, intersection_observer, time);
         }
     }

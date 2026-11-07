@@ -1223,6 +1223,7 @@ impl ScriptThread {
             }
 
             // Run the resize observer steps.
+            document.release_idle_resize_observers(cx.no_gc());
             let mut depth = Default::default();
             while document.gather_active_resize_observations_at_depth(cx, &depth) {
                 // Note: this will reflow the doc.
