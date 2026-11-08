@@ -1,0 +1,191 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/* ---- Downloads: the bottom-row indicator and the Downloads panel ---- */
+
+#dl-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#dl-button.active {
+  opacity: 1;
+}
+
+.dl-glyph {
+  font-size: 13px;
+}
+
+.dl-ring {
+  position: absolute;
+  inset: 0;
+  width: 28px;
+  height: 28px;
+  transform: rotate(-90deg);
+  pointer-events: none;
+}
+
+.dl-ring circle {
+  fill: none;
+  stroke-width: 2;
+}
+
+.dl-ring-track {
+  stroke: transparent;
+}
+
+.dl-ring-fill {
+  stroke: transparent;
+  stroke-linecap: round;
+}
+
+#dl-button.active .dl-ring-track {
+  stroke: var(--toolbarbutton-background-color-active);
+}
+
+#dl-button.active .dl-ring-fill {
+  stroke: var(--ws-accent, rgb(100, 115, 255));
+}
+
+/* Unknown sizes: a short arc that spins. */
+#dl-button.indeterminate .dl-ring {
+  animation: dl-spin 1.2s linear infinite;
+}
+
+@keyframes dl-spin {
+  from { transform: rotate(-90deg); }
+  to { transform: rotate(270deg); }
+}
+
+.dl-count {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--ws-accent, rgb(100, 115, 255));
+  color: white;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+}
+
+.dl-count[hidden] {
+  display: none;
+}
+
+#downloads .settings-header .spacer {
+  flex: 1;
+}
+
+.dl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dl-item {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--border-radius-medium);
+}
+
+.dl-item:hover {
+  background: var(--zen-urlbar-background);
+}
+
+.dl-item-icon {
+  flex: none;
+  width: 16px;
+  margin-top: 2px;
+  opacity: 0.7;
+}
+
+.dl-item.failed .dl-item-icon {
+  color: rgb(230, 110, 100);
+  opacity: 1;
+}
+
+.dl-item-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.dl-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dl-item.cancelled .dl-name,
+.dl-item.failed .dl-name,
+.dl-item.missing .dl-name {
+  opacity: 0.6;
+}
+
+.dl-item.missing .dl-name {
+  text-decoration: line-through;
+}
+
+.dl-detail {
+  font-size: 11.5px;
+  opacity: 0.65;
+  overflow-wrap: anywhere;
+}
+
+.dl-bar {
+  position: relative;
+  height: 4px;
+  margin-top: 5px;
+  border-radius: 2px;
+  background: var(--toolbarbutton-background-color-active);
+  overflow: hidden;
+}
+
+.dl-bar-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: var(--ws-accent, rgb(100, 115, 255));
+}
+
+.dl-bar.indeterminate .dl-bar-fill {
+  width: 30%;
+  animation: dl-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes dl-slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(340%); }
+}
+
+.dl-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.dl-warning {
+  flex-basis: 100%;
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: rgb(230, 110, 100);
+}
+
+button.secondary.small.danger {
+  background: rgb(200, 70, 60);
+  color: white;
+}
+
+#dl-clear:disabled {
+  opacity: 0.5;
+}

@@ -780,6 +780,9 @@ pub enum FetchChannels {
     /// If the fetch is just being done to populate the cache,
     /// not because the data is needed now.
     Prefetch,
+    /// The response is saved to disk as a download instead of being given to script
+    /// (`<a download>`). The suggested file name comes from the `download` attribute.
+    Download(Option<String>),
 }
 
 #[derive(Debug, Deserialize, Serialize)]

@@ -104,6 +104,7 @@ use crate::clipboard_delegate::StringRequest;
 use crate::gamepad_delegate::{GamepadHapticEffectRequest, GamepadHapticEffectRequestType};
 use crate::geolocation_delegate::{PositionRequest, PositionWatch};
 use crate::javascript_evaluator::JavaScriptEvaluator;
+use crate::download::DownloadRequest;
 use crate::network_manager::NetworkManager;
 use crate::proxies::ConstellationProxy;
 use crate::responders::ServoErrorChannel;
@@ -526,6 +527,18 @@ impl ServoInner {
             NetToEmbedderMsg::EmbedderCookieOperationResponse(operation_id) => {
                 self.site_data_manager
                     .handle_cookie_response(operation_id, CookieOperationResponse::Done);
+            },
+            NetToEmbedderMsg::RequestDownload(webview_id, info, control_sender) => {
+                let request = DownloadRequest::new(info, control_sender);
+                // If the WebView has closed meanwhile, the request is dropped and cancelled.
+                if let Some(webview) =
+                    webview_id.and_then(|webview_id| self.get_webview_handle(webview_id))
+                {
+                    webview.delegate().request_download(webview, request);
+                }
+            },
+            NetToEmbedderMsg::DownloadUpdate(id, update) => {
+                self.delegate.borrow().notify_download_update(id, update);
             },
         }
     }

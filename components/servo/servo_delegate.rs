@@ -1,7 +1,7 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
-use embedder_traits::{ConsoleLogLevel, Notification};
+use embedder_traits::{ConsoleLogLevel, DownloadId, DownloadUpdate, Notification};
 use servo_base::generic_channel;
 
 use crate::webview_delegate::{AllowOrDenyRequest, WebResourceLoad};
@@ -44,6 +44,11 @@ pub trait ServoDelegate {
     ///
     /// <https://developer.mozilla.org/en-US/docs/Web/API/Console_API>
     fn show_console_message(&self, _level: ConsoleLogLevel, _message: String) {}
+
+    /// Progress, completion or failure of a download accepted with
+    /// [`crate::DownloadRequest::accept`]. Downloads outlive the [`WebView`](crate::WebView)
+    /// that started them, so these are reported here.
+    fn notify_download_update(&self, _id: DownloadId, _update: DownloadUpdate) {}
 }
 
 pub(crate) struct DefaultServoDelegate;

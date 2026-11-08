@@ -34,7 +34,7 @@ use crate::dom::html::htmlimageelement::HTMLImageElement;
 use crate::dom::html::links::htmlhyperlinkelementutils::{
     HyperlinkElement, HyperlinkElementTraits,
 };
-use crate::dom::html::links::relations::{LinkRelations, follow_hyperlink};
+use crate::dom::html::links::relations::{LinkRelations, download_hyperlink, follow_hyperlink};
 use crate::dom::mouseevent::MouseEvent;
 use crate::dom::node::Node;
 use crate::dom::node::virtualmethods::VirtualMethods;
@@ -144,6 +144,12 @@ impl HTMLAnchorElementMethods<crate::DomTypeHolder> for HTMLAnchorElement {
         self.upcast::<Node>()
             .set_text_content_for_element(cx, Some(value))
     }
+
+    // https://html.spec.whatwg.org/multipage/#dom-a-download
+    make_getter!(Download, "download");
+
+    // https://html.spec.whatwg.org/multipage/#dom-a-download
+    make_setter!(SetDownload, "download");
 
     // https://html.spec.whatwg.org/multipage/#dom-a-rel
     make_getter!(Rel, "rel");
@@ -370,8 +376,12 @@ impl Activatable for HTMLAnchorElement {
             ))
         }
 
-        // Step 2.
-        // TODO: Download the link is `download` attribute is set.
+        // Step 2. If subject has a download attribute, and the user agent doesn't prefer to
+        // navigate, then download the hyperlink.
+        if element.has_attribute(&local_name!("download")) && download_hyperlink(element) {
+            return;
+        }
+        // Step 3. Otherwise, follow the hyperlink.
         follow_hyperlink(cx, element, self.relations.get(), ismap_suffix);
     }
 }

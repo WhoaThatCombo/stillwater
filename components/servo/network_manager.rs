@@ -4,8 +4,13 @@
 
 use std::collections::HashSet;
 
-use net_traits::ResourceThreads;
+use net_traits::blob_url_store::UrlWithBlobClaim;
+use net_traits::request::{CredentialsMode, Destination, Referrer, RequestBuilder, RequestMode};
+use net_traits::{CoreResourceMsg, FetchChannels, ResourceThreads};
+use servo_base::id::WebViewId;
 use servo_constellation_traits::EmbedderToConstellationMessage;
+use servo_url::ImmutableOrigin;
+use url::Url;
 
 use crate::proxies::ConstellationProxy;
 
@@ -81,6 +86,26 @@ impl NetworkManager {
     pub fn clear_cache(&self) {
         self.public_resource_threads.clear_cache();
         self.private_resource_threads.clear_cache();
+    }
+
+    /// Download `url` to a file, e.g. to retry a download that failed. It is fetched with the
+    /// user's cookies but no referrer, and the embedder is asked where to save it through
+    /// [`crate::WebViewDelegate::request_download`] of the given [`crate::WebView`].
+    pub fn download(&self, webview_id: WebViewId, url: Url) {
+        let request = RequestBuilder::new(
+            Some(webview_id),
+            UrlWithBlobClaim::from_url_without_having_claimed_blob(url.into()),
+            Referrer::NoReferrer,
+        )
+        .mode(RequestMode::Navigate)
+        .destination(Destination::Document)
+        .credentials_mode(CredentialsMode::Include)
+        .use_url_credentials(true)
+        .origin(ImmutableOrigin::new_opaque());
+        let _ = self
+            .public_resource_threads
+            .core_thread
+            .send(CoreResourceMsg::Fetch(request, FetchChannels::Download(None)));
     }
 
     /// Set the network online state. This controls the value of [`navigator.onLine`]

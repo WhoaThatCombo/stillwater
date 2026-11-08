@@ -1039,6 +1039,12 @@ pub trait WebViewDelegate {
     ) {
     }
 
+    /// A response in this [`WebView`] should be saved as a file instead of displayed (or an
+    /// `<a download>` link was followed). The page stays as it is. Accept the
+    /// [`DownloadRequest`](crate::DownloadRequest) with a file to save to, or cancel it;
+    /// dropping it cancels the download.
+    fn request_download(&self, _webview: WebView, _request: crate::DownloadRequest) {}
+
     /// Open dialog to select bluetooth device.
     fn show_bluetooth_device_dialog(
         &self,

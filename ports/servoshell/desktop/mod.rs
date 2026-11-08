@@ -9,6 +9,7 @@ pub(crate) mod adblock;
 pub(crate) mod app;
 pub(crate) mod cli;
 pub(crate) mod dialog;
+pub(crate) mod downloads;
 pub(crate) mod diagnostics;
 pub(crate) mod event_loop;
 #[cfg(feature = "gamepad")]

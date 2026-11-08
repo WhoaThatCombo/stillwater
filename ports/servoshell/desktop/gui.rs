@@ -663,6 +663,13 @@ impl Gui {
                     zen["result"] = serde_json::Value::String(result);
                     self.sidebar.set_zen(zen);
                 },
+                WindowAction::Download(command, argument) => {
+                    let page = self.sidebar.navigated_webview(window).map(|webview| webview.id());
+                    state
+                        .downloads
+                        .borrow_mut()
+                        .command(&command, &argument, state.servo(), page);
+                },
                 WindowAction::CheckForUpdates => {
                     updater::check_now(headed_window.event_loop_proxy());
                 },
@@ -706,6 +713,11 @@ impl Gui {
             let url = page.as_ref().and_then(|webview| webview.url());
             self.sidebar
                 .set_passwords(state.passwords.borrow().to_json(url.as_ref()));
+        }
+        {
+            let mut downloads = state.downloads.borrow_mut();
+            downloads.set_event_loop_proxy(headed_window.event_loop_proxy());
+            self.sidebar.set_downloads(downloads.to_json());
         }
         self.sidebar
             .set_window_state(!winit_window.is_decorated(), winit_window.is_maximized());

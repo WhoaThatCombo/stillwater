@@ -70,6 +70,11 @@ first install.
 - **Import from Zen**: Settings → **Import from Zen** copies Zen Browser's spaces, pinned tabs, Essentials,
   folders, open tabs and saved passwords from this computer. Zen's profile is only read. Passwords protected
   by a Zen primary password can't be imported.
+- **Downloads**: links to files (`Content-Disposition: attachment`, archives, programs, PDFs) and
+  `<a download>` links (including pages' `blob:` and `data:` exports) save to your Downloads folder, with
+  the page's cookies. The button next to the gear shows progress; its panel lists downloads with Cancel,
+  Retry, Open, Show in folder and Remove. Optionally ask where to save each file. Files are never opened
+  automatically, and opening a program asks first.
 - **Settings** (gear at the bottom of the sidebar, or <kbd>Ctrl</kbd>+<kbd>,</kbd>): light, dark or system
   appearance (websites that support dark mode follow along), your search engine (DuckDuckGo, Google,
   Bing or Brave Search), compact mode, and checking for updates.
@@ -158,7 +163,8 @@ cd stillwater
 - [x] Built-in adblocker using uBlock Origin's filter lists
 - [x] Essentials, pinned tabs, folders
 - [x] Split view and Glance
-- [ ] Bookmarks, history, downloads, find in page, settings
+- [ ] Bookmarks, history, find in page, settings
+- [x] Downloads
 - [x] Import from Zen
 - [x] Saved passwords
 - [x] Stillwater name and icon in the window and installer

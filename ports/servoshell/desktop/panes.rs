@@ -67,6 +67,7 @@ struct PaneShared {
 
 struct PaneDelegate {
     shared: Rc<PaneShared>,
+    downloads: crate::desktop::downloads::SharedDownloads,
 }
 
 impl PaneDelegate {
@@ -104,6 +105,11 @@ impl WebViewDelegate for PaneDelegate {
     fn request_navigation(&self, _: WebView, request: NavigationRequest) {
         request.allow();
     }
+
+    fn request_download(&self, _: WebView, request: servo::DownloadRequest) {
+        self.downloads.borrow_mut().start(request);
+        self.changed();
+    }
 }
 
 pub(crate) struct Pane {
@@ -135,6 +141,7 @@ impl Pane {
             .user_content_manager(state.user_content_manager.clone())
             .delegate(Rc::new(PaneDelegate {
                 shared: shared.clone(),
+                downloads: state.downloads.clone(),
             }))
             .build();
         webview.notify_theme_change(theme);

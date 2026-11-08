@@ -5,9 +5,10 @@
 use std::path::PathBuf;
 
 use cookie::Cookie;
+use crossbeam_channel::Sender;
 use embedder_traits::{
-    AuthenticationResponse, EmbedderControlId, FilePickerRequest, WebResourceRequest,
-    WebResourceResponseMsg,
+    AuthenticationResponse, DownloadControl, DownloadId, DownloadInfo, DownloadUpdate,
+    EmbedderControlId, FilePickerRequest, WebResourceRequest, WebResourceResponseMsg,
 };
 use net_traits::CookieOperationId;
 use servo_base::id::WebViewId;
@@ -39,4 +40,9 @@ pub enum NetToEmbedderMsg {
     EmbedderCookieOperationResponseWithCookies(CookieOperationId, Vec<Cookie<'static>>),
     /// Response to an asynchronous request from SiteDataManager.
     EmbedderCookieOperationResponse(CookieOperationId),
+    /// A response is to be saved as a file. The embedder answers on the channel with where
+    /// to save it, or to cancel; later it can cancel the download through the same channel.
+    RequestDownload(Option<WebViewId>, DownloadInfo, Sender<DownloadControl>),
+    /// Progress, completion or failure of a download the embedder accepted.
+    DownloadUpdate(DownloadId, DownloadUpdate),
 }

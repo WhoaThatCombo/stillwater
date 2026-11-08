@@ -33,7 +33,7 @@ use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::links::htmlhyperlinkelementutils::{
     HyperlinkElement, HyperlinkElementTraits,
 };
-use crate::dom::html::links::relations::{LinkRelations, follow_hyperlink};
+use crate::dom::html::links::relations::{LinkRelations, download_hyperlink, follow_hyperlink};
 use crate::dom::node::Node;
 use crate::dom::node::virtualmethods::VirtualMethods;
 
@@ -380,6 +380,12 @@ impl HTMLAreaElementMethods<crate::DomTypeHolder> for HTMLAreaElement {
     // https://html.spec.whatwg.org/multipage/#attr-hyperlink-target
     make_getter!(Target, "target");
 
+    // https://html.spec.whatwg.org/multipage/#dom-area-download
+    make_getter!(Download, "download");
+
+    // https://html.spec.whatwg.org/multipage/#dom-area-download
+    make_setter!(SetDownload, "download");
+
     // https://html.spec.whatwg.org/multipage/#attr-hyperlink-target
     make_setter!(SetTarget, "target");
 
@@ -542,6 +548,11 @@ impl Activatable for HTMLAreaElement {
         _event: &Event,
         _target: &EventTarget,
     ) {
-        follow_hyperlink(cx, self.as_element(), self.relations.get(), None);
+        // Download the hyperlink if it has a download attribute, otherwise follow it.
+        let element = self.as_element();
+        if element.has_attribute(&local_name!("download")) && download_hyperlink(element) {
+            return;
+        }
+        follow_hyperlink(cx, element, self.relations.get(), None);
     }
 }
