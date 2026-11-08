@@ -123,6 +123,12 @@ pub struct HeadedWindow {
     theme_override: Cell<Option<Theme>>,
 }
 
+/// `STILLWATER_BACKGROUND_WINDOW`: for automated tests, the window opens off-screen, out of the
+/// taskbar, and never takes keyboard focus from other programs.
+pub(crate) fn background_window() -> bool {
+    std::env::var_os("STILLWATER_BACKGROUND_WINDOW").is_some()
+}
+
 impl HeadedWindow {
     #[servo::servo_tracing::instrument(level = "debug", name = "HeadedWindow::new", skip_all)]
     pub(crate) fn new(
@@ -152,7 +158,17 @@ impl HeadedWindow {
         #[cfg(target_os = "windows")]
         let window_attr = {
             use winit::platform::windows::WindowAttributesExtWindows;
-            window_attr.with_undecorated_shadow(true)
+            window_attr
+                .with_undecorated_shadow(true)
+                .with_skip_taskbar(background_window())
+        };
+        // Automated tests: open off-screen and never take focus from what the user is doing.
+        let window_attr = if background_window() {
+            window_attr
+                .with_active(false)
+                .with_position(PhysicalPosition::new(-32000, -32000))
+        } else {
+            window_attr
         };
 
         // Set a name so it can be pinned to taskbars in Linux.
@@ -321,6 +337,9 @@ impl HeadedWindow {
 
     /// Restore and focus the window (e.g. when another launch handed us a link).
     pub(crate) fn bring_to_front(&self) {
+        if background_window() {
+            return;
+        }
         self.winit_window.set_minimized(false);
         self.winit_window.focus_window();
     }
