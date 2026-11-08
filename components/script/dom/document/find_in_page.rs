@@ -370,6 +370,11 @@ impl Document {
                 .collect();
             (matches, active, limit_reached)
         };
+        // A new search starts at the first match in view, like other browsers.
+        let active = match anchor {
+            None if !matches.is_empty() => self.first_find_match_in_view(&matches).or(active),
+            _ => active,
+        };
 
         {
             let mut state = self.find_in_page_state().borrow_mut();
@@ -399,6 +404,25 @@ impl Document {
         }
         self.scroll_active_find_match_into_view(cx);
         self.find_in_page_state().borrow().result()
+    }
+
+    /// The first of `matches` (in tree order) that isn't above the top of the viewport, found
+    /// with a binary search since tree order mostly follows the page from top to bottom.
+    /// Layout must be up to date.
+    fn first_find_match_in_view(&self, matches: &[FindMatch]) -> Option<usize> {
+        let layout = self.window().layout();
+        let is_above_viewport = |find_match: &FindMatch| {
+            find_match.segments.first().is_some_and(|segment| {
+                layout
+                    .query_text_range_rect(
+                        segment.text.upcast::<Node>().to_trusted_node_address(),
+                        Utf32CodeUnits(segment.start)..Utf32CodeUnits(segment.end),
+                    )
+                    .is_some_and(|rect| rect.max_y() <= app_units::Au(0))
+            })
+        };
+        let first = matches.partition_point(is_above_viewport);
+        (first < matches.len()).then_some(first)
     }
 
     /// Hand the highlights of `state`'s matches to layout, replacing the previous ones.

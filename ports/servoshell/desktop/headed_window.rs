@@ -1167,6 +1167,20 @@ impl HeadedWindow {
             {
                 self.gui.borrow().surrender_focus();
             },
+            // While typing in the find bar, browser shortcuts (Ctrl+T, Ctrl+W, Ctrl+L, ...)
+            // still work.
+            WindowEvent::KeyboardInput {
+                event: ref key_event,
+                ..
+            } if self.gui.borrow().has_keyboard_focus() &&
+                self.handle_intercepted_key_bindings(
+                    state.clone(),
+                    &window,
+                    &keyboard_event_from_winit(key_event, self.modifiers_state.get()),
+                ) =>
+            {
+                consumed = true;
+            },
             WindowEvent::KeyboardInput { .. } if !self.gui.borrow().has_keyboard_focus() => {
                 // Keyboard events should go to the WebView unless some other GUI
                 // component has keyboard focus.
