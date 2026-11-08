@@ -110,6 +110,8 @@ struct Item {
     finished_early: bool,
     /// The save dialog is open for this download.
     choosing: bool,
+    /// The user chose the file in the save dialog (and agreed to replace it if it exists).
+    chosen: bool,
     /// The file is no longer where it was saved.
     missing: bool,
 }
@@ -215,6 +217,7 @@ impl Downloads {
                     last_sample: None,
                     finished_early: false,
                     choosing: false,
+                    chosen: false,
                 })
             })
             .collect();
@@ -333,6 +336,7 @@ impl Downloads {
                 last_sample: Some((Instant::now(), 0)),
                 finished_early: false,
                 choosing: self.ask_where_to_save,
+                chosen: false,
                 missing: false,
             },
         );
@@ -395,6 +399,7 @@ impl Downloads {
             match chosen {
                 Some(path) => {
                     item.path = path;
+                    item.chosen = true;
                     if item.finished_early {
                         self.finish(key);
                     }
@@ -483,9 +488,10 @@ impl Downloads {
         let Some(index) = self.items.iter().position(|item| item.key == key) else {
             return;
         };
-        // The name may have been taken while downloading.
+        // The name may have been taken while downloading (a file the user chose in the save
+        // dialog is replaced: the dialog asked).
         let mut path = self.items[index].path.clone();
-        if path.exists() && !self.items[index].choosing {
+        if path.exists() && !self.items[index].chosen {
             let directory = path.parent().map(Path::to_owned).unwrap_or_default();
             path = unique_path(&directory, &file_name(&path), |_| false);
         }

@@ -829,6 +829,14 @@ impl Sidebar {
                         passwords: what.contains(&"passwords"),
                     });
                 },
+                // Ctrl+J: show the Downloads panel.
+                "dl-panel" => {
+                    if self.compact.get() {
+                        self.peek.set(true);
+                    }
+                    self.call("openDownloads()");
+                    layout_changed = true;
+                },
                 command if command.starts_with("dl-") => self
                     .window_actions
                     .push(WindowAction::Download(command.to_owned(), argument.to_owned())),
