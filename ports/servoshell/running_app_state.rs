@@ -942,6 +942,18 @@ impl WebViewDelegate for RunningAppState {
     fn request_download(&self, webview: WebView, request: servo::DownloadRequest) {
         #[cfg(not(any(target_os = "android", target_env = "ohos")))]
         {
+            // Headless and WebDriver runs are automated tests and site sweeps: only save files
+            // when they choose a download folder, never into the user's.
+            let automated = self.servoshell_preferences.headless ||
+                self.servoshell_preferences.webdriver_port.get().is_some();
+            if automated && std::env::var_os("STILLWATER_DOWNLOAD_DIR").is_none() {
+                crate::desktop::diagnostics::log(format!(
+                    "download not saved (automated run without STILLWATER_DOWNLOAD_DIR): {}",
+                    request.suggested_filename()
+                ));
+                request.cancel();
+                return;
+            }
             self.downloads.borrow_mut().start(request);
             self.window_for_webview(&webview).set_needs_update();
         }
