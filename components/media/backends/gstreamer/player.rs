@@ -593,6 +593,12 @@ impl GStreamerPlayer {
 
         // Set max size for the player buffer.
         pipeline.set_property("buffer-size", MAX_BUFFER_SIZE);
+        // Muted (tests): play into a silent sink instead of the default audio device.
+        if self.audio_renderer.is_none() && std::env::var_os("STILLWATER_MUTE_AUDIO").is_some() {
+            let sink = crate::make_audio_sink()
+                .map_err(|error| PlayerError::Backend(format!("audio sink creation failed: {error:?}")))?;
+            pipeline.set_property("audio-sink", &sink);
+        }
 
         let start_offset = self.start_offset.clone();
         let is_media_source = self.stream_type == StreamType::MediaSource;

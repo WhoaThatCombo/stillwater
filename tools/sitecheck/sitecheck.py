@@ -297,6 +297,8 @@ def run_webdriver(url, args, env, browser_args, profile, log, png, output) -> di
 def run_legacy(url, args, env, browser_args, png, output) -> None:
     """Load the page with `-o`: Stillwater screenshots it and exits; the probe prints its reports."""
     env = dict(env, STILLWATER_SCREENSHOT_DELAY_MS=str(int(args.shot_delay * 1000)))
+    if "STILLWATER_TEST_SOUND" not in env:
+        env["STILLWATER_MUTE_AUDIO"] = "1"
     command = [str(args.exe), "--headless", "--window-size=1280x800", "-o", str(png), *browser_args, url]
     process = subprocess.Popen(command, env=env, stdout=output, stderr=subprocess.STDOUT)
     try:
