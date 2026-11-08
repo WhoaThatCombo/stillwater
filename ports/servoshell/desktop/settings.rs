@@ -14,7 +14,7 @@ use servo::Theme;
 
 /// Search engines offered in settings: (id, name, URL template with `%s` for the query).
 const SEARCH_ENGINES: &[(&str, &str, &str)] = &[
-    ("duckduckgo", "DuckDuckGo", "https://duckduckgo.com/html/?q=%s"),
+    ("duckduckgo", "DuckDuckGo", "https://duckduckgo.com/?q=%s"),
     ("google", "Google", "https://www.google.com/search?q=%s"),
     ("bing", "Bing", "https://www.bing.com/search?q=%s"),
     ("brave", "Brave Search", "https://search.brave.com/search?q=%s"),
