@@ -417,8 +417,217 @@ function renderSettings() {
   $("update-check").textContent = state.updateCheck || "";
 }
 
+// ---- Saved passwords ----
+
+const passwordsPanel = $("passwords");
+const passwordSearch = $("passwords-search");
+// The login whose details are open in the list, and its password once shown.
+let openLogin = null;
+let shownPassword = null;
+let hidePasswordTimer = 0;
+
+function passwords() {
+  return state.passwords || { list: [], site: [], never: [] };
+}
+
+function renderPasswordOffer() {
+  const offer = passwords().offer;
+  const card = $("pw-offer");
+  card.hidden = !offer;
+  if (!offer) return;
+  $("pw-offer-title").textContent = offer.update
+    ? `Update your password for ${offer.host}?`
+    : `Save your password for ${offer.host}?`;
+  $("pw-offer-user").textContent = offer.username || "No username";
+  $("pw-offer-save").textContent = offer.update ? "Update" : "Save";
+}
+
+function renderKey() {
+  const site = passwords().site || [];
+  const key = $("key");
+  key.hidden = site.length === 0;
+  key.title = site.length === 1 ? "Fill your saved password" : `${site.length} saved passwords for this site`;
+}
+
+function keyMenu() {
+  const items = (passwords().site || []).map((login) => ({
+    label: `Fill ${login.username || "password (no username)"}`,
+    run: () => send("pw-fill", login.id),
+  }));
+  items.push("-", { label: "Saved passwords", run: openPasswords });
+  return items;
+}
+
+function flash(button, text) {
+  const original = button.textContent;
+  button.textContent = text;
+  setTimeout(() => { button.textContent = original; }, 1200);
+}
+
+function loginDetails(login) {
+  const details = document.createElement("div");
+  details.className = "login-details";
+  const secret = document.createElement("div");
+  secret.className = "login-secret";
+  secret.textContent = shownPassword !== null ? shownPassword : "••••••••••";
+  const actions = document.createElement("div");
+  actions.className = "login-actions";
+  const action = (label, onClick) => {
+    const button = document.createElement("button");
+    button.className = "secondary small";
+    button.textContent = label;
+    button.addEventListener("click", (event) => { event.stopPropagation(); onClick(button); });
+    actions.append(button);
+    return button;
+  };
+  action(shownPassword !== null ? "Hide" : "Show", () => {
+    if (shownPassword !== null) {
+      shownPassword = null;
+      renderPasswordList();
+    } else {
+      send("pw-reveal", login.id);
+    }
+  });
+  action("Copy password", (button) => { send("pw-copy", login.id); flash(button, "Copied"); });
+  if (login.username) {
+    action("Copy username", (button) => { send("pw-copy-user", login.id); flash(button, "Copied"); });
+  }
+  if ((passwords().site || []).some((item) => item.id === login.id)) {
+    action("Fill", () => send("pw-fill", login.id));
+  }
+  // Deleting can't be undone, so it takes a second click.
+  action("Delete", (button) => {
+    if (button.classList.contains("armed")) {
+      send("pw-delete", login.id);
+      openLogin = null;
+      return;
+    }
+    button.classList.add("armed");
+    button.textContent = "Click again to delete";
+    setTimeout(() => { button.classList.remove("armed"); button.textContent = "Delete"; }, 3000);
+  });
+  details.append(secret, actions);
+  return details;
+}
+
+function renderPasswordList() {
+  const data = passwords();
+  const query = passwordSearch.value.trim().toLowerCase();
+  const list = (data.list || []).filter((login) =>
+    !query || login.host.toLowerCase().includes(query) || login.username.toLowerCase().includes(query));
+  $("passwords-list").replaceChildren(...list.map((login) => {
+    const row = document.createElement("div");
+    row.className = "login";
+    row.classList.toggle("open", openLogin === login.id);
+    const head = document.createElement("button");
+    head.className = "login-head";
+    const host = document.createElement("span");
+    host.className = "login-host";
+    host.textContent = login.host;
+    const user = document.createElement("span");
+    user.className = "login-user";
+    user.textContent = login.username || "No username";
+    head.append(host, user);
+    head.title = login.origin;
+    head.addEventListener("click", () => {
+      openLogin = openLogin === login.id ? null : login.id;
+      shownPassword = null;
+      renderPasswordList();
+    });
+    row.append(head);
+    if (openLogin === login.id) row.append(loginDetails(login));
+    return row;
+  }));
+  const empty = $("passwords-empty");
+  empty.hidden = list.length > 0;
+  empty.textContent = query
+    ? "No saved passwords match."
+    : "No saved passwords yet. Stillwater offers to save one when you sign in to a site, or you can import them from Zen in settings.";
+  const problem = $("passwords-problem");
+  problem.hidden = !data.problem;
+  problem.textContent = data.problem || "";
+  const never = data.never || [];
+  $("never-group").hidden = never.length === 0;
+  $("never-list").replaceChildren(...never.map((site) => {
+    const row = document.createElement("div");
+    row.className = "login never";
+    const name = document.createElement("span");
+    name.className = "login-host";
+    name.textContent = site.host;
+    const remove = iconButton("never-remove", "\uE711", "Offer to save passwords for this site again",
+      () => send("pw-forget-never", site.origin));
+    row.append(name, remove);
+    return row;
+  }));
+}
+
+function openPasswords() {
+  passwordsPanel.hidden = false;
+  passwordSearch.value = "";
+  passwordSearch.parentElement.classList.remove("has-value");
+  openLogin = null;
+  shownPassword = null;
+  renderPasswordList();
+}
+
+function closePasswords() {
+  passwordsPanel.hidden = true;
+  openLogin = null;
+  shownPassword = null;
+}
+
+// ---- Import from Zen ----
+
+const zenChoice = { profile: 0, pins: true, tabs: false, passwords: true };
+let zenBusy = false;
+
+function renderZen() {
+  const zen = state.zen;
+  const status = $("zen-status");
+  const found = $("zen-found");
+  if (!zen) {
+    found.hidden = true;
+    status.textContent = zenBusy ? "Looking for Zen…" : "Copies your spaces, pinned tabs, Essentials and passwords from Zen Browser on this computer. Zen isn't changed.";
+    return;
+  }
+  zenBusy = false;
+  const profiles = zen.profiles || [];
+  if (profiles.length === 0) {
+    found.hidden = true;
+    status.textContent = "Zen Browser's data wasn't found on this computer.";
+    return;
+  }
+  found.hidden = false;
+  zenChoice.profile = zen.profile || 0;
+  $("zen-profiles").hidden = profiles.length < 2;
+  $("zen-profiles").replaceChildren(...profiles.map((name, index) => {
+    const button = document.createElement("button");
+    button.className = "option";
+    button.textContent = name;
+    button.setAttribute("aria-pressed", String(index === zenChoice.profile));
+    button.addEventListener("click", () => send("zen-scan", index));
+    return button;
+  }));
+  const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  $("zen-pins-count").textContent = zen.sessionProblem ||
+    `${count(zen.spaces, "space", "spaces")}, ${count(zen.pins, "pinned tab", "pinned tabs")}, ${count(zen.essentials, "Essential", "Essentials")}`;
+  $("zen-tabs-count").textContent = zen.sessionProblem ? "" : `${count(zen.tabs, "tab", "tabs")}, added unloaded`;
+  $("zen-passwords-count").textContent = zen.passwordProblem || count(zen.passwords, "password", "passwords");
+  for (const what of ["pins", "tabs", "passwords"]) {
+    $(`zen-${what}`).setAttribute("aria-pressed", String(zenChoice[what]));
+  }
+  $("zen-import").disabled = !(zenChoice.pins || zenChoice.tabs || zenChoice.passwords);
+  status.textContent = zen.result || "";
+}
+
 function render() {
   renderSettings();
+  renderPasswordOffer();
+  renderKey();
+  renderZen();
+  if (!passwordsPanel.hidden) renderPasswordList();
+  $("autofill-toggle").setAttribute("aria-pressed", String(!!passwords().autofill));
+  $("open-passwords").textContent = `Saved passwords (${(passwords().list || []).length})`;
   renderShield();
   renderUpdate();
   if (state.workspaces) renderWorkspaces();
@@ -447,6 +656,14 @@ window.sidebar = {
   },
   openSettings() {
     document.getElementById("settings").hidden = false;
+  },
+  // A saved password the user asked to see (sent only on request, never in the state).
+  revealPassword(id, password) {
+    if (openLogin !== id || passwordsPanel.hidden) return;
+    shownPassword = password;
+    renderPasswordList();
+    clearTimeout(hidePasswordTimer);
+    hidePasswordTimer = setTimeout(() => { shownPassword = null; renderPasswordList(); }, 30000);
   },
   focusUrl() {
     url.focus();
@@ -569,6 +786,46 @@ deleteButton.addEventListener("click", () => {
     deleteButton.classList.remove("armed");
     deleteButton.title = "Delete space";
   }, 3000);
+});
+
+// Passwords
+$("pw-offer-save").addEventListener("click", () => send("pw-save"));
+$("pw-offer-never").addEventListener("click", () => send("pw-never"));
+$("pw-offer-dismiss").addEventListener("click", () => send("pw-dismiss"));
+$("key").addEventListener("click", (event) => {
+  event.stopPropagation();
+  const box = $("key").getBoundingClientRect();
+  openMenu(keyMenu(), box.left, box.bottom);
+});
+$("autofill-toggle").addEventListener("click", () => send("pw-autofill", passwords().autofill ? "0" : "1"));
+$("open-passwords").addEventListener("click", openPasswords);
+$("passwords-close").addEventListener("click", closePasswords);
+passwordSearch.addEventListener("input", () => {
+  passwordSearch.parentElement.classList.toggle("has-value", passwordSearch.value.length > 0);
+  renderPasswordList();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !passwordsPanel.hidden) closePasswords();
+});
+
+// Import from Zen
+$("zen-scan").addEventListener("click", () => {
+  zenBusy = true;
+  state.zen = null;
+  renderZen();
+  send("zen-scan", zenChoice.profile);
+});
+for (const what of ["pins", "tabs", "passwords"]) {
+  $(`zen-${what}`).addEventListener("click", () => {
+    zenChoice[what] = !zenChoice[what];
+    renderZen();
+  });
+}
+$("zen-import").addEventListener("click", () => {
+  const what = ["pins", "tabs", "passwords"].filter((name) => zenChoice[name]);
+  if (what.length === 0) return;
+  $("zen-status").textContent = "Importing…";
+  send("zen-import", `${zenChoice.profile}\t${what.join(",")}`);
 });
 
 send("ready");

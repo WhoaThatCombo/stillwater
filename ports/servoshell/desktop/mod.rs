@@ -19,6 +19,7 @@ pub(crate) mod headed_window;
 mod headless_window;
 mod keyutils;
 mod memory;
+pub(crate) mod passwords;
 pub(crate) mod panes;
 mod protocols;
 mod report;
@@ -30,3 +31,4 @@ mod updater;
 #[cfg(feature = "webxr")]
 mod webxr;
 mod workspaces;
+mod zen_import;

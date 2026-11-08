@@ -26,6 +26,7 @@
       <input id="url" type="text" spellcheck="false" autocomplete="off" aria-label="Search or enter address">
       <span class="placeholder" aria-hidden="true">Search or enter address</span>
     </span>
+    <button id="key" class="icon" title="Saved passwords for this site" hidden>&#xE8D7;</button>
     <button id="shield" class="icon" title="Ad blocking" hidden><span class="shield-glyph">&#xEA18;</span><span id="shield-count"></span></button>
   </div>
 
@@ -60,6 +61,17 @@
 
   <button id="update" class="update-pill" hidden></button>
   <p id="update-error" class="hint update-error" hidden></p>
+
+  <!-- Offered after signing in with a password that isn't saved. -->
+  <section id="pw-offer" class="offer-card" hidden aria-label="Save password" aria-live="polite">
+    <p id="pw-offer-title" class="offer-title"></p>
+    <p id="pw-offer-user" class="hint offer-user"></p>
+    <div class="offer-buttons">
+      <button id="pw-offer-save" class="primary">Save</button>
+      <button id="pw-offer-never" class="secondary" title="Never offer to save passwords for this site">Never</button>
+      <button id="pw-offer-dismiss" class="secondary">Not now</button>
+    </div>
+  </section>
 
   <footer id="footer">
     <button id="settings-button" class="icon footer-button" title="Settings">&#xE713;</button>
@@ -115,6 +127,38 @@
     </div>
 
     <div class="setting-group">
+      <h3>Passwords</h3>
+      <button class="toggle-row" id="autofill-toggle">
+        <span>Fill saved passwords</span>
+        <span class="switch" aria-hidden="true"></span>
+      </button>
+      <button id="open-passwords" class="secondary">Saved passwords</button>
+      <p class="hint" id="passwords-hint">Stillwater offers to save a password when you sign in. Passwords are encrypted with your Windows account.</p>
+    </div>
+
+    <div class="setting-group" id="zen-group">
+      <h3>Import from Zen</h3>
+      <button id="zen-scan" class="secondary">Find Zen's data</button>
+      <div id="zen-found" hidden>
+        <div class="options" id="zen-profiles" role="group" aria-label="Zen profile"></div>
+        <button class="toggle-row tall" id="zen-pins" aria-pressed="true">
+          <span><span>Spaces and pinned tabs</span><span class="row-detail" id="zen-pins-count"></span></span>
+          <span class="switch" aria-hidden="true"></span>
+        </button>
+        <button class="toggle-row tall" id="zen-tabs" aria-pressed="false">
+          <span><span>Open tabs</span><span class="row-detail" id="zen-tabs-count"></span></span>
+          <span class="switch" aria-hidden="true"></span>
+        </button>
+        <button class="toggle-row tall" id="zen-passwords" aria-pressed="true">
+          <span><span>Passwords</span><span class="row-detail" id="zen-passwords-count"></span></span>
+          <span class="switch" aria-hidden="true"></span>
+        </button>
+        <button id="zen-import" class="primary">Import</button>
+      </div>
+      <p id="zen-status" class="hint"></p>
+    </div>
+
+    <div class="setting-group">
       <h3>Help</h3>
       <button id="report-site" class="secondary">Report a broken site</button>
       <p class="hint">Opens a pre-filled GitHub issue for the current page in another browser. You can review it before sending.</p>
@@ -125,6 +169,27 @@
       <p id="version-line"></p>
       <button id="check-updates" class="secondary">Check for updates</button>
       <p id="update-check" class="hint"></p>
+    </div>
+  </section>
+
+  <section id="passwords" class="panel" hidden aria-label="Saved passwords">
+    <header class="settings-header">
+      <button id="passwords-close" class="icon" title="Back">&#xE72B;</button>
+      <h2>Saved passwords</h2>
+    </header>
+    <div class="search-field">
+      <span class="icon">&#xE721;</span>
+      <span class="field">
+        <input id="passwords-search" type="text" spellcheck="false" autocomplete="off" aria-label="Search saved passwords">
+        <span class="placeholder" aria-hidden="true">Search</span>
+      </span>
+    </div>
+    <p id="passwords-problem" class="hint update-error" hidden></p>
+    <div id="passwords-list" class="login-list"></div>
+    <p id="passwords-empty" class="hint" hidden></p>
+    <div class="setting-group" id="never-group" hidden>
+      <h3>Never saved for</h3>
+      <div id="never-list" class="login-list"></div>
     </div>
   </section>
 

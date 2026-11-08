@@ -229,6 +229,9 @@ pub(crate) struct RunningAppState {
     /// The built-in content blocker.
     #[cfg(not(any(target_os = "android", target_env = "ohos")))]
     pub(crate) adblock: RefCell<crate::desktop::adblock::Adblock>,
+    /// Saved passwords.
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    pub(crate) passwords: RefCell<crate::desktop::passwords::Passwords>,
     /// Tabs with audio or video playing, which the tab unloader leaves alone.
     playing_media: RefCell<HashMap<WebViewId, std::time::Instant>>,
     /// When to run an idle garbage collection: a few seconds after pages finish loading or
@@ -313,6 +316,10 @@ impl RunningAppState {
             #[cfg(not(any(target_os = "android", target_env = "ohos")))]
             adblock: RefCell::new(crate::desktop::adblock::Adblock::new(
                 user_content_manager.clone(),
+            )),
+            #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+            passwords: RefCell::new(crate::desktop::passwords::Passwords::new(
+                &user_content_manager,
             )),
             user_content_manager,
             recent_console_errors: Default::default(),
@@ -1091,6 +1098,13 @@ impl WebViewDelegate for RunningAppState {
             message.strip_prefix(crate::desktop::adblock::COSMETIC_MESSAGE_PREFIX)
         {
             self.adblock.borrow().on_cosmetic_message(&webview, payload);
+            return;
+        }
+        // Sign-in forms and submitted logins: these carry passwords, so they're never printed
+        // or logged.
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        if let Some(payload) = message.strip_prefix(crate::desktop::passwords::MESSAGE_PREFIX) {
+            self.passwords.borrow_mut().on_page_message(&webview, payload);
             return;
         }
         if matches!(level, ConsoleLogLevel::Error | ConsoleLogLevel::Warn) {

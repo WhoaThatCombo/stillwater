@@ -57,6 +57,7 @@ use crate::desktop::panes::{Pane, PaneKind};
 use crate::desktop::headed_window;
 use crate::desktop::sidebar::{CONTENT_RADIUS, Sidebar, WindowAction, png_data_url};
 use crate::desktop::report;
+use crate::desktop::zen_import;
 
 /// A change to the split view / Glance panes, applied on the next update.
 pub(crate) enum PaneRequest {
@@ -491,6 +492,95 @@ impl Gui {
         );
     }
 
+    /// Import from Zen profile number `profile`; returns what happened, for the settings panel.
+    fn zen_import(
+        &mut self,
+        state: &RunningAppState,
+        profile: usize,
+        pins: bool,
+        tabs: bool,
+        passwords: bool,
+    ) -> String {
+        let profiles = zen_import::find_profiles();
+        let Some(profile) = profiles.get(profile) else {
+            return "Zen's profile wasn't found.".into();
+        };
+        let data = zen_import::read_profile(&profile.path);
+        let mut done = Vec::new();
+        let mut problems = Vec::new();
+        // Things worth knowing that aren't errors.
+        let mut notes = Vec::new();
+        let plural = |count: usize, one: &str, many: &str| {
+            format!("{count} {}", if count == 1 { one } else { many })
+        };
+        // Only mention what was actually added.
+        let mut add = |count: usize, one: &str, many: &str| {
+            if count > 0 {
+                done.push(plural(count, one, many));
+            }
+        };
+        if pins || tabs {
+            match &data.session {
+                Ok(session) => {
+                    let counts = self.sidebar.import_zen_session(session, pins, tabs);
+                    add(counts.spaces, "space", "spaces");
+                    add(counts.pins, "pinned tab", "pinned tabs");
+                    add(counts.essentials, "Essential", "Essentials");
+                    add(counts.folders, "folder", "folders");
+                    add(counts.tabs, "tab", "tabs");
+                },
+                Err(error) => problems.push(error.clone()),
+            }
+        }
+        if passwords {
+            match data.logins {
+                Ok(logins) => {
+                    let mut store = state.passwords.borrow_mut();
+                    let total = logins.len();
+                    let added = logins
+                        .into_iter()
+                        .filter(|login| {
+                            store.add(
+                                login.origin.clone(),
+                                login.username.clone(),
+                                login.password.clone(),
+                                login.created,
+                                login.last_used,
+                                login.times_used,
+                            )
+                        })
+                        .count();
+                    store.commit();
+                    add(added, "password", "passwords");
+                    if added < total {
+                        notes.push(format!("{} already saved.", plural(total - added, "login was", "logins were")));
+                    }
+                    if data.skipped_logins > 0 {
+                        notes.push(format!(
+                            "{} skipped (sign-ins for HTTP authentication, or unreadable).",
+                            plural(data.skipped_logins, "login", "logins")
+                        ));
+                    }
+                },
+                Err(error) => problems.push(error),
+            }
+        }
+        let mut result = if !done.is_empty() {
+            format!("Imported {}.", done.join(", "))
+        } else if problems.is_empty() {
+            "Nothing new to import.".to_owned()
+        } else {
+            String::new()
+        };
+        for problem in problems.into_iter().chain(notes) {
+            if !result.is_empty() {
+                result.push(' ');
+            }
+            result.push_str(&problem);
+        }
+        result
+    }
+
     pub(crate) fn sidebar_relative_point(
         &self,
         position: Point2D<f32, DeviceIndependentPixel>,
@@ -554,6 +644,25 @@ impl Gui {
                         webview.reload();
                     }
                 },
+                WindowAction::Password(action) => {
+                    let page = self.sidebar.navigated_webview(window);
+                    let revealed = state.passwords.borrow_mut().act(action, page.as_ref());
+                    if let Some((id, password)) = revealed {
+                        self.sidebar.reveal_password(id, &password);
+                    }
+                },
+                WindowAction::ZenScan(profile) => self.sidebar.set_zen(zen_scan(profile)),
+                WindowAction::ZenImport {
+                    profile,
+                    pins,
+                    tabs,
+                    passwords,
+                } => {
+                    let result = self.zen_import(state, profile, pins, tabs, passwords);
+                    let mut zen = zen_scan(profile);
+                    zen["result"] = serde_json::Value::String(result);
+                    self.sidebar.set_zen(zen);
+                },
                 WindowAction::CheckForUpdates => {
                     updater::check_now(headed_window.event_loop_proxy());
                 },
@@ -591,6 +700,12 @@ impl Gui {
                 "site": url.as_ref().is_some_and(|url| adblock.enabled_for(url)),
                 "blocked": page.map(|webview| adblock.blocked_count(webview.id())).unwrap_or(0),
             }));
+        }
+        {
+            let page = self.sidebar.navigated_webview(window);
+            let url = page.as_ref().and_then(|webview| webview.url());
+            self.sidebar
+                .set_passwords(state.passwords.borrow().to_json(url.as_ref()));
         }
         self.sidebar
             .set_window_state(!winit_window.is_decorated(), winit_window.is_maximized());
@@ -965,6 +1080,32 @@ fn embedder_image_to_egui_image(image: &Image) -> egui::ColorImage {
     }
 }
 
+
+/// The Zen profiles found and what profile number `profile` holds, for the import section in
+/// settings.
+fn zen_scan(profile: usize) -> serde_json::Value {
+    let profiles = zen_import::find_profiles();
+    let names: Vec<&str> = profiles.iter().map(|profile| profile.name.as_str()).collect();
+    let Some(chosen) = profiles.get(profile).or(profiles.first()) else {
+        return serde_json::json!({ "profiles": names });
+    };
+    let data = zen_import::read_profile(&chosen.path);
+    let session = data.session.as_ref().ok();
+    let count = |test: fn(&zen_import::ZenTab) -> bool| {
+        session.map_or(0, |session| session.tabs.iter().filter(|tab| test(tab)).count())
+    };
+    serde_json::json!({
+        "profiles": names,
+        "profile": profile.min(names.len() - 1),
+        "spaces": session.map_or(0, |session| session.spaces.len()),
+        "pins": count(|tab| tab.pinned && !tab.essential),
+        "essentials": count(|tab| tab.essential),
+        "tabs": count(|tab| !tab.pinned && !tab.essential),
+        "passwords": data.logins.as_ref().map_or(0, Vec::len),
+        "sessionProblem": data.session.as_ref().err(),
+        "passwordProblem": data.logins.as_ref().err(),
+    })
+}
 
 /// Converts all favicons that have not yet been processed into PNG data URLs for the sidebar.
 fn load_pending_favicons(window: &ServoShellWindow, sidebar: &mut Sidebar) {

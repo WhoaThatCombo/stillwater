@@ -145,7 +145,11 @@ surfman = { workspace = true, features = ["sm-angle-default"] }
 # Built-in content blocker (uBlock Origin's lists). Not "single-thread": the engine is shared
 # with Servo's network threads.
 adblock = { version = "0.13", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
+# Decrypting passwords imported from Zen (Firefox's NSS key store) and copying them.
+aes = { workspace = true }
+arboard = { workspace = true }
 base64 = { workspace = true }
+cbc = { workspace = true }
 content-security-policy = { workspace = true }
 dirs = { workspace = true }
 egui = { workspace = true }
@@ -155,8 +159,11 @@ gilrs = { workspace = true }
 glow = { workspace = true }
 headers = { workspace = true }
 itertools = { workspace = true }
+pbkdf2 = { workspace = true }
 rfd = { workspace = true }
+rusqlite = { workspace = true }
 serde_json = { workspace = true }
+sha1 = { workspace = true }
 sha2 = { workspace = true }
 # For optional feature servo-allocator/use-jemalloc and servo-allocator/allocation-tracking
 servo-allocator = { workspace = true }

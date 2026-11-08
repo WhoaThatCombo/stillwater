@@ -1040,3 +1040,164 @@ impl Workspaces {
         candidates
     }
 }
+
+/// What an import from Zen added.
+#[derive(Default)]
+pub(crate) struct ImportCounts {
+    pub(crate) spaces: usize,
+    pub(crate) folders: usize,
+    pub(crate) pins: usize,
+    pub(crate) essentials: usize,
+    pub(crate) tabs: usize,
+}
+
+/// The accent colour closest to `color`, or no tint for greys.
+fn nearest_color(color: Option<[u8; 3]>) -> usize {
+    let Some([r, g, b]) = color else {
+        return 0;
+    };
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    if max.saturating_sub(min) < 40 {
+        return 0;
+    }
+    let distance = |[cr, cg, cb]: [u8; 3]| {
+        let d = |a: u8, b: u8| (a as i32 - b as i32).pow(2);
+        d(r, cr) + d(g, cg) + d(b, cb)
+    };
+    COLORS
+        .iter()
+        .enumerate()
+        .filter_map(|(index, color)| Some((index, distance((*color)?))))
+        .min_by_key(|(_, distance)| *distance)
+        .map_or(0, |(index, _)| index)
+}
+
+impl Workspaces {
+    /// Add Zen's spaces with their pinned tabs, Essentials and folders (`pins`), and its other
+    /// tabs as unloaded tabs (`open_tabs`). Spaces with the same name are merged, and pages
+    /// already pinned there aren't pinned twice. `next_key` hands out sidebar ids for tabs.
+    pub(crate) fn import_zen(
+        &mut self,
+        session: &crate::desktop::zen_import::ZenSession,
+        pins: bool,
+        open_tabs: bool,
+        mut next_key: impl FnMut() -> u32,
+    ) -> ImportCounts {
+        let mut counts = ImportCounts::default();
+        // Zen space uuid -> Stillwater space id.
+        let mut spaces: HashMap<&str, u32> = HashMap::new();
+        for space in &session.spaces {
+            let used = session.tabs.iter().any(|tab| {
+                tab.space.as_deref() == Some(&space.uuid) &&
+                    !tab.essential &&
+                    if tab.pinned { pins } else { open_tabs }
+            });
+            if !used && !pins {
+                continue;
+            }
+            let existing = self
+                .list
+                .iter()
+                .find(|known| known.name.eq_ignore_ascii_case(space.name.trim()))
+                .map(|known| known.id);
+            let id = existing.unwrap_or_else(|| {
+                let id = self.next_id;
+                self.next_id += 1;
+                let count = self.list.len();
+                self.list.push(Workspace {
+                    id,
+                    name: space.name.trim().chars().take(32).collect(),
+                    icon: count % ICONS.len(),
+                    color: nearest_color(space.color),
+                });
+                counts.spaces += 1;
+                id
+            });
+            spaces.insert(&space.uuid, id);
+        }
+        let current = self.current;
+        let space_for = |uuid: &Option<String>| {
+            uuid.as_deref()
+                .and_then(|uuid| spaces.get(uuid).copied())
+                .unwrap_or(current)
+        };
+
+        if pins {
+            // Zen folder id -> Stillwater folder id (nested folders become top-level ones).
+            let mut folders: HashMap<&str, u32> = HashMap::new();
+            for folder in &session.folders {
+                let used = session
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.pinned && tab.folder.as_deref() == Some(&folder.id));
+                if !used {
+                    continue;
+                }
+                let space = space_for(&folder.space);
+                let existing = self
+                    .folders
+                    .iter()
+                    .find(|known| known.space == space && known.name == folder.name)
+                    .map(|known| known.id);
+                let id = existing.unwrap_or_else(|| {
+                    let id = self.next_id();
+                    self.folders.push(Folder {
+                        id,
+                        space,
+                        name: folder.name.chars().take(40).collect(),
+                        collapsed: folder.collapsed,
+                    });
+                    counts.folders += 1;
+                    id
+                });
+                folders.insert(&folder.id, id);
+            }
+            for tab in session.tabs.iter().filter(|tab| tab.pinned || tab.essential) {
+                let space = if tab.essential { ESSENTIALS } else { space_for(&tab.space) };
+                if self.pins.iter().any(|pin| pin.space == space && pin.url == tab.url) {
+                    continue;
+                }
+                let id = self.next_id();
+                self.pins.push(Pin {
+                    id,
+                    url: tab.url.clone(),
+                    title: tab.title.clone(),
+                    custom_title: None,
+                    favicon: None,
+                    space,
+                    folder: (!tab.essential)
+                        .then(|| tab.folder.as_deref().and_then(|folder| folders.get(folder).copied()))
+                        .flatten(),
+                    webview: None,
+                });
+                if tab.essential {
+                    counts.essentials += 1;
+                } else {
+                    counts.pins += 1;
+                }
+            }
+        }
+
+        if open_tabs {
+            for tab in session.tabs.iter().filter(|tab| !tab.pinned && !tab.essential) {
+                let space = space_for(&tab.space);
+                if self.unloaded.iter().any(|known| known.space == space && known.url == tab.url) {
+                    continue;
+                }
+                self.next_order += 1;
+                self.unloaded.push(UnloadedTab {
+                    key: next_key(),
+                    url: tab.url.clone(),
+                    title: tab.title.clone(),
+                    custom_title: None,
+                    favicon: None,
+                    space,
+                    order: self.next_order,
+                });
+                counts.tabs += 1;
+            }
+        }
+        self.save();
+        counts
+    }
+}

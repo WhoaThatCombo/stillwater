@@ -63,6 +63,13 @@ first install.
 - **Site compatibility**: Servo's experimental web features are on, small built-in shims fill web APIs Servo
   lacks (`ports/servoshell/desktop/compat.js`), and a disk cache speeds up revisits. **Report site isn't working**
   in a tab's menu opens a pre-filled GitHub issue; `tools/sitecheck` sweeps sites and diagnoses failures.
+- **Saved passwords**: after you sign in, Stillwater offers to save the password and fills it in next time
+  (the key in the URL bar picks between several logins). Settings → **Saved passwords** lists, shows,
+  copies and deletes them. They're encrypted with your Windows account (DPAPI), and copied passwords are
+  kept out of Windows' clipboard history.
+- **Import from Zen**: Settings → **Import from Zen** copies Zen Browser's spaces, pinned tabs, Essentials,
+  folders, open tabs and saved passwords from this computer. Zen's profile is only read. Passwords protected
+  by a Zen primary password can't be imported.
 - **Settings** (gear at the bottom of the sidebar, or <kbd>Ctrl</kbd>+<kbd>,</kbd>): light, dark or system
   appearance (websites that support dark mode follow along), your search engine (DuckDuckGo, Google,
   Bing or Brave Search), compact mode, and checking for updates.
@@ -134,23 +141,26 @@ cd stillwater
 |---|---|
 | [`ports/servoshell/desktop/sidebar.rs`](ports/servoshell/desktop/sidebar.rs) | Sidebar WebView, messaging, layout, compact mode |
 | [`ports/servoshell/desktop/workspaces.rs`](ports/servoshell/desktop/workspaces.rs) | Spaces: tab ownership, switching, colours, persistence |
+| [`ports/servoshell/desktop/passwords.rs`](ports/servoshell/desktop/passwords.rs) | Saved passwords: saving, filling, encrypted storage |
+| [`ports/servoshell/desktop/zen_import.rs`](ports/servoshell/desktop/zen_import.rs) | Reading Zen's spaces, tabs and passwords |
 | [`ports/servoshell/desktop/gui.rs`](ports/servoshell/desktop/gui.rs) | Compositing the sidebar and content |
 | [`ports/servoshell/desktop/headed_window.rs`](ports/servoshell/desktop/headed_window.rs) | Input routing and shortcuts |
 | [`resources/resource_protocol/sidebar/`](resources/resource_protocol/sidebar/) | The sidebar's HTML, CSS and JS |
 
 ## Roadmap
 
-- [ ] Split view (two pages side by side)
+- [x] Split view (two pages side by side)
 - [ ] Session restore
 - [ ] Drag tabs between spaces, pinned tabs, folders
 - [ ] Command palette
 - [x] Prebuilt Windows downloads
 - [x] Installer, default-browser registration and auto-updates
-- [ ] Built-in adblocker using uBlock Origin's filter lists
+- [x] Built-in adblocker using uBlock Origin's filter lists
 - [x] Essentials, pinned tabs, folders
-- [ ] Split view and Glance
+- [x] Split view and Glance
 - [ ] Bookmarks, history, downloads, find in page, settings
-- [ ] Import from Zen
+- [x] Import from Zen
+- [x] Saved passwords
 - [x] Stillwater name and icon in the window and installer
 
 ## Credits

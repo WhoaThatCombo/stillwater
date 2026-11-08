@@ -29,6 +29,9 @@ use crate::desktop::settings::{Settings, ThemeChoice};
 use crate::desktop::updater::{UpdateInfo, UpdateStatus};
 use crate::desktop::workspaces::{TabEntry, Workspaces};
 use crate::desktop::panes::PaneKind;
+use crate::desktop::passwords::PasswordAction;
+use crate::desktop::workspaces::ImportCounts;
+use crate::desktop::zen_import::ZenSession;
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
 use crate::window::ServoShellWindow;
 
@@ -65,6 +68,17 @@ pub(crate) enum WindowAction {
     AdblockToggleSite,
     /// Turn ad blocking on or off everywhere.
     AdblockSetEnabled(bool),
+    /// Save, fill, copy, show or delete saved passwords.
+    Password(PasswordAction),
+    /// Look for Zen Browser profiles to import from, and count what profile number N holds.
+    ZenScan(usize),
+    /// Import from a Zen profile (index from the scan): spaces and pins, open tabs, passwords.
+    ZenImport {
+        profile: usize,
+        pins: bool,
+        tabs: bool,
+        passwords: bool,
+    },
 }
 
 struct SidebarDelegate {
@@ -136,6 +150,10 @@ pub(crate) struct Sidebar {
     panes: (Option<(String, String)>, Option<(String, String)>),
     /// Ad blocking state for the shield and settings.
     adblock: serde_json::Value,
+    /// Saved passwords (without the passwords) and the save offer.
+    passwords: serde_json::Value,
+    /// Import from Zen: profiles found, what they hold, the last result.
+    zen: serde_json::Value,
 }
 
 impl Sidebar {
@@ -171,6 +189,8 @@ impl Sidebar {
             pane_focus: None,
             panes: (None, None),
             adblock: serde_json::Value::Null,
+            passwords: serde_json::Value::Null,
+            zen: serde_json::Value::Null,
             settings: RefCell::new(settings),
             update_check: None,
         }
@@ -241,6 +261,37 @@ impl Sidebar {
 
     pub(crate) fn set_adblock(&mut self, adblock: serde_json::Value) {
         self.adblock = adblock;
+    }
+
+    pub(crate) fn set_passwords(&mut self, passwords: serde_json::Value) {
+        // A new offer to save a password: show the sidebar if compact mode hid it.
+        if !passwords["offer"].is_null() && passwords["offer"] != self.passwords["offer"] && self.compact.get() {
+            self.peek.set(true);
+        }
+        self.passwords = passwords;
+    }
+
+    pub(crate) fn set_zen(&mut self, zen: serde_json::Value) {
+        self.zen = zen;
+        // Always send it, even if nothing changed: the page shows "Looking for Zen…" until then.
+        self.last_pushed_state = None;
+    }
+
+    /// Show a saved password the user asked to see. It's sent once, not kept in the state.
+    pub(crate) fn reveal_password(&self, id: u64, password: &str) {
+        let password = serde_json::to_string(password).unwrap_or_default();
+        self.call(&format!("revealPassword({id}, {password})"));
+    }
+
+    /// Add Zen's spaces and tabs to the sidebar.
+    pub(crate) fn import_zen_session(&mut self, session: &ZenSession, pins: bool, tabs: bool) -> ImportCounts {
+        let next_tab_id = &mut self.next_tab_id;
+        let counts = self.workspaces.import_zen(session, pins, tabs, || {
+            *next_tab_id += 1;
+            *next_tab_id
+        });
+        self.last_pushed_state = None;
+        counts
     }
 
     /// The page the URL bar and navigation buttons act on: the focused pane or the active tab.
@@ -735,6 +786,36 @@ impl Sidebar {
                         self.settings.borrow_mut().set_tab_unload_minutes(minutes);
                     }
                 },
+                "pw-save" => self.password(PasswordAction::SaveOffer),
+                "pw-never" => self.password(PasswordAction::NeverForSite),
+                "pw-dismiss" => self.password(PasswordAction::DismissOffer),
+                "pw-fill" | "pw-copy-user" | "pw-copy" | "pw-reveal" | "pw-delete" => {
+                    if let Ok(id) = argument.parse() {
+                        self.password(match command {
+                            "pw-fill" => PasswordAction::Fill(id),
+                            "pw-copy-user" => PasswordAction::Copy(id, false),
+                            "pw-copy" => PasswordAction::Copy(id, true),
+                            "pw-reveal" => PasswordAction::Reveal(id),
+                            _ => PasswordAction::Delete(id),
+                        });
+                    }
+                },
+                "pw-autofill" => self.password(PasswordAction::SetAutofill(argument == "1")),
+                "pw-forget-never" => self.password(PasswordAction::ForgetNever(argument.to_owned())),
+                "zen-scan" => self
+                    .window_actions
+                    .push(WindowAction::ZenScan(argument.parse().unwrap_or(0))),
+                // `<profile index>\t<what>`, what = comma-separated pins, tabs, passwords.
+                "zen-import" => {
+                    let (profile, what) = argument.split_once('\t').unwrap_or((argument, ""));
+                    let what: Vec<&str> = what.split(',').collect();
+                    self.window_actions.push(WindowAction::ZenImport {
+                        profile: profile.parse().unwrap_or(0),
+                        pins: what.contains(&"pins"),
+                        tabs: what.contains(&"tabs"),
+                        passwords: what.contains(&"passwords"),
+                    });
+                },
                 "set-unload-low-memory" => self
                     .settings
                     .borrow_mut()
@@ -744,6 +825,10 @@ impl Sidebar {
             window.set_needs_update();
         }
         layout_changed
+    }
+
+    fn password(&mut self, action: PasswordAction) {
+        self.window_actions.push(WindowAction::Password(action));
     }
 
     /// Send the current tab list and navigation state to the page, if it changed.
@@ -804,6 +889,8 @@ impl Sidebar {
             "glance": glance,
             "paneFocused": self.pane_focus.is_some(),
             "adblock": self.adblock,
+            "passwords": self.passwords,
+            "zen": self.zen,
             "compact": self.compact.get(),
             "workspaces": self.workspaces.to_json(),
             "background": background,
