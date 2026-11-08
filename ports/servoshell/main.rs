@@ -32,6 +32,12 @@ fn main() {
             let _result = Console::AttachConsole(Console::ATTACH_PARENT_PROCESS);
         }
     }
+    // A background test window is also silent (the media backend reads STILLWATER_MUTE_AUDIO).
+    // Set before any thread starts, while changing the environment is still safe.
+    if std::env::var_os("STILLWATER_BACKGROUND_WINDOW").is_some() {
+        // SAFETY: no other threads exist yet.
+        unsafe { std::env::set_var("STILLWATER_MUTE_AUDIO", "1") };
+    }
     cfg_if::cfg_if! {
         if #[cfg(not(any(target_os = "android", target_env = "ohos")))] {
             servoshell::main()

@@ -257,10 +257,10 @@ impl MediaOutput for MediaSink {
             let last_element = stream.elements.last();
             let last_element = last_element.as_ref().unwrap();
             let sink = match stream.type_ {
-                MediaStreamType::Audio => "autoaudiosink",
-                MediaStreamType::Video => "autovideosink",
+                MediaStreamType::Audio => crate::make_audio_sink(),
+                MediaStreamType::Video => gstreamer::ElementFactory::make("autovideosink").build(),
             };
-            let sink = gstreamer::ElementFactory::make(sink).build().unwrap();
+            let sink = sink.unwrap();
             pipeline.add(&sink).unwrap();
             gstreamer::Element::link_many(&[last_element, &sink][..]).unwrap();
 

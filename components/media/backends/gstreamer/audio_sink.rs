@@ -120,8 +120,7 @@ impl AudioSink for GStreamerAudioSink {
             .map_err(|error| {
                 AudioSinkError::Backend(format!("audioconvert creation failed: {error:?}"))
             })?;
-        let sink = gstreamer::ElementFactory::make("autoaudiosink")
-            .build()
+        let sink = crate::make_audio_sink()
             .map_err(|error| {
                 AudioSinkError::Backend(format!("autoaudiosink creation failed: {error:?}"))
             })?;

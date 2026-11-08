@@ -49,6 +49,10 @@ class Stillwater:
         environment = dict(os.environ if env is None else env)
         environment["STILLWATER_CONFIG_DIR"] = str(profile)
         environment["STILLWATER_NO_UPDATE_CHECK"] = "1"
+        # Automated runs are silent and never steal focus (STILLWATER_TEST_SOUND=1 keeps audio).
+        if "STILLWATER_TEST_SOUND" not in environment:
+            environment["STILLWATER_MUTE_AUDIO"] = "1"
+        environment["STILLWATER_BACKGROUND_WINDOW"] = "1"
         if log_file:
             environment["STILLWATER_LOG_FILE"] = str(log_file)
         if slow_script_seconds is not None:

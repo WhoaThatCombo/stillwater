@@ -63,6 +63,18 @@ pub struct GStreamerBackend {
     backend_chan: Arc<Mutex<Sender<BackendMsg>>>,
 }
 
+/// Where audio goes: the default output device, or nowhere when `STILLWATER_MUTE_AUDIO` is set
+/// (automated tests). A silent sink still runs at real-time speed, so playback timing is unchanged.
+pub(crate) fn make_audio_sink() -> Result<gstreamer::Element, gstreamer::glib::BoolError> {
+    if std::env::var_os("STILLWATER_MUTE_AUDIO").is_some() {
+        gstreamer::ElementFactory::make("fakesink")
+            .property("sync", true)
+            .build()
+    } else {
+        gstreamer::ElementFactory::make("autoaudiosink").build()
+    }
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct ErrorLoadingPlugins<'a>(Vec<&'a str>);
