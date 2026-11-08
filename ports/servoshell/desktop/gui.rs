@@ -53,6 +53,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::Window;
 
 use crate::desktop::event_loop::{AppEvent, RepaintEventLoopWaker};
+use crate::desktop::find_bar::FindBar;
 use crate::desktop::panes::{Pane, PaneKind};
 use crate::desktop::headed_window;
 use crate::desktop::sidebar::{CONTENT_RADIUS, Sidebar, WindowAction, png_data_url};
@@ -114,6 +115,8 @@ pub struct Gui {
     pane_control_rects: RefCell<Vec<egui::Rect>>,
     /// Tabs whose page has drawn at least once (their surfaces start out white).
     painted_webviews: HashSet<WebViewId>,
+    /// The find bar (Ctrl+F).
+    pub(crate) find_bar: FindBar,
 }
 
 #[cfg(any(
@@ -302,6 +305,7 @@ impl Gui {
             glance_rect: None,
             pane_control_rects: Default::default(),
             painted_webviews: HashSet::new(),
+            find_bar: FindBar::default(),
         }
     }
 
@@ -406,6 +410,11 @@ impl Gui {
                 pane.webview.set_focused(focus == Some(kind));
             }
         }
+    }
+
+    /// Whether `point` is on the find bar (handled by egui, not the page).
+    pub(crate) fn find_bar_contains(&self, point: Point2D<f32, DeviceIndependentPixel>) -> bool {
+        self.find_bar.contains(pos2(point.x, point.y))
     }
 
     /// Whether `point` is on a pane's buttons (handled by egui, not the page).
@@ -651,6 +660,7 @@ impl Gui {
                         self.sidebar.reveal_password(id, &password);
                     }
                 },
+                WindowAction::Find(command) => self.find_bar.handle(command),
                 WindowAction::ZenScan(profile) => self.sidebar.set_zen(zen_scan(profile)),
                 WindowAction::ZenImport {
                     profile,
@@ -707,6 +717,7 @@ impl Gui {
             self.sidebar
                 .set_passwords(state.passwords.borrow().to_json(url.as_ref()));
         }
+        self.sidebar.set_playing_media(state.playing_media());
         self.sidebar
             .set_window_state(!winit_window.is_decorated(), winit_window.is_maximized());
         self.sidebar.push_state(window);
@@ -728,6 +739,8 @@ impl Gui {
             glance_rect,
             pane_requests,
             pane_control_rects,
+            pane_focus,
+            find_bar,
             ..
         } = self;
         pane_control_rects.borrow_mut().clear();
@@ -916,6 +929,26 @@ impl Gui {
                     None => {},
                 }
                 *glance_rect = Some(rect);
+            }
+
+            // The find bar, over the page it searches.
+            {
+                let (webview, rect) = match pane_focus.get() {
+                    Some(PaneKind::Glance) if glance_rect.is_some() => {
+                        (glance.as_ref().map(|pane| pane.webview.clone()), *glance_rect)
+                    },
+                    Some(PaneKind::Split) if split.is_some() => {
+                        (split.as_ref().map(|pane| pane.webview.clone()), new_split_rect)
+                    },
+                    _ => (window.active_webview(), Some(new_content_rect)),
+                };
+                find_bar.update(
+                    ctx,
+                    window,
+                    webview,
+                    rect.unwrap_or(new_content_rect),
+                    theme,
+                );
             }
 
             // Zen's top bar: the window buttons slide in when the mouse touches the top edge

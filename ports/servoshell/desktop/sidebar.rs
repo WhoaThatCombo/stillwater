@@ -25,6 +25,7 @@ use servo::{
 use url::Url;
 
 use crate::desktop::event_loop::RepaintEventLoopWaker;
+use crate::desktop::find_bar::FindCommand;
 use crate::desktop::settings::{Settings, ThemeChoice};
 use crate::desktop::updater::{UpdateInfo, UpdateStatus};
 use crate::desktop::workspaces::{TabEntry, Workspaces};
@@ -79,6 +80,8 @@ pub(crate) enum WindowAction {
         tabs: bool,
         passwords: bool,
     },
+    /// Drive the find bar (`find-*` commands).
+    Find(FindCommand),
 }
 
 struct SidebarDelegate {
@@ -150,6 +153,8 @@ pub(crate) struct Sidebar {
     panes: (Option<(String, String)>, Option<(String, String)>),
     /// Ad blocking state for the shield and settings.
     adblock: serde_json::Value,
+    /// Tabs playing audio or video, for the speaker icon.
+    playing_media: HashSet<WebViewId>,
     /// Saved passwords (without the passwords) and the save offer.
     passwords: serde_json::Value,
     /// Import from Zen: profiles found, what they hold, the last result.
@@ -189,6 +194,7 @@ impl Sidebar {
             pane_focus: None,
             panes: (None, None),
             adblock: serde_json::Value::Null,
+            playing_media: HashSet::new(),
             passwords: serde_json::Value::Null,
             zen: serde_json::Value::Null,
             settings: RefCell::new(settings),
@@ -257,6 +263,10 @@ impl Sidebar {
     ) {
         self.pane_focus = focus;
         self.panes = (split, glance);
+    }
+
+    pub(crate) fn set_playing_media(&mut self, playing_media: HashSet<WebViewId>) {
+        self.playing_media = playing_media;
     }
 
     pub(crate) fn set_adblock(&mut self, adblock: serde_json::Value) {
@@ -820,6 +830,11 @@ impl Sidebar {
                     .settings
                     .borrow_mut()
                     .set_unload_on_low_memory(argument == "1"),
+                command if command.starts_with("find-") => {
+                    if let Some(find) = FindCommand::parse(command, argument) {
+                        self.window_actions.push(WindowAction::Find(find));
+                    }
+                },
                 _ => warn!("unknown sidebar message: {message}"),
             }
             window.set_needs_update();
@@ -871,6 +886,7 @@ impl Sidebar {
                         "loading": matches!(webview.load_status(), LoadStatus::Started | LoadStatus::HeadParsed),
                         "favicon": self.favicons.get(&id),
                         "loaded": true,
+                        "playing": self.playing_media.contains(&id),
                     }));
                 },
                 TabEntry::Unloaded(key) => tabs.extend(self.workspaces.unloaded_json(key)),

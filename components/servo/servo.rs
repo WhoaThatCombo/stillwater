@@ -590,6 +590,13 @@ impl ServoInner {
                     );
                 }
             },
+            EmbedderMsg::FindInPageResult(webview_id, result) => {
+                if let Some(webview) = self.get_webview_handle(webview_id) {
+                    webview
+                        .delegate()
+                        .notify_find_in_page_result(webview, result);
+                }
+            },
             EmbedderMsg::AllowUnload(webview_id, response_sender) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
                     let request = AllowOrDenyRequest::new(

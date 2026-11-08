@@ -1197,6 +1197,8 @@ impl Fragment {
             .to_webrender();
         let common = builder.common_properties(state, glyph_bounds, &parent_style);
 
+        Self::build_display_list_for_find_highlights(fragment, builder, state, line_box_rect);
+
         // Shadows. According to CSS-BACKGROUNDS, text shadows render in *reverse* order (front to
         // back).
         let shadows = &parent_style.get_inherited_text().text_shadow;
@@ -1465,6 +1467,76 @@ impl Fragment {
                 do_aa: true,
             }),
         );
+    }
+
+    /// Paint the find-in-page matches in this fragment's text: the active match in orange,
+    /// the others in yellow, like other browsers.
+    // TODO: Like the selection, this does not account for vertical and RTL text.
+    fn build_display_list_for_find_highlights(
+        fragment: &TextFragment,
+        builder: &mut DisplayListBuilder<'_>,
+        state: &TraversalState,
+        line_box_rect: &PhysicalRect<Au>,
+    ) {
+        let run_data = &fragment.run_data;
+        let highlights = run_data.find_highlights.borrow();
+        if highlights.is_empty() || fragment.is_empty_for_text_cursor {
+            return;
+        }
+
+        let parent_style = fragment.style();
+        let fragment_x = state.origin.x + fragment.base.rect().origin.x;
+        let fragment_range = &fragment.character_range_in_dom_node;
+        for highlight in highlights.iter() {
+            let range = run_data
+                .map_dom_range_to_transformed_range((highlight.start..highlight.end).into());
+            if range.start >= fragment_range.end || range.end <= fragment_range.start {
+                continue;
+            }
+
+            // Measure where the match starts and ends within this fragment.
+            let mut current_character_index = fragment_range.start;
+            let mut current_advance = Au::zero();
+            let mut start_x = None;
+            let mut end_x = None;
+            'glyph_stores: for glyph_store in fragment.glyphs.iter() {
+                for glyph in glyph_store.glyphs() {
+                    if current_character_index >= range.end {
+                        break 'glyph_stores;
+                    }
+                    if current_character_index >= range.start {
+                        start_x = start_x.or(Some(current_advance));
+                    }
+                    current_character_index += glyph.character_count();
+                    current_advance += glyph.advance();
+                    if glyph.char_is_word_separator() {
+                        current_advance += fragment.justification_adjustment;
+                    }
+                    if current_character_index <= range.end {
+                        end_x = Some(current_advance);
+                    }
+                }
+            }
+            let (Some(start_x), Some(end_x)) = (start_x, end_x) else {
+                continue;
+            };
+            if end_x <= start_x {
+                continue;
+            }
+
+            let rect = Rect::new(
+                Point2D::new(fragment_x + start_x, line_box_rect.min_y()),
+                Size2D::new(end_x - start_x, line_box_rect.height()),
+            )
+            .to_webrender();
+            let color = if highlight.active {
+                wr::ColorF::new(1.0, 0.59, 0.2, 0.85)
+            } else {
+                wr::ColorF::new(1.0, 0.92, 0.0, 0.55)
+            };
+            let common = builder.common_properties(state, rect, &parent_style);
+            builder.wr().push_rect(&common, rect, color);
+        }
     }
 
     // TODO: This caret/text selection implementation currently does not account for vertical text

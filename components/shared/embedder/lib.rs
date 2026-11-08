@@ -491,6 +491,8 @@ pub enum EmbedderMsg {
     ),
     /// Wether or not to unload a document
     AllowUnload(WebViewId, GenericSender<AllowOrDeny>),
+    /// The result of a find-in-page request for this `WebView`.
+    FindInPageResult(WebViewId, FindInPageResult),
     /// Inform embedder to clear the clipboard
     ClearClipboard(WebViewId),
     /// Gets system clipboard contents
@@ -811,6 +813,47 @@ pub enum MediaSessionActionType {
     Stop,
     /// The action intent is to move the playback time to a specific time.
     SeekTo,
+}
+
+/// Options for [`FindInPageRequest::Find`].
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FindInPageOptions {
+    /// Whether letter case must match. When `false`, `"servo"` also finds `"Servo"`.
+    pub case_sensitive: bool,
+}
+
+/// A find-in-page request for a `WebView`'s top-level document.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum FindInPageRequest {
+    /// Find every visible occurrence of `query`, highlight them all and scroll the active
+    /// one into view. A new query keeps the active match near the previous one, so typing
+    /// more characters narrows the search in place. An empty query stops finding.
+    Find {
+        query: String,
+        options: FindInPageOptions,
+    },
+    /// Make the next match active, wrapping around after the last one.
+    Next,
+    /// Make the previous match active, wrapping around before the first one.
+    Previous,
+    /// Remove all highlights and forget the search.
+    Stop,
+}
+
+/// What a find-in-page request found.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FindInPageResult {
+    /// How many matches were found, at most [`FindInPageResult::MATCH_LIMIT`].
+    pub match_count: usize,
+    /// The zero-based index of the active match, if there is one.
+    pub active_match: Option<usize>,
+    /// Whether the search stopped at [`FindInPageResult::MATCH_LIMIT`] matches.
+    pub limit_reached: bool,
+}
+
+impl FindInPageResult {
+    /// The most matches a search reports and highlights.
+    pub const MATCH_LIMIT: usize = 1000;
 }
 
 /// The status of the load in this `WebView`.

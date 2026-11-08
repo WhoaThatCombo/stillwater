@@ -70,6 +70,7 @@ mod from_embedder {
                 Self::SetScrollStates(..) => target!("SetScrollStates"),
                 Self::PaintMetric(..) => target!("PaintMetric"),
                 Self::EvaluateJavaScript(..) => target!("EvaluateJavaScript"),
+                Self::FindInPage(..) => target!("FindInPage"),
                 Self::CreateMemoryReport(..) => target!("CreateMemoryReport"),
                 Self::CollectGarbage => target!("CollectGarbage"),
                 Self::SendImageKeysForPipeline(..) => target!("SendImageKeysForPipeline"),

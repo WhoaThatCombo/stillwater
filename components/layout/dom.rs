@@ -6,8 +6,9 @@ use std::marker::PhantomData;
 
 use atomic_refcell::{AtomicRef, AtomicRefCell, AtomicRefMut};
 use layout_api::{
-    GenericLayoutDataTrait, LayoutDataTrait, LayoutElement, LayoutElementType, LayoutNode,
-    LayoutNodeType as ScriptLayoutNodeType, NodeRenderingType, SVGElementData,
+    FindHighlight, GenericLayoutDataTrait, LayoutDataTrait, LayoutElement, LayoutElementType,
+    LayoutNode, LayoutNodeType as ScriptLayoutNodeType, NodeRenderingType, SVGElementData,
+    TextRunFindInfo,
 };
 use malloc_size_of_derive::MallocSizeOf;
 use script::layout_dom::ServoLayoutNode;
@@ -457,6 +458,44 @@ impl GenericLayoutDataTrait for DOMLayoutData {
         let end =
             (range_in_text_run.end + start_in_ifc).to_utf8_code_units_in(AssumeUnder4GB, string);
         Some(string[start.0 as usize..end.0 as usize].to_owned())
+    }
+
+    fn set_text_run_find_highlights(&self, highlights: Vec<FindHighlight>) -> bool {
+        let inner = self.0.borrow();
+        // Like the selection, `::first-letter` splits the text into several runs.
+        if inner
+            .pseudo_boxes
+            .iter()
+            .any(|pseudo_box| matches!(pseudo_box.pseudo, PseudoElement::FirstLetter))
+        {
+            return false;
+        }
+        if let Some(LayoutBox::Text(text_run)) = &*inner.self_box.borrow() {
+            *text_run.borrow().run_data.find_highlights.borrow_mut() = highlights;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn text_run_find_info(&self) -> Option<TextRunFindInfo> {
+        let inner = self.0.borrow();
+        let self_box = inner.self_box.borrow();
+        let Some(LayoutBox::Text(text_run)) = self_box.as_ref() else {
+            return None;
+        };
+        let run_data = &text_run.borrow().run_data;
+        let visible = run_data
+            .inline_styles
+            .style
+            .borrow()
+            .get_inherited_box()
+            .visibility ==
+            style::computed_values::visibility::T::Visible;
+        Some(TextRunFindInfo {
+            inline_formatting_context: std::sync::Arc::as_ptr(&run_data.text_content) as usize,
+            visible,
+        })
     }
 }
 

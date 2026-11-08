@@ -894,6 +894,13 @@ impl WebViewDelegate for RunningAppState {
         self.window_for_webview(&webview).set_needs_update();
     }
 
+    fn notify_find_in_page_result(&self, webview: WebView, result: servo::FindInPageResult) {
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        crate::desktop::find_bar::record_result(webview.id(), result);
+        let _ = result;
+        self.window_for_webview(&webview).set_needs_update();
+    }
+
     fn notify_traversal_complete(&self, _webview: WebView, traversal_id: TraversalId) {
         let mut webdriver_state = self.webdriver_senders.borrow_mut();
         if let Entry::Occupied(entry) = webdriver_state.pending_traversals.entry(traversal_id) {
@@ -956,10 +963,14 @@ impl WebViewDelegate for RunningAppState {
             servo::MediaSessionEvent::SetPositionState(state) => state.playback_rate != 0.0,
             servo::MediaSessionEvent::SetMetadata(_) => false,
         };
-        if playing {
+        if playing &&
             self.playing_media
                 .borrow_mut()
-                .insert(webview.id(), std::time::Instant::now());
+                .insert(webview.id(), std::time::Instant::now())
+                .is_none()
+        {
+            // Show the tab's speaker icon.
+            self.window_for_webview(&webview).set_needs_update();
         }
     }
 

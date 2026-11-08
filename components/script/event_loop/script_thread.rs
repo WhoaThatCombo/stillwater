@@ -1970,6 +1970,13 @@ impl ScriptThread {
             ) => {
                 self.handle_evaluate_javascript(cx, webview_id, pipeline_id, evaluation_id, script);
             },
+            ScriptThreadMessage::FindInPage(webview_id, pipeline_id, request) => {
+                let document = self.documents.borrow().find_document(pipeline_id);
+                if let Some(document) = document {
+                    let result = document.handle_find_in_page(cx, request);
+                    document.send_to_embedder(EmbedderMsg::FindInPageResult(webview_id, result));
+                }
+            },
             ScriptThreadMessage::SendImageKeysBatch(pipeline_id, image_keys) => {
                 if let Some(window) = self.documents.borrow().find_window(pipeline_id) {
                     window

@@ -209,6 +209,7 @@ function renderRow(item, isPin) {
     openMenu(items(), box.left, box.bottom);
   });
   const parts = [tabIcon(item), label];
+  if (item.playing) parts.push(mediaIndicator());
   if (isPin && item.changed) {
     parts.push(iconButton("tab-reset", "", "Back to pinned page", () => send("pin-reset", item.pinId)));
   }

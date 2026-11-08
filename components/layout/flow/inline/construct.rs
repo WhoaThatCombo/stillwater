@@ -483,6 +483,17 @@ impl InlineFormattingContextBuilder {
 
         self.text_segments.push(new_text);
 
+        // Find-in-page highlights are in offsets of the whole text node, so skip them when
+        // only part of it is pushed here (after a `::first-letter`).
+        let find_highlights = if info.node.is_text_node() &&
+            info.pseudo_element_chain().is_empty() &&
+            text.len() == info.node.text_content().len()
+        {
+            info.node.text_node_find_highlights()
+        } else {
+            Vec::new()
+        };
+
         let current_inline_styles = self.shared_inline_styles();
         let box_slot = info.node.is_text_node().then(|| info.node.box_slot());
         let text_run = ArcRefCell::new(TextRun::new(
@@ -493,6 +504,7 @@ impl InlineFormattingContextBuilder {
                 character_range_in_ifc_text: new_character_range,
                 original_offset: original_size_before,
                 selection: AtomicRefCell::new(selection),
+                find_highlights: AtomicRefCell::new(find_highlights),
                 paints_caret: info.node.text_node_paints_caret(),
                 needs_caret_placeholder,
                 offset_map: self.offset_map.clone(),

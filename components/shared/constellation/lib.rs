@@ -19,9 +19,9 @@ use embedder_traits::user_contents::{
     UserContentManagerId, UserScript, UserScriptId, UserStyleSheet, UserStyleSheetId,
 };
 use embedder_traits::{
-    EmbedderControlId, EmbedderControlResponse, InputEventAndId, JavaScriptEvaluationId,
-    MediaSessionActionType, NewWebViewDetails, PaintHitTestResult, Theme, TraversalId, UrlRequest,
-    ViewportDetails, WebDriverCommandMsg,
+    EmbedderControlId, EmbedderControlResponse, FindInPageRequest, InputEventAndId,
+    JavaScriptEvaluationId, MediaSessionActionType, NewWebViewDetails, PaintHitTestResult, Theme,
+    TraversalId, UrlRequest, ViewportDetails, WebDriverCommandMsg,
 };
 pub use from_script_message::*;
 use malloc_size_of_derive::MallocSizeOf;
@@ -101,6 +101,8 @@ pub enum EmbedderToConstellationMessage {
     /// Evaluate a JavaScript string in the context of a `WebView`. When execution is complete or an
     /// error is encountered, a correpsonding message will be sent to the embedding layer.
     EvaluateJavaScript(WebViewId, JavaScriptEvaluationId, String),
+    /// Find text in a `WebView`'s top-level document. The result is sent to the embedder.
+    FindInPage(WebViewId, FindInPageRequest),
     /// Create a memory report and return it via the [`GenericCallback`]
     CreateMemoryReport(GenericCallback<MemoryReportResult>),
     /// Run a full, shrinking JavaScript garbage collection in every script thread.

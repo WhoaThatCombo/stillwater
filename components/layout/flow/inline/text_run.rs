@@ -12,6 +12,7 @@ use fonts::font_feature_values::ResolvedFontVariantAlternates;
 use fonts::{FontContext, FontRef, ShapedText, ShapedTextSlice, ShapingFlags, ShapingOptions};
 use icu_locale_core::subtags::Language;
 use icu_properties::props::{EnumeratedProperty, LineBreak};
+use layout_api::FindHighlight;
 use log::warn;
 use malloc_size_of_derive::MallocSizeOf;
 use servo_arc::Arc as ServoArc;
@@ -348,6 +349,8 @@ pub(crate) struct SharedTextRunData {
     /// selection.
     // TODO: make this more compact with a pair of `AtomicUsize`?
     pub selection: AtomicRefCell<Option<RangeAny<Utf32CodeUnits>>>,
+    /// Find-in-page matches to paint under this text, in the DOM node's `char` offsets.
+    pub find_highlights: AtomicRefCell<Vec<FindHighlight>>,
     /// Whether a caret should be painted when the selection is an empty range (start == end)
     pub paints_caret: bool,
     /// Whether a caret placeholder should be added for empty text runs or for empty

@@ -70,6 +70,11 @@ first install.
 - **Import from Zen**: Settings → **Import from Zen** copies Zen Browser's spaces, pinned tabs, Essentials,
   folders, open tabs and saved passwords from this computer. Zen's profile is only read. Passwords protected
   by a Zen primary password can't be imported.
+- **Find in page**: <kbd>Ctrl</kbd>+<kbd>F</kbd> opens a small find bar at the top-right of the page.
+  Matches highlight as you type (the active one in orange), with a "3 of 17" counter, Match case,
+  and wrap-around next/previous. The engine searches the rendered text and paints the highlights
+  itself, so the page's DOM is never touched.
+- **Audio indicator**: tabs playing audio or video show a speaker icon.
 - **Settings** (gear at the bottom of the sidebar, or <kbd>Ctrl</kbd>+<kbd>,</kbd>): light, dark or system
   appearance (websites that support dark mode follow along), your search engine (DuckDuckGo, Google,
   Bing or Brave Search), compact mode, and checking for updates.
@@ -90,6 +95,7 @@ first install.
 | <kbd>Ctrl</kbd>+<kbd>,</kbd> | Open settings |
 | <kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd> | Back / forward |
 | <kbd>Ctrl</kbd>+<kbd>R</kbd> / <kbd>F5</kbd> | Reload |
+| <kbd>Ctrl</kbd>+<kbd>F</kbd> | Find in page (<kbd>Enter</kbd> / <kbd>F3</kbd> next, <kbd>Shift</kbd> for previous, <kbd>Esc</kbd> closes) |
 
 In the sidebar's space header, click the **icon** to change it, the **name** to rename the space, and the
 **dot** to change its colour. The trash icon (click twice) deletes a space and closes its tabs.
@@ -144,6 +150,7 @@ cd stillwater
 | [`ports/servoshell/desktop/passwords.rs`](ports/servoshell/desktop/passwords.rs) | Saved passwords: saving, filling, encrypted storage |
 | [`ports/servoshell/desktop/zen_import.rs`](ports/servoshell/desktop/zen_import.rs) | Reading Zen's spaces, tabs and passwords |
 | [`ports/servoshell/desktop/gui.rs`](ports/servoshell/desktop/gui.rs) | Compositing the sidebar and content |
+| [`ports/servoshell/desktop/find_bar.rs`](ports/servoshell/desktop/find_bar.rs) | The find bar; the search itself is `WebView::find_in_page` ([`find_in_page.rs`](components/script/dom/document/find_in_page.rs)) |
 | [`ports/servoshell/desktop/headed_window.rs`](ports/servoshell/desktop/headed_window.rs) | Input routing and shortcuts |
 | [`resources/resource_protocol/sidebar/`](resources/resource_protocol/sidebar/) | The sidebar's HTML, CSS and JS |
 
@@ -161,6 +168,8 @@ cd stillwater
 - [ ] Bookmarks, history, downloads, find in page, settings
 - [x] Import from Zen
 - [x] Saved passwords
+- [x] Find in page
+- [ ] Mute a tab from its audio icon (needs per-WebView muting in Servo)
 - [x] Stillwater name and icon in the window and installer
 
 ## Credits

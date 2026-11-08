@@ -280,6 +280,12 @@ impl<'dom> LayoutDom<'dom, Node> {
         Some(RangeAny::new(start, end))
     }
 
+    /// The find-in-page matches to paint over this text node.
+    pub(crate) fn find_highlights_for_text_node(&self) -> Vec<layout_api::FindHighlight> {
+        self.owner_doc_for_layout()
+            .find_highlights_for_layout(self.unsafe_get())
+    }
+
     pub(crate) fn text_node_paints_caret(&self) -> bool {
         // TODO: Add support for `contenteditable`.
         self.parent_node_ref()

@@ -149,6 +149,7 @@ use crate::dom::customelementregistry::{CustomElementReactionStack, CustomElemen
 use crate::dom::customevent::CustomEvent;
 use crate::dom::document::accessibility_data::AccessibilityData;
 use crate::dom::document::animation_manager::AnimationManager;
+use crate::dom::document::find_in_page::FindInPage;
 use crate::dom::document::focus::{DocumentFocusHandler, FocusableArea};
 use crate::dom::document::iframe_collection::IFrameCollection;
 use crate::dom::document::tree_ordered_index_map::TreeOrderedIndexMap;
@@ -642,6 +643,8 @@ pub(crate) struct Document {
     has_pending_animated_image_update: Cell<bool>,
     /// <https://w3c.github.io/slection-api/#dfn-selection>
     selection: MutNullableDom<Selection>,
+    /// The embedder's find-in-page search and its highlights.
+    find_in_page: DomRefCell<FindInPage>,
     /// A timeline for animations which is used for synchronizing animations.
     /// <https://drafts.csswg.org/web-animations/#timeline>
     timeline: Dom<DocumentTimeline>,
@@ -4201,6 +4204,10 @@ impl Document {
         self.refresh_focus_rendering();
     }
 
+    pub(crate) fn find_in_page_state(&self) -> &DomRefCell<FindInPage> {
+        &self.find_in_page
+    }
+
     pub(crate) fn refresh_focus_rendering(&self) {
         self.window().layout().set_needs_new_display_list();
     }
@@ -4267,6 +4274,14 @@ impl<'dom> LayoutDom<'dom, Document> {
     #[expect(unsafe_code)]
     pub(crate) fn visible_selection_for_layout(&self) -> Option<LayoutDom<'dom, Selection>> {
         unsafe { self.unsafe_get().selection.to_layout() }
+    }
+
+    #[expect(unsafe_code)]
+    pub(crate) fn find_highlights_for_layout(
+        &self,
+        node: &Node,
+    ) -> Vec<layout_api::FindHighlight> {
+        unsafe { self.unsafe_get().find_in_page.borrow_for_layout() }.highlights_for_layout(node)
     }
 
     pub(crate) fn default_language_for_layout(&self) -> AtomicRef<'dom, Option<String>> {
@@ -4494,6 +4509,7 @@ impl Document {
             dirty_canvases: DomRefCell::new(Default::default()),
             has_pending_animated_image_update: Cell::new(false),
             selection: MutNullableDom::new(None),
+            find_in_page: Default::default(),
             timeline: Dom::from_ref(timeline),
             animation_manager: AnimationManager::new(),
             dirty_root: Default::default(),

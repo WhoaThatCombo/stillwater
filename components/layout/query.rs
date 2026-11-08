@@ -153,6 +153,83 @@ pub(crate) fn process_box_areas_request(
         .collect()
 }
 
+/// The union of the rectangles of the text fragments (one per line) of the text node `node`
+/// that hold the DOM `char`s in `range`, in the same space as [`process_box_area_request`].
+/// Used to scroll a find-in-page match into view.
+pub(crate) fn process_text_range_rect_request(
+    layout_thread: &LayoutThread,
+    stacking_context_tree: &StackingContextTree,
+    node: ServoLayoutNode<'_>,
+    range: std::ops::Range<Utf32CodeUnits>,
+) -> Option<Rect<Au, CSSPixel>> {
+    fn collect(
+        fragment: &Fragment,
+        origin: Point2D<Au, CSSPixel>,
+        target: OpaqueNode,
+        range: &std::ops::Range<Utf32CodeUnits>,
+        union: &mut Option<PhysicalRect<Au>>,
+    ) {
+        let Some(children) = fragment.children() else {
+            return;
+        };
+        for child in children.iter() {
+            if let Fragment::Text(text) = child {
+                let is_target = text
+                    .base
+                    .tag
+                    .as_ref()
+                    .is_some_and(|tag| tag.node == target && tag.pseudo_element_chain.is_empty());
+                if !is_target {
+                    continue;
+                }
+                let range = text
+                    .run_data
+                    .map_dom_range_to_transformed_range(range.clone().into());
+                let fragment_range = &text.character_range_in_dom_node;
+                if range.start >= fragment_range.end || range.end <= fragment_range.start {
+                    continue;
+                }
+                let rect = text.base.rect().translate(origin.to_vector());
+                *union = Some(union.map_or(rect, |union| union.union(&rect)));
+            } else if let Some(base) = child.base() {
+                collect(
+                    child,
+                    origin + base.rect().origin.to_vector(),
+                    target,
+                    range,
+                    union,
+                );
+            }
+        }
+    }
+
+    // Text fragments are children of the boxes of the nearest flat tree ancestor that has any.
+    let target = node.opaque();
+    let mut ancestor = node;
+    let fragments = loop {
+        #[expect(unsafe_code)]
+        let parent = unsafe { ancestor.dangerous_flat_tree_parent_considering_pseudos() }?;
+        ancestor = parent;
+        let fragments = ancestor.fragments_for_pseudo(None);
+        if !fragments.is_empty() {
+            break fragments;
+        }
+    };
+
+    let mut union = None;
+    for fragment in &fragments {
+        if let Some(content_rect) =
+            fragment.cumulative_box_area_rect(BoxAreaType::Content, layout_thread.into())
+        {
+            collect(fragment, content_rect.origin, target, &range, &mut union);
+        }
+    }
+    let union = union?;
+    let transform =
+        root_transform_for_fragments(&stacking_context_tree.paint_info.scroll_tree, &fragments)?;
+    transform_au_rectangle(union, transform)
+}
+
 pub fn process_client_rect_request(node: ServoLayoutNode<'_>) -> Rect<i32, CSSPixel> {
     node.fragments_for_pseudo(None)
         .first()

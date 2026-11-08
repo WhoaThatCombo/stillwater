@@ -11,6 +11,7 @@ pub(crate) mod cli;
 pub(crate) mod dialog;
 pub(crate) mod diagnostics;
 pub(crate) mod event_loop;
+pub(crate) mod find_bar;
 #[cfg(feature = "gamepad")]
 pub(crate) mod gamepad;
 pub mod geometry;
