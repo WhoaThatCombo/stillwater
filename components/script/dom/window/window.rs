@@ -1042,8 +1042,8 @@ impl Window {
 
     /// Part of <https://fetch.spec.whatwg.org/#populate-request-from-client>
     pub(crate) fn request_client(&self, no_gc: Option<&NoGC>) -> RequestClient {
-        // Step 1.2.2. If global is a Window object and global’s navigable is not null,
-        // then set request’s traversable for user prompts to global’s navigable’s traversable navigable.
+        // Step 1.2.2. If global is a Window object and globalâ€™s navigable is not null,
+        // then set requestâ€™s traversable for user prompts to globalâ€™s navigableâ€™s traversable navigable.
         let (
             preloaded_resources,
             insecure_requests_policy,
@@ -1888,7 +1888,7 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
     /// <https://drafts.csswg.org/cssom-view/#dom-window-visualviewport>
     fn GetVisualViewport(&self, cx: &mut JSContext) -> Option<DomRoot<VisualViewport>> {
         // > If the associated document is fully active, the visualViewport attribute must return the
-        // > VisualViewport object associated with the Window object’s associated document. Otherwise,
+        // > VisualViewport object associated with the Window objectâ€™s associated document. Otherwise,
         // > it must return null.
         if !self.Document().is_fully_active() {
             return None;
@@ -2058,7 +2058,7 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
 
         // Step 4. Let decls be an empty list of CSS declarations.
         // Step 5: If obj is not null, and elt is connected, part of the flat tree, and
-        // its shadow-including root has a browsing context which either doesn’t have a
+        // its shadow-including root has a browsing context which either doesnâ€™t have a
         // browsing context container, or whose browsing context container is being
         // rendered, set decls to a list of all longhand properties that are supported CSS
         // properties, in lexicographical order, with the value being the resolved value
@@ -2126,11 +2126,11 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
         // Step 1: If invoked with one argument, follow these substeps:
         // Step 1.1: Let options be the argument.
         // Step 1.2: Let x be the value of the left dictionary member of options, if
-        // present, or the viewport’s current scroll position on the x axis otherwise.
+        // present, or the viewportâ€™s current scroll position on the x axis otherwise.
         let x = options.left.unwrap_or(0.0) as f32;
 
         // Step 1.3: Let y be the value of the top dictionary member of options, if
-        // present, or the viewport’s current scroll position on the y axis otherwise.
+        // present, or the viewportâ€™s current scroll position on the y axis otherwise.
         let y = options.top.unwrap_or(0.0) as f32;
 
         // The rest of the specification continues from `Self::scroll`.
@@ -2603,15 +2603,15 @@ impl Window {
         let x = xfinite.clamp(0.0, 0.0f32.max(scrolling_area.width() - viewport.width));
         let y = yfinite.clamp(0.0, 0.0f32.max(scrolling_area.height() - viewport.height));
 
-        // Step 10: If position is the same as the viewport’s current scroll position, and
+        // Step 10: If position is the same as the viewportâ€™s current scroll position, and
         // the viewport does not have an ongoing smooth scroll, abort these steps.
         let scroll_offset = self.scroll_offset(cx);
         if x == scroll_offset.x && y == scroll_offset.y {
             return;
         }
 
-        // Step 11: Let document be the viewport’s associated Document.
-        // Step 12: Perform a scroll of the viewport to position, document’s root element
+        // Step 11: Let document be the viewportâ€™s associated Document.
+        // Step 12: Perform a scroll of the viewport to position, documentâ€™s root element
         // as the associated element, if there is one, or null otherwise, and the scroll
         // behavior being the value of the behavior dictionary member of options.
         self.perform_a_scroll(
@@ -2904,13 +2904,16 @@ impl Window {
         if !pending_request {
             return;
         }
+        let pipeline = self.pipeline_id();
 
         let document = self.Document();
         if document.ReadyState() != DocumentReadyState::Complete {
+            debug!("{pipeline:?} waits for a screenshot: not loaded");
             return;
         }
 
         if document.render_blocking_element_count() > 0 {
+            debug!("{pipeline:?} waits for a screenshot: render-blocking elements");
             return;
         }
 
@@ -2921,25 +2924,30 @@ impl Window {
             elem.has_class(&atom!("reftest-wait"), CaseSensitivity::CaseSensitive) ||
                 elem.has_class(&Atom::from("test-wait"), CaseSensitivity::CaseSensitive)
         }) {
+            debug!("{pipeline:?} waits for a screenshot: reftest-wait");
             return;
         }
 
         if self.font_context().web_fonts_still_loading() != 0 {
+            debug!("{pipeline:?} waits for a screenshot: web fonts loading");
             return;
         }
 
         if self.Document().Fonts(cx).waiting_to_fullfill_promise() {
+            debug!("{pipeline:?} waits for a screenshot: document.fonts promise");
             return;
         }
 
         if !self.pending_layout_images.borrow().is_empty() ||
             !self.pending_images_for_rasterization.borrow().is_empty()
         {
+            debug!("{pipeline:?} waits for a screenshot: images pending");
             return;
         }
 
         let document = self.Document();
         if document.needs_rendering_update(cx.no_gc()) {
+            debug!("{pipeline:?} waits for a screenshot: rendering update pending");
             return;
         }
 

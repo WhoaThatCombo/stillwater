@@ -38,7 +38,9 @@ static REQUEST_FILTER: RwLock<Option<RequestFilter>> = RwLock::new(None);
 
 /// Install (or with None, remove) the process-wide request filter.
 pub fn set_request_filter(filter: Option<RequestFilter>) {
-    *REQUEST_FILTER.write().unwrap_or_else(|error| error.into_inner()) = filter;
+    *REQUEST_FILTER
+        .write()
+        .unwrap_or_else(|error| error.into_inner()) = filter;
 }
 
 #[derive(Clone)]
@@ -76,6 +78,19 @@ impl RequestInterceptor {
         if let Some(filter) = filter {
             match filter(&web_resource_request, request.target_webview_id) {
                 RequestDecision::Allow => return,
+                RequestDecision::Block if request.is_navigation_request() => {
+                    // A frame whose load fails with `LoadCancelled` is left waiting for a
+                    // navigation that never comes: no document, no `load` event. Give it an
+                    // empty page instead, like a blocked frame in other browsers.
+                    let mut empty = Response::new(request.url(), timing_info.inner().clone());
+                    empty.headers.insert(
+                        http::header::CONTENT_TYPE,
+                        http::HeaderValue::from_static("text/html"),
+                    );
+                    *empty.body.lock() = ResponseBody::Done(vec![]);
+                    *response = Some(empty);
+                    return;
+                },
                 RequestDecision::Block => {
                     *response = Some(Response::network_error(NetworkError::LoadCancelled));
                     return;
@@ -93,7 +108,8 @@ impl RequestInterceptor {
                     *response = Some(stand_in);
                     return;
                 },
-                RequestDecision::AskEmbedder => {},            }
+                RequestDecision::AskEmbedder => {},
+            }
         }
 
         self.embedder_proxy

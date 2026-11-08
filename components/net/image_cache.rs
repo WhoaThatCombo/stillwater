@@ -444,6 +444,23 @@ struct RasterizationTask {
     result: Option<RasterImage>,
 }
 
+impl RasterizationTask {
+    /// The task is being dropped before it finished: tell whoever is waiting for it, or they
+    /// wait forever (a page waiting on one never becomes ready for a screenshot). Layout asks
+    /// for the image again if it still needs it.
+    fn notify_dropped(self, image_id: PendingImageId, requested_size: DeviceIntSize) {
+        for (pipeline_id, callback) in self.listeners {
+            callback(ImageCacheResponseMessage::VectorImageRasterizationComplete(
+                RasterizationCompleteResponse {
+                    pipeline_id,
+                    image_id,
+                    requested_size,
+                },
+            ));
+        }
+    }
+}
+
 /// Used for storing images that do not have a `WebRenderImageKey` yet.
 #[derive(Debug, MallocSizeOf)]
 enum PendingKey {
@@ -592,6 +609,8 @@ impl ImageCacheStore {
                     .rasterized_vector_images
                     .contains_key(&(pending_id, requested_size))
                 {
+                    self.svg_rasterization_task_store
+                        .remove_being_rasterized(pending_id, requested_size);
                     return;
                 }
                 set_webrender_image_key(&self.paint_api, &mut raster_image, image_key);
@@ -821,11 +840,13 @@ impl ImageCacheStore {
         image_id: &PendingImageId,
         device_size: &DeviceIntSize,
     ) {
-        if let Some(entry) = self
+        if let Some(mut entry) = self
             .rasterized_vector_images
             .remove(&(*image_id, *device_size))
         {
-            if let Some(result) = entry.result {
+            let result = entry.result.take();
+            entry.notify_dropped(*image_id, *device_size);
+            if let Some(result) = result {
                 if let Some(image_id) = result.id {
                     self.paint_api.update_images(
                         self.webview_id.into(),
@@ -1159,9 +1180,12 @@ impl ImageCache for ImageCacheImpl {
             old_mapped_image_id != image_id
         {
             store.vector_images.remove(&old_mapped_image_id);
-            store
+            if let Some(task) = store
                 .rasterized_vector_images
-                .remove(&(old_mapped_image_id, requested_size));
+                .remove(&(old_mapped_image_id, requested_size))
+            {
+                task.notify_dropped(old_mapped_image_id, requested_size);
+            }
             store
                 .svg_rasterization_task_store
                 .remove_all_for_id(old_mapped_image_id);
@@ -1221,7 +1245,7 @@ impl ImageCache for ImageCacheImpl {
             // Some SVG documents, primarily ones created by fuzzers, can cause resvg to fail
             // assertions and panic. We catch any panics in `resvg::render` here so that we don't
             // crash the whole engine for such cases. In case of a panic, the completion listeners
-            // added for this request will never get called.
+            // added for this request are told it is over, without an image.
             //
             // We also need to set `SUPPRESS_ABORT_IN_PANIC_HOOK` for the duration of the call
             // because servoshell registers a custom hook that intercepts the panic and crashes
@@ -1275,9 +1299,12 @@ impl ImageCache for ImageCacheImpl {
                     store
                         .svg_rasterization_task_store
                         .remove_being_rasterized(image_id, requested_size);
-                    store
+                    if let Some(task) = store
                         .rasterized_vector_images
-                        .remove(&(image_id, requested_size));
+                        .remove(&(image_id, requested_size))
+                    {
+                        task.notify_dropped(image_id, requested_size);
+                    }
 
                     // Remove the `image_id` from `vector_images` so the check at the top of this
                     // method will fail for subsequent calls and won't trigger rasterization
