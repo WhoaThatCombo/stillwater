@@ -27,7 +27,7 @@ use url::Url;
 use crate::desktop::event_loop::RepaintEventLoopWaker;
 use crate::desktop::settings::{Settings, ThemeChoice};
 use crate::desktop::updater::{UpdateInfo, UpdateStatus};
-use crate::desktop::workspaces::{TabEntry, Workspaces};
+use crate::desktop::workspaces::{TabEntry, TabTarget, Workspaces};
 use crate::desktop::panes::PaneKind;
 use crate::desktop::passwords::PasswordAction;
 use crate::desktop::workspaces::ImportCounts;
@@ -78,7 +78,13 @@ pub(crate) enum WindowAction {
         pins: bool,
         tabs: bool,
         passwords: bool,
+        history: bool,
+        bookmarks: bool,
     },
+    /// History, address-bar suggestions and bookmarks: a `hist-` / `bm-` command and its argument.
+    History(String, String),
+    /// New tab: open (or close) Zen's floating address bar over the page.
+    CommandBar,
 }
 
 struct SidebarDelegate {
@@ -154,6 +160,10 @@ pub(crate) struct Sidebar {
     passwords: serde_json::Value,
     /// Import from Zen: profiles found, what they hold, the last result.
     zen: serde_json::Value,
+    /// History and bookmarks: whether the page in the URL bar is bookmarked.
+    hist: serde_json::Value,
+    /// The floating new-tab address bar is open: no tab shows as selected.
+    command_bar: bool,
 }
 
 impl Sidebar {
@@ -191,6 +201,8 @@ impl Sidebar {
             adblock: serde_json::Value::Null,
             passwords: serde_json::Value::Null,
             zen: serde_json::Value::Null,
+            hist: serde_json::Value::Null,
+            command_bar: false,
             settings: RefCell::new(settings),
             update_check: None,
         }
@@ -269,6 +281,40 @@ impl Sidebar {
             self.peek.set(true);
         }
         self.passwords = passwords;
+    }
+
+    pub(crate) fn set_hist(&mut self, hist: serde_json::Value) {
+        self.hist = hist;
+    }
+
+    pub(crate) fn set_command_bar(&mut self, open: bool) {
+        self.command_bar = open;
+    }
+
+    /// Whether New tab opens the floating address bar (settings).
+    pub(crate) fn new_tab_bar(&self) -> bool {
+        self.settings.borrow().new_tab_bar
+    }
+
+    /// Every tab and pin in every space except the active tab, with the sidebar command and
+    /// argument that shows it, for the address bar's "Switch to tab" suggestions.
+    pub(crate) fn switch_targets(&mut self, window: &ServoShellWindow) -> Vec<serde_json::Value> {
+        self.sync_workspaces(window);
+        let targets = self.workspaces.switch_targets(window);
+        targets
+            .into_iter()
+            .map(|(target, title, url, space)| {
+                let (command, argument, pinned) = match target {
+                    TabTarget::Tab(TabEntry::Live(id)) => ("activate", self.tab_key(id), false),
+                    TabTarget::Tab(TabEntry::Unloaded(key)) => ("activate", key, false),
+                    TabTarget::Pin(pin) => ("pin-open", pin, true),
+                };
+                serde_json::json!({
+                    "title": title, "url": url, "space": space,
+                    "command": command, "argument": argument, "pinned": pinned,
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn set_zen(&mut self, zen: serde_json::Value) {
@@ -435,7 +481,7 @@ impl Sidebar {
         }
     }
 
-    fn call(&self, script: &str) {
+    pub(crate) fn call(&self, script: &str) {
         if let Some(webview) = &self.webview {
             webview.evaluate_javascript(
                 format!("window.sidebar && window.sidebar.{script}"),
@@ -660,6 +706,10 @@ impl Sidebar {
                     .push(WindowAction::AdblockSetEnabled(argument == "1")),
                 "split-close" => self.window_actions.push(WindowAction::ClosePane(PaneKind::Split)),
                 "glance-close" => self.window_actions.push(WindowAction::ClosePane(PaneKind::Glance)),
+                "new-tab" if self.settings.borrow().new_tab_bar => {
+                    self.window_actions.push(WindowAction::CommandBar)
+                },
+                "set-newtab" => self.settings.borrow_mut().set_new_tab_bar(argument == "1"),
                 "new-tab" => {
                     self.workspaces.open_tab(window);
                     self.focus_url(window);
@@ -814,8 +864,20 @@ impl Sidebar {
                         pins: what.contains(&"pins"),
                         tabs: what.contains(&"tabs"),
                         passwords: what.contains(&"passwords"),
+                        history: what.contains(&"history"),
+                        bookmarks: what.contains(&"bookmarks"),
                     });
                 },
+                // History panel (Ctrl+H) and bookmarking the page (Ctrl+D): show the sidebar.
+                "hist-show" | "bm-star" if self.compact.get() => {
+                    self.peek.set(true);
+                    layout_changed = true;
+                    self.window_actions
+                        .push(WindowAction::History(command.to_owned(), argument.to_owned()));
+                },
+                _ if command.starts_with("hist-") || command.starts_with("bm-") => self
+                    .window_actions
+                    .push(WindowAction::History(command.to_owned(), argument.to_owned())),
                 "set-unload-low-memory" => self
                     .settings
                     .borrow_mut()
@@ -891,6 +953,8 @@ impl Sidebar {
             "adblock": self.adblock,
             "passwords": self.passwords,
             "zen": self.zen,
+            "hist": self.hist,
+            "commandBar": self.command_bar,
             "compact": self.compact.get(),
             "workspaces": self.workspaces.to_json(),
             "background": background,

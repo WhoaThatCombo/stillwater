@@ -1,0 +1,243 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/* History, address-bar suggestions and bookmarks (history.js). */
+
+/* ---- Star in the address bar ---- */
+#star {
+  width: 24px;
+  height: 24px;
+  margin-right: -4px;
+  border-radius: var(--toolbarbutton-border-radius);
+  font-size: 13px;
+  opacity: 0.6;
+}
+
+#star:hover {
+  opacity: 1;
+  background: var(--toolbarbutton-background-color-hover);
+}
+
+#star.starred {
+  opacity: 1;
+  color: var(--ws-accent, rgb(100, 115, 255));
+}
+
+#star[hidden] {
+  display: none;
+}
+
+/* ---- Suggestions under the address bar ---- */
+#suggestions {
+  position: fixed;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  border-radius: var(--border-radius-medium);
+  background: var(--zen-urlbar-background-focus);
+  box-shadow: var(--zen-big-shadow);
+  border: 1px solid var(--zen-pinned-separator-color);
+}
+
+#suggestions[hidden] {
+  display: none;
+}
+
+.suggestion {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 3px 8px;
+  border-radius: 7px;
+  cursor: default;
+}
+
+.suggestion.selected {
+  background: var(--toolbarbutton-background-color-active);
+}
+
+.suggestion-icon {
+  flex: none;
+  width: 16px;
+  font-size: 12px;
+  text-align: center;
+  opacity: 0.65;
+}
+
+.suggestion.tab .suggestion-icon,
+.suggestion.pin .suggestion-icon,
+.suggestion.bookmark .suggestion-icon {
+  color: var(--ws-accent, rgb(100, 115, 255));
+  opacity: 1;
+}
+
+.suggestion-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.suggestion-title,
+.suggestion-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.suggestion-detail {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.suggestion-star {
+  flex: none;
+  font-size: 10px;
+  color: var(--ws-accent, rgb(100, 115, 255));
+}
+
+/* ---- Bookmark editor (star / Ctrl+D) ---- */
+#bm-editor {
+  position: fixed;
+  z-index: 11;
+  left: 8px;
+  right: 8px;
+  top: 92px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#bm-editor[hidden] {
+  display: none;
+}
+
+/* Not .rename-input: the sidebar doesn't redraw its tab list while one of those exists. */
+.bm-name-input {
+  height: 30px;
+  padding: 0 8px;
+  border: none;
+  outline: none;
+  border-radius: var(--toolbarbutton-border-radius);
+  background: var(--zen-urlbar-background);
+  color: inherit;
+  font: inherit;
+}
+
+#bm-editor .offer-buttons button {
+  margin-top: 0;
+}
+
+/* ---- History panel ---- */
+.hist-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.hist-buttons button {
+  flex: 1;
+}
+
+.hist-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.hist-day {
+  margin: 10px 4px 4px;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.65;
+}
+
+.hist-day:first-child {
+  margin-top: 0;
+}
+
+.hist-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 3px 4px 3px 8px;
+  border-radius: var(--border-radius-medium);
+  cursor: default;
+}
+
+.hist-row:hover {
+  background: var(--toolbarbutton-background-color-hover);
+}
+
+.hist-row .tab-icon {
+  flex: none;
+}
+
+.hist-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.hist-title,
+.hist-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hist-detail {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.hist-delete {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--toolbarbutton-border-radius);
+  font-size: 10px;
+  opacity: 0;
+}
+
+.hist-row:hover .hist-delete {
+  opacity: 0.7;
+}
+
+.hist-delete:hover {
+  opacity: 1;
+  background: var(--toolbarbutton-background-color-hover);
+}
+
+#history-more[hidden],
+#history-empty[hidden],
+#history-clear[hidden],
+#clear-options[hidden],
+#clear-status[hidden],
+#history-clear-group[hidden] {
+  display: none;
+}
+
+.hist-clear {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--zen-pinned-separator-color);
+}
+
+#clear-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#clear-options h3 {
+  margin: 0;
+}
+
+#clear-options .offer-buttons button {
+  margin-top: 0;
+}

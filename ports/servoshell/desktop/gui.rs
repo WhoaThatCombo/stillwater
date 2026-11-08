@@ -104,6 +104,8 @@ pub struct Gui {
     split: Option<Pane>,
     /// Glance: a link preview floating over the page.
     glance: Option<Pane>,
+    /// Zen's floating address bar for a new tab.
+    pub(crate) command_bar: crate::desktop::command_bar::CommandBar,
     /// Pane changes requested since the last update (applied in `update`).
     pane_requests: RefCell<Vec<PaneRequest>>,
     /// Which pane has keyboard focus (`None` = the active tab).
@@ -296,6 +298,7 @@ impl Gui {
             window_rendering_context,
             split: None,
             glance: None,
+            command_bar: Default::default(),
             pane_requests: Default::default(),
             pane_focus: Cell::new(None),
             split_rect: None,
@@ -500,6 +503,8 @@ impl Gui {
         pins: bool,
         tabs: bool,
         passwords: bool,
+        history: bool,
+        bookmarks: bool,
     ) -> String {
         let profiles = zen_import::find_profiles();
         let Some(profile) = profiles.get(profile) else {
@@ -563,6 +568,23 @@ impl Gui {
                     }
                 },
                 Err(error) => problems.push(error),
+            }
+        }
+        if history || bookmarks {
+            match &data.places {
+                Ok(places) => {
+                    let mut store = state.history.borrow_mut();
+                    if bookmarks {
+                        add(store.bookmarks.import(&places.bookmarks), "bookmark", "bookmarks");
+                    }
+                    if history {
+                        match store.import(&places.visits) {
+                            Ok(added) => add(added, "visit", "visits"),
+                            Err(_) => problems.push("Zen's history couldn't be saved.".to_owned()),
+                        }
+                    }
+                },
+                Err(error) => problems.push(error.clone()),
             }
         }
         let mut result = if !done.is_empty() {
@@ -657,12 +679,27 @@ impl Gui {
                     pins,
                     tabs,
                     passwords,
+                    history,
+                    bookmarks,
                 } => {
-                    let result = self.zen_import(state, profile, pins, tabs, passwords);
+                    let result =
+                        self.zen_import(state, profile, pins, tabs, passwords, history, bookmarks);
                     let mut zen = zen_scan(profile);
                     zen["result"] = serde_json::Value::String(result);
                     self.sidebar.set_zen(zen);
                 },
+                // Tests: run JavaScript in the floating new-tab address bar.
+                WindowAction::History(command, argument) if command == "hist-bar-eval" => {
+                    self.command_bar.debug_eval(&argument)
+                },
+                WindowAction::History(command, argument) => crate::desktop::history::on_command(
+                    state,
+                    window,
+                    &mut self.sidebar,
+                    &command,
+                    &argument,
+                ),
+                WindowAction::CommandBar => self.command_bar.request_toggle(),
                 WindowAction::CheckForUpdates => {
                     updater::check_now(headed_window.event_loop_proxy());
                 },
@@ -706,7 +743,17 @@ impl Gui {
             let url = page.as_ref().and_then(|webview| webview.url());
             self.sidebar
                 .set_passwords(state.passwords.borrow().to_json(url.as_ref()));
+            self.sidebar
+                .set_hist(state.history.borrow().sidebar_json(url.as_ref()));
         }
+        self.command_bar.update(
+            state,
+            window,
+            &mut self.sidebar,
+            &self.window_rendering_context,
+            || RepaintEventLoopWaker::new(headed_window.event_loop_proxy(), headed_window.id()),
+            theme,
+        );
         self.sidebar
             .set_window_state(!winit_window.is_decorated(), winit_window.is_maximized());
         self.sidebar.push_state(window);
@@ -728,6 +775,7 @@ impl Gui {
             glance_rect,
             pane_requests,
             pane_control_rects,
+            command_bar,
             ..
         } = self;
         pane_control_rects.borrow_mut().clear();
@@ -918,6 +966,8 @@ impl Gui {
                 *glance_rect = Some(rect);
             }
 
+            command_bar.paint(ctx, content_area, scale, theme);
+
             // Zen's top bar: the window buttons slide in when the mouse touches the top edge
             // and hide again when it leaves. Its empty part drags the window.
             {
@@ -1104,6 +1154,9 @@ fn zen_scan(profile: usize) -> serde_json::Value {
         "passwords": data.logins.as_ref().map_or(0, Vec::len),
         "sessionProblem": data.session.as_ref().err(),
         "passwordProblem": data.logins.as_ref().err(),
+        "bookmarks": data.places.as_ref().map_or(0, |places| places.bookmarks.len()),
+        "visits": data.places.as_ref().map_or(0, |places| places.visits.len()),
+        "placesProblem": data.places.as_ref().err(),
     })
 }
 

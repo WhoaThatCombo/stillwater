@@ -7,6 +7,7 @@
   <meta charset="utf-8">
   <title>Sidebar</title>
   <link rel="stylesheet" href="servo:sidebar/zen-sidebar.css">
+  <link rel="stylesheet" href="servo:sidebar/history.css">
 </head>
 <body>
   <!-- Zen's top row: menu and sidebar toggle on the left, navigation on the right.
@@ -26,9 +27,21 @@
       <input id="url" type="text" spellcheck="false" autocomplete="off" aria-label="Search or enter address">
       <span class="placeholder" aria-hidden="true">Search or enter address</span>
     </span>
+    <button id="star" class="icon" title="Bookmark this page (Ctrl+D)" hidden>&#xE734;</button>
     <button id="key" class="icon" title="Saved passwords for this site" hidden>&#xE8D7;</button>
     <button id="shield" class="icon" title="Ad blocking" hidden><span class="shield-glyph">&#xEA18;</span><span id="shield-count"></span></button>
   </div>
+  <!-- Address bar suggestions (history.js). -->
+  <div id="suggestions" role="listbox" aria-label="Suggestions" hidden></div>
+  <!-- Name or remove the bookmark for the current page (the star, Ctrl+D). -->
+  <section id="bm-editor" class="offer-card" hidden aria-label="Bookmark">
+    <p id="bm-editor-title" class="offer-title">Bookmark added</p>
+    <input id="bm-editor-name" class="bm-name-input" type="text" spellcheck="false" autocomplete="off" aria-label="Bookmark name">
+    <div class="offer-buttons">
+      <button id="bm-editor-done" class="primary">Done</button>
+      <button id="bm-editor-remove" class="secondary">Remove</button>
+    </div>
+  </section>
 
   <!-- Essentials: favicon tiles shared by every space. -->
   <div id="essentials"></div>
@@ -108,6 +121,15 @@
     </div>
 
     <div class="setting-group">
+      <h3>New tab opens</h3>
+      <div class="segmented" id="newtab-choice" role="group" aria-label="New tab opens">
+        <button data-bar="1">Address bar</button>
+        <button data-bar="0">New Tab page</button>
+      </div>
+      <p class="hint">With the address bar, Ctrl+T and New Tab show a floating address bar over the page, like Zen. A tab is only created when you pick something.</p>
+    </div>
+
+    <div class="setting-group">
       <h3>Unload inactive tabs</h3>
       <div class="segmented" id="unload-choice" role="group" aria-label="Unload inactive tabs after"></div>
       <button class="toggle-row" id="lowmem-toggle">
@@ -136,6 +158,15 @@
       <p class="hint" id="passwords-hint">Stillwater offers to save a password when you sign in. Passwords are encrypted with your Windows account.</p>
     </div>
 
+    <div class="setting-group">
+      <h3>History and bookmarks</h3>
+      <div class="hist-buttons">
+        <button id="open-history" class="secondary">History</button>
+        <button id="open-bookmarks" class="secondary">Bookmarks</button>
+      </div>
+      <p class="hint">Ctrl+H shows your history and Ctrl+D bookmarks the current page. Visits are kept on this computer for 90 days.</p>
+    </div>
+
     <div class="setting-group" id="zen-group">
       <h3>Import from Zen</h3>
       <button id="zen-scan" class="secondary">Find Zen's data</button>
@@ -151,6 +182,14 @@
         </button>
         <button class="toggle-row tall" id="zen-passwords" aria-pressed="true">
           <span><span>Passwords</span><span class="row-detail" id="zen-passwords-count"></span></span>
+          <span class="switch" aria-hidden="true"></span>
+        </button>
+        <button class="toggle-row tall" id="zen-bookmarks" aria-pressed="true">
+          <span><span>Bookmarks</span><span class="row-detail" id="zen-bookmarks-count"></span></span>
+          <span class="switch" aria-hidden="true"></span>
+        </button>
+        <button class="toggle-row tall" id="zen-history" aria-pressed="false">
+          <span><span>History</span><span class="row-detail" id="zen-history-count"></span></span>
           <span class="switch" aria-hidden="true"></span>
         </button>
         <button id="zen-import" class="primary">Import</button>
@@ -193,6 +232,49 @@
     </div>
   </section>
 
+  <section id="history" class="panel" hidden aria-label="History and bookmarks">
+    <header class="settings-header">
+      <button id="history-close" class="icon" title="Back">&#xE72B;</button>
+      <h2 id="history-heading">History</h2>
+    </header>
+    <div class="segmented" id="history-views" role="group" aria-label="Show">
+      <button data-view="history">History</button>
+      <button data-view="bookmarks">Bookmarks</button>
+    </div>
+    <div class="search-field">
+      <span class="icon">&#xE721;</span>
+      <span class="field">
+        <input id="history-search" type="text" spellcheck="false" autocomplete="off" aria-label="Search">
+        <span class="placeholder" id="history-search-placeholder" aria-hidden="true">Search history</span>
+      </span>
+    </div>
+    <div id="history-list" class="hist-list"></div>
+    <p id="history-empty" class="hint" hidden></p>
+    <button id="history-more" class="secondary" hidden>Show more</button>
+    <div class="setting-group hist-clear" id="history-clear-group">
+      <button id="history-clear" class="secondary">Clear browsing history…</button>
+      <div id="clear-options" hidden>
+        <h3>Clear history from</h3>
+        <div class="segmented" id="clear-range" role="group" aria-label="Clear history from">
+          <button data-range="hour">Last hour</button>
+          <button data-range="today">Today</button>
+          <button data-range="all">Everything</button>
+        </div>
+        <button class="toggle-row tall" id="clear-site-data" aria-pressed="false">
+          <span><span>Also clear cookies and site data</span><span class="row-detail">For every site and all time, not only this range. Signs you out of websites.</span></span>
+          <span class="switch" aria-hidden="true"></span>
+        </button>
+        <div class="offer-buttons">
+          <button id="clear-confirm" class="primary">Clear</button>
+          <button id="clear-cancel" class="secondary">Cancel</button>
+        </div>
+      </div>
+      <p id="clear-status" class="hint" hidden></p>
+    </div>
+  </section>
+
   <script src="servo:sidebar/sidebar.js"></script>
+  <script src="servo:sidebar/suggestions.js"></script>
+  <script src="servo:sidebar/history.js"></script>
 </body>
 </html>

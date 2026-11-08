@@ -515,6 +515,8 @@ impl HeadedWindow {
             })
             .shortcut(CMD_OR_CONTROL, 'T', || post("new-tab"))
             .shortcut(CMD_OR_CONTROL, ',', || post("open-settings"))
+            .shortcut(CMD_OR_CONTROL, 'H', || post("hist-show"))
+            .shortcut(CMD_OR_CONTROL, 'D', || post("bm-star"))
             .shortcut(CMD_OR_CONTROL, 'Q', || state.schedule_exit())
             .shortcut(CMD_OR_CONTROL, 'L', || self.gui.borrow().sidebar.focus_url(window))
             .optional_shortcut(
@@ -717,6 +719,70 @@ impl HeadedWindow {
                     return true;
                 }
                 sidebar_webview.notify_input_event(InputEvent::Keyboard(keyboard_event));
+                true
+            },
+            _ => false,
+        }
+    }
+
+    /// While the floating new-tab address bar is open it has the keyboard and the mouse over it;
+    /// the page behind it is inert and a click anywhere else closes it. Returns true if consumed.
+    fn handle_command_bar_event(
+        &self,
+        state: &Rc<RunningAppState>,
+        window: &Rc<ServoShellWindow>,
+        event: &WindowEvent,
+    ) -> bool {
+        let gui = self.gui.borrow();
+        let Some(webview) = gui.command_bar.webview().cloned() else {
+            return false;
+        };
+        let point = self.last_mouse_position.get();
+        let local = point
+            .and_then(|point| gui.command_bar.local_point(point))
+            .map(|local| local * self.hidpi_scale_factor());
+        let behind = point.is_some_and(|point| {
+            !gui.is_outside_content_rect(point) && !gui.top_bar_contains(point)
+        });
+        match event {
+            WindowEvent::CursorMoved { .. } => match local {
+                Some(local) => {
+                    self.set_cursor(gui.command_bar.cursor());
+                    webview.notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(local.into())));
+                    true
+                },
+                None => behind,
+            },
+            WindowEvent::MouseInput { state: element_state, button, .. } => {
+                let pressed = *element_state == ElementState::Pressed;
+                let Some(local) = local else {
+                    if pressed {
+                        gui.command_bar.request_close();
+                        window.set_needs_update();
+                    }
+                    return behind;
+                };
+                let action = if pressed { MouseButtonAction::Down } else { MouseButtonAction::Up };
+                let button = match button {
+                    MouseButton::Left => ServoMouseButton::Primary,
+                    MouseButton::Right => ServoMouseButton::Secondary,
+                    MouseButton::Middle => ServoMouseButton::Auxiliary,
+                    _ => return true,
+                };
+                webview.notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                    action,
+                    button,
+                    local.into(),
+                )));
+                true
+            },
+            WindowEvent::MouseWheel { .. } => local.is_some() || behind,
+            WindowEvent::KeyboardInput { event, .. } => {
+                let keyboard_event = keyboard_event_from_winit(event, self.modifiers_state.get());
+                drop(gui);
+                if !self.handle_intercepted_key_bindings(state.clone(), window, &keyboard_event) {
+                    webview.notify_input_event(InputEvent::Keyboard(keyboard_event));
+                }
                 true
             },
             _ => false,
@@ -1019,7 +1085,8 @@ impl HeadedWindow {
             .active_webview()
             .is_some_and(|webview| self.has_active_dialog_for_webview(webview.id()));
         if !dialog_open &&
-            (self.handle_sidebar_event(&state, &window, &event) ||
+            (self.handle_command_bar_event(&state, &window, &event) ||
+                self.handle_sidebar_event(&state, &window, &event) ||
                 self.handle_pane_event(&state, &window, &event))
         {
             if let WindowEvent::CursorMoved { .. } = event {

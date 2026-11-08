@@ -44,6 +44,15 @@ pub(crate) fn search_template() -> String {
     }
 }
 
+/// The name of the search engine chosen in settings.
+pub(crate) fn search_engine_name() -> &'static str {
+    let template = search_template();
+    SEARCH_ENGINES
+        .iter()
+        .find(|(.., engine_template)| *engine_template == template)
+        .map_or(SEARCH_ENGINES[0].1, |(_, name, _)| name)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ThemeChoice {
     System,
@@ -92,6 +101,8 @@ pub(crate) struct Settings {
     pub(crate) tab_unload_minutes: u32,
     /// Unload the least recently used background tabs when Windows runs low on memory.
     pub(crate) unload_on_low_memory: bool,
+    /// New tab (Ctrl+T) opens Zen's floating address bar instead of a New Tab page.
+    pub(crate) new_tab_bar: bool,
     path: Option<PathBuf>,
 }
 
@@ -120,6 +131,7 @@ impl Settings {
                 .filter(|minutes| TAB_UNLOAD_CHOICES.contains(minutes))
                 .unwrap_or(DEFAULT_TAB_UNLOAD_MINUTES),
             unload_on_low_memory: saved["unloadOnLowMemory"].as_bool().unwrap_or(true),
+            new_tab_bar: saved["newTabBar"].as_bool().unwrap_or(true),
             path,
         };
         settings.publish_search_template();
@@ -136,6 +148,7 @@ impl Settings {
             "compact": self.compact,
             "tabUnloadMinutes": self.tab_unload_minutes,
             "unloadOnLowMemory": self.unload_on_low_memory,
+            "newTabBar": self.new_tab_bar,
         });
         let result = path
             .parent()
@@ -192,6 +205,11 @@ impl Settings {
         self.save();
     }
 
+    pub(crate) fn set_new_tab_bar(&mut self, enabled: bool) {
+        self.new_tab_bar = enabled;
+        self.save();
+    }
+
     pub(crate) fn to_json(&self) -> Value {
         let engines: Vec<Value> = SEARCH_ENGINES
             .iter()
@@ -204,6 +222,7 @@ impl Settings {
             "tabUnloadMinutes": self.tab_unload_minutes,
             "tabUnloadChoices": TAB_UNLOAD_CHOICES,
             "unloadOnLowMemory": self.unload_on_low_memory,
+            "newTabBar": self.new_tab_bar,
             "version": crate::desktop::updater::CURRENT_VERSION,
         })
     }

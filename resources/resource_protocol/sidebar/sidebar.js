@@ -578,7 +578,8 @@ function closePasswords() {
 
 // ---- Import from Zen ----
 
-const zenChoice = { profile: 0, pins: true, tabs: false, passwords: true };
+const zenChoice = { profile: 0, pins: true, tabs: false, passwords: true, bookmarks: true, history: false };
+const zenKinds = ["pins", "tabs", "passwords", "bookmarks", "history"];
 let zenBusy = false;
 
 function renderZen() {
@@ -587,7 +588,7 @@ function renderZen() {
   const found = $("zen-found");
   if (!zen) {
     found.hidden = true;
-    status.textContent = zenBusy ? "Looking for Zen…" : "Copies your spaces, pinned tabs, Essentials and passwords from Zen Browser on this computer. Zen isn't changed.";
+    status.textContent = zenBusy ? "Looking for Zen…" : "Copies your spaces, pinned tabs, Essentials, passwords, bookmarks and history from Zen Browser on this computer. Zen isn't changed.";
     return;
   }
   zenBusy = false;
@@ -613,10 +614,12 @@ function renderZen() {
     `${count(zen.spaces, "space", "spaces")}, ${count(zen.pins, "pinned tab", "pinned tabs")}, ${count(zen.essentials, "Essential", "Essentials")}`;
   $("zen-tabs-count").textContent = zen.sessionProblem ? "" : `${count(zen.tabs, "tab", "tabs")}, added unloaded`;
   $("zen-passwords-count").textContent = zen.passwordProblem || count(zen.passwords, "password", "passwords");
-  for (const what of ["pins", "tabs", "passwords"]) {
+  $("zen-bookmarks-count").textContent = zen.placesProblem || count(zen.bookmarks || 0, "bookmark", "bookmarks");
+  $("zen-history-count").textContent = zen.placesProblem || `${count(zen.visits || 0, "visit", "visits")} in the last 90 days`;
+  for (const what of zenKinds) {
     $(`zen-${what}`).setAttribute("aria-pressed", String(zenChoice[what]));
   }
-  $("zen-import").disabled = !(zenChoice.pins || zenChoice.tabs || zenChoice.passwords);
+  $("zen-import").disabled = !zenKinds.some((what) => zenChoice[what]);
   status.textContent = zen.result || "";
 }
 
@@ -815,14 +818,14 @@ $("zen-scan").addEventListener("click", () => {
   renderZen();
   send("zen-scan", zenChoice.profile);
 });
-for (const what of ["pins", "tabs", "passwords"]) {
+for (const what of zenKinds) {
   $(`zen-${what}`).addEventListener("click", () => {
     zenChoice[what] = !zenChoice[what];
     renderZen();
   });
 }
 $("zen-import").addEventListener("click", () => {
-  const what = ["pins", "tabs", "passwords"].filter((name) => zenChoice[name]);
+  const what = zenKinds.filter((name) => zenChoice[name]);
   if (what.length === 0) return;
   $("zen-status").textContent = "Importing…";
   send("zen-import", `${zenChoice.profile}\t${what.join(",")}`);

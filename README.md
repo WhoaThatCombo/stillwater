@@ -53,6 +53,15 @@ first install.
 - **Tab menu**: right-click a tab (or use its `…` button) to pin it, add it to Essentials, move it to a folder or
   another space, rename it or close it.
 - **URL bar in the sidebar**: type an address or a search and press Enter. <kbd>Ctrl</kbd>+<kbd>L</kbd> focuses it.
+  As you type it suggests open tabs (in any space), pinned tabs, bookmarks and your history; arrow keys and Enter pick one.
+- **New tab like Zen**: <kbd>Ctrl</kbd>+<kbd>T</kbd> or **New Tab** opens a floating address bar over the page; a tab is
+  only created when you pick something (Escape or a click elsewhere cancels). Settings → **New tab opens** switches
+  back to a New Tab page.
+- **History**: pages you visit are kept on this computer for 90 days. <kbd>Ctrl</kbd>+<kbd>H</kbd> shows them by day, with
+  search, deleting single pages and **Clear browsing history** (last hour, today or everything, optionally with cookies
+  and site data).
+- **Bookmarks**: the star in the URL bar or <kbd>Ctrl</kbd>+<kbd>D</kbd> bookmarks the page (click again to rename or remove);
+  the History panel has a searchable Bookmarks list.
 - **Workspaces (spaces)**: each tab belongs to one space. Each space has its own name, icon and accent
   colour, and the colour tints the whole window. Space definitions are saved between launches.
 - **Compact mode**: the sidebar hides and slides back in when your mouse touches the left edge.
@@ -68,7 +77,7 @@ first install.
   copies and deletes them. They're encrypted with your Windows account (DPAPI), and copied passwords are
   kept out of Windows' clipboard history.
 - **Import from Zen**: Settings → **Import from Zen** copies Zen Browser's spaces, pinned tabs, Essentials,
-  folders, open tabs and saved passwords from this computer. Zen's profile is only read. Passwords protected
+  folders, open tabs, saved passwords, bookmarks and history (last 90 days) from this computer. Zen's profile is only read. Passwords protected
   by a Zen primary password can't be imported.
 - **Settings** (gear at the bottom of the sidebar, or <kbd>Ctrl</kbd>+<kbd>,</kbd>): light, dark or system
   appearance (websites that support dark mode follow along), your search engine (DuckDuckGo, Google,
@@ -81,7 +90,9 @@ first install.
 | Shortcut | Action |
 |---|---|
 | <kbd>Ctrl</kbd>+<kbd>L</kbd> / <kbd>Alt</kbd>+<kbd>D</kbd> | Focus the URL bar |
-| <kbd>Ctrl</kbd>+<kbd>T</kbd> | New tab in the current space |
+| <kbd>Ctrl</kbd>+<kbd>T</kbd> | New tab in the current space (floating address bar; again to close it) |
+| <kbd>Ctrl</kbd>+<kbd>H</kbd> | History |
+| <kbd>Ctrl</kbd>+<kbd>D</kbd> | Bookmark this page |
 | <kbd>Ctrl</kbd>+<kbd>W</kbd> | Close tab (stays in the current space) |
 | <kbd>Ctrl</kbd>+<kbd>1</kbd>–<kbd>8</kbd>, <kbd>Ctrl</kbd>+<kbd>9</kbd> | Go to tab *n* / the last tab in this space |
 | <kbd>Ctrl</kbd>+<kbd>PgUp</kbd> / <kbd>PgDn</kbd> | Previous / next tab in this space |
@@ -142,7 +153,10 @@ cd stillwater
 | [`ports/servoshell/desktop/sidebar.rs`](ports/servoshell/desktop/sidebar.rs) | Sidebar WebView, messaging, layout, compact mode |
 | [`ports/servoshell/desktop/workspaces.rs`](ports/servoshell/desktop/workspaces.rs) | Spaces: tab ownership, switching, colours, persistence |
 | [`ports/servoshell/desktop/passwords.rs`](ports/servoshell/desktop/passwords.rs) | Saved passwords: saving, filling, encrypted storage |
-| [`ports/servoshell/desktop/zen_import.rs`](ports/servoshell/desktop/zen_import.rs) | Reading Zen's spaces, tabs and passwords |
+| [`ports/servoshell/desktop/zen_import.rs`](ports/servoshell/desktop/zen_import.rs) | Reading Zen's spaces, tabs, passwords, bookmarks and history |
+| [`ports/servoshell/desktop/history.rs`](ports/servoshell/desktop/history.rs) | History (SQLite) and address-bar suggestions |
+| [`ports/servoshell/desktop/bookmarks.rs`](ports/servoshell/desktop/bookmarks.rs) | Bookmarks (JSON) |
+| [`ports/servoshell/desktop/command_bar.rs`](ports/servoshell/desktop/command_bar.rs) | Zen's floating new-tab address bar |
 | [`ports/servoshell/desktop/gui.rs`](ports/servoshell/desktop/gui.rs) | Compositing the sidebar and content |
 | [`ports/servoshell/desktop/headed_window.rs`](ports/servoshell/desktop/headed_window.rs) | Input routing and shortcuts |
 | [`resources/resource_protocol/sidebar/`](resources/resource_protocol/sidebar/) | The sidebar's HTML, CSS and JS |
@@ -158,7 +172,8 @@ cd stillwater
 - [x] Built-in adblocker using uBlock Origin's filter lists
 - [x] Essentials, pinned tabs, folders
 - [x] Split view and Glance
-- [ ] Bookmarks, history, downloads, find in page, settings
+- [x] Bookmarks, history and address-bar suggestions
+- [ ] Downloads, find in page
 - [x] Import from Zen
 - [x] Saved passwords
 - [x] Stillwater name and icon in the window and installer
