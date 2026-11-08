@@ -150,11 +150,8 @@
     const active = data.active || 0;
     button.classList.toggle("active", active > 0);
     button.classList.toggle("indeterminate", active > 0 && data.progress === null);
-    const fill = button.querySelector(".dl-ring-fill");
-    const circumference = 2 * Math.PI * 11.5;
-    fill.style.strokeDasharray = `${circumference}`;
     const progress = active > 0 ? (data.progress === null ? 0.25 : data.progress) : 0;
-    fill.style.strokeDashoffset = `${circumference * (1 - progress)}`;
+    button.querySelector(".dl-ring").style.setProperty("--dl-progress", `${(progress * 100).toFixed(1)}%`);
     const count = $("dl-count");
     count.hidden = active < 2;
     count.textContent = active > 1 ? String(active) : "";

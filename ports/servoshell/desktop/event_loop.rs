@@ -34,6 +34,8 @@ pub enum AppEvent {
     UpdateReadyToRestart,
     /// A manual update check finished without finding an update (message for the user).
     UpdateCheckDone(String),
+    /// Progress or the result of Compare with Edge.
+    Compare(crate::desktop::compare::CompareEvent),
     #[cfg(feature = "gamepad")]
     Gamepad(Event, String, GamepadIndex),
 }

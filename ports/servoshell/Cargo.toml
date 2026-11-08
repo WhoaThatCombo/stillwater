@@ -165,6 +165,8 @@ rusqlite = { workspace = true }
 serde_json = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
+# Compare with Edge talks to a hidden Edge over the DevTools protocol (a WebSocket).
+tungstenite = { workspace = true }
 # For optional feature servo-allocator/use-jemalloc and servo-allocator/allocation-tracking
 servo-allocator = { workspace = true }
 surfman = { workspace = true, features = ["sm-x11"] }

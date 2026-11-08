@@ -463,6 +463,31 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             },
             AppEvent::UpdateReadyToRestart => state.schedule_exit(),
+            AppEvent::Compare(event) => {
+                use crate::desktop::compare::CompareEvent;
+                let window = state
+                    .focused_window()
+                    .or_else(|| state.windows().first().cloned());
+                if let Some(window) = window {
+                    let status = match &event {
+                        CompareEvent::Status(message) => serde_json::json!({ "busy": true, "message": message }),
+                        CompareEvent::Done(_) => serde_json::json!({ "busy": false, "message": "The comparison opened in a new tab." }),
+                        CompareEvent::Failed(message) => serde_json::json!({ "busy": false, "message": message, "error": true }),
+                    };
+                    if let Some(headed_window) = window.platform_window().as_headed_window() {
+                        headed_window.with_sidebar(|sidebar| sidebar.set_compare(status));
+                    }
+                    // A new tab, without bringing the window forward: the user may have switched
+                    // to something else while Edge loaded the page.
+                    if let CompareEvent::Done(url) = event {
+                        window.create_and_activate_toplevel_webview(
+                            state.clone(),
+                            TopLevelWebViewCreationRequest::WithUrl(url),
+                        );
+                    }
+                    window.set_needs_update();
+                }
+            },
             AppEvent::UpdateCheckDone(message) => {
                 for window in state.windows().iter() {
                     if let Some(headed_window) = window.platform_window().as_headed_window() {

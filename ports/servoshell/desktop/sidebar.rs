@@ -74,6 +74,8 @@ pub(crate) enum WindowAction {
     AdblockSetEnabled(bool),
     /// Save, fill, copy, show or delete saved passwords.
     Password(PasswordAction),
+    /// Compare the page in the URL bar with the same page in Microsoft Edge.
+    Compare,
     /// Look for Zen Browser profiles to import from, and count what profile number N holds.
     ZenScan(usize),
     /// Import from a Zen profile (index from the scan): spaces and pins, open tabs, passwords.
@@ -170,6 +172,8 @@ pub(crate) struct Sidebar {
     passwords: serde_json::Value,
     /// Import from Zen: profiles found, what they hold, the last result.
     zen: serde_json::Value,
+    /// Compare with Edge: whether it's running and what to tell the user.
+    compare: serde_json::Value,
     /// Saves the open tabs (only the first window's sidebar has one).
     session: Option<crate::desktop::session::SessionWriter>,
     /// History and bookmarks: whether the page in the URL bar is bookmarked.
@@ -217,6 +221,7 @@ impl Sidebar {
             playing_media: HashSet::new(),
             passwords: serde_json::Value::Null,
             zen: serde_json::Value::Null,
+            compare: serde_json::Value::Null,
             hist: serde_json::Value::Null,
             command_bar: false,
             downloads: serde_json::Value::Null,
@@ -345,6 +350,15 @@ impl Sidebar {
             self.peek.set(true);
         }
         self.downloads = downloads;
+    }
+
+    pub(crate) fn set_compare(&mut self, compare: serde_json::Value) {
+        self.compare = compare;
+    }
+
+    /// Whether Compare with Edge is already running.
+    pub(crate) fn comparing(&self) -> bool {
+        self.compare["busy"].as_bool() == Some(true)
     }
 
     pub(crate) fn set_zen(&mut self, zen: serde_json::Value) {
@@ -885,6 +899,7 @@ impl Sidebar {
                 },
                 "pw-autofill" => self.password(PasswordAction::SetAutofill(argument == "1")),
                 "pw-forget-never" => self.password(PasswordAction::ForgetNever(argument.to_owned())),
+                "compare" => self.window_actions.push(WindowAction::Compare),
                 "zen-scan" => self
                     .window_actions
                     .push(WindowAction::ZenScan(argument.parse().unwrap_or(0))),
@@ -1006,6 +1021,7 @@ impl Sidebar {
             "adblock": self.adblock,
             "passwords": self.passwords,
             "zen": self.zen,
+            "compare": self.compare,
             "session": self.session_state(),
             "hist": self.hist,
             "commandBar": self.command_bar,

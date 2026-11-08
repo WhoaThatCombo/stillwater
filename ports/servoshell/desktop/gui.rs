@@ -717,6 +717,18 @@ impl Gui {
                         .borrow_mut()
                         .command(&command, &argument, state.servo(), page);
                 },
+                WindowAction::Compare => {
+                    if !self.sidebar.comparing() &&
+                        let Some(webview) = self.sidebar.navigated_webview(window)
+                    {
+                        self.sidebar.set_compare(serde_json::json!({ "busy": true, "message": "Starting…" }));
+                        crate::desktop::compare::start(
+                            &webview,
+                            headed_window.theme(),
+                            headed_window.event_loop_proxy(),
+                        );
+                    }
+                },
                 WindowAction::CheckForUpdates => {
                     updater::check_now(headed_window.event_loop_proxy());
                 },

@@ -90,6 +90,11 @@ first install.
   the page's cookies. The button next to the gear shows progress; its panel (<kbd>Ctrl</kbd>+<kbd>J</kbd>) lists downloads with Cancel,
   Retry, Open, Show in folder and Remove. Optionally ask where to save each file. Files are never opened
   automatically, and opening a program asks first.
+- **Compare with Edge**: when a page looks slightly off, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> (or
+  "Compare with Edge" in the tab's menu) loads the same page in a hidden Microsoft Edge at the same size and
+  colour scheme, and opens a comparison: a slider between the two, the differing elements outlined, a list
+  of what's different in words ("12 px taller", "text size 16px → 14px", "missing") and a summary to paste
+  into a broken-site report. Content that changes between loads (ads, carousels) is ignored.
 - **Find in page**: <kbd>Ctrl</kbd>+<kbd>F</kbd> opens a small find bar at the top-right of the page.
   Matches highlight as you type (the active one in orange), with a "3 of 17" counter, Match case,
   and wrap-around next/previous. The engine searches the rendered text and paints the highlights
@@ -119,6 +124,7 @@ first install.
 | <kbd>Ctrl</kbd>+<kbd>J</kbd> | Show downloads |
 | <kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd> | Back / forward |
 | <kbd>Ctrl</kbd>+<kbd>R</kbd> / <kbd>F5</kbd> | Reload |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> | Compare the page with Microsoft Edge |
 | <kbd>Ctrl</kbd>+<kbd>F</kbd> | Find in page (<kbd>Enter</kbd> / <kbd>F3</kbd> next, <kbd>Shift</kbd> for previous, <kbd>Esc</kbd> closes) |
 
 In the sidebar's space header, click the **icon** to change it, the **name** to rename the space, and the

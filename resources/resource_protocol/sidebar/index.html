@@ -78,6 +78,9 @@
   <button id="update" class="update-pill" hidden></button>
   <p id="update-error" class="hint update-error" hidden></p>
 
+  <!-- Compare with Edge: progress, or why it couldn't run. -->
+  <p id="compare-status" class="hint compare-status" hidden aria-live="polite"></p>
+
   <!-- Offered after signing in with a password that isn't saved. -->
   <section id="pw-offer" class="offer-card" hidden aria-label="Save password" aria-live="polite">
     <p id="pw-offer-title" class="offer-title"></p>
@@ -91,7 +94,7 @@
 
   <footer id="footer">
     <button id="settings-button" class="icon footer-button" title="Settings">&#xE713;</button>
-    <button id="dl-button" class="footer-button" title="Downloads"><svg class="dl-ring" viewBox="0 0 28 28" aria-hidden="true"><circle class="dl-ring-track" cx="14" cy="14" r="11.5"></circle><circle class="dl-ring-fill" cx="14" cy="14" r="11.5"></circle></svg><span class="icon dl-glyph">&#xE896;</span><span id="dl-count" class="dl-count" hidden></span></button>
+    <button id="dl-button" class="footer-button" title="Downloads"><span class="dl-ring" aria-hidden="true"></span><span class="icon dl-glyph">&#xE896;</span><span id="dl-count" class="dl-count" hidden></span></button>
     <div id="workspaces"></div>
   </footer>
 

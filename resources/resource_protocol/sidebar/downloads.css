@@ -19,35 +19,36 @@
   font-size: 13px;
 }
 
+/* A progress ring drawn with CSS (Servo draws inline SVG as a flat image without the page's
+   styles): a conic gradient disc whose middle is covered by a disc in the sidebar's colour. */
 .dl-ring {
+  display: none;
   position: absolute;
-  inset: 0;
-  width: 28px;
-  height: 28px;
-  transform: rotate(-90deg);
+  left: 50%;
+  top: 50%;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border-radius: 50%;
   pointer-events: none;
+  background: conic-gradient(var(--ws-accent, rgb(100, 115, 255)) var(--dl-progress, 0%),
+    var(--toolbarbutton-background-color-active) 0);
 }
 
-.dl-ring circle {
-  fill: none;
-  stroke-width: 2;
+.dl-ring::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  background: var(--sidebar-bg, var(--zen-main-browser-background));
 }
 
-.dl-ring-track {
-  stroke: transparent;
+#dl-button.active .dl-ring {
+  display: block;
 }
 
-.dl-ring-fill {
-  stroke: transparent;
-  stroke-linecap: round;
-}
-
-#dl-button.active .dl-ring-track {
-  stroke: var(--toolbarbutton-background-color-active);
-}
-
-#dl-button.active .dl-ring-fill {
-  stroke: var(--ws-accent, rgb(100, 115, 255));
+.dl-glyph {
+  position: relative;
 }
 
 /* Unknown sizes: a short arc that spins. */
@@ -56,8 +57,8 @@
 }
 
 @keyframes dl-spin {
-  from { transform: rotate(-90deg); }
-  to { transform: rotate(270deg); }
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .dl-count {

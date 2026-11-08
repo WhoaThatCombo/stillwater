@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
+<!-- Compare with Edge: the report Stillwater opens (desktop/compare.rs fills in the data). -->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>Compared with Edge</title>
+<style>
+  :root { --bg: #f3f3f5; --card: #fff; --text: #1b1b1f; --muted: #5d5d66; --line: #dcdce2; --accent: #4f5bd5; --bad: #d23b2f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1b1b1d; --card: #26262a; --text: #ececf0; --muted: #a2a2ad; --line: #3a3a40; --accent: #8a93ff; --bad: #ff6b5e; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px; background: var(--bg); color: var(--text); font: 14px/1.5 "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 1500px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 2px; font-weight: 600; }
+  .meta { color: var(--muted); margin: 0 0 14px; overflow-wrap: anywhere; }
+  .summary { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  .pill { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+  .pill b { font-weight: 600; }
+  .layout { display: grid; grid-template-columns: minmax(0, 3fr) minmax(280px, 1fr); gap: 16px; align-items: start; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .views { display: flex; gap: 6px; margin-bottom: 10px; }
+  .views button { font: inherit; padding: 5px 12px; border-radius: 7px; border: 1px solid var(--line); background: transparent; color: inherit; cursor: pointer; }
+  .views button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: white; }
+  .stage { position: relative; width: 100%; line-height: 0; }
+  .stage img, .stage canvas { width: 100%; display: block; }
+  .stage .over { position: absolute; left: 0; top: 0; }
+  .split .over { clip-path: inset(0 0 0 var(--split, 50%)); }
+  .divider { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); left: var(--split, 50%); pointer-events: none; }
+  .label { position: absolute; top: 8px; padding: 2px 8px; border-radius: 5px; background: rgba(0,0,0,.65); color: white; font-size: 12px; line-height: 1.6; }
+  .label.left { left: 8px; } .label.right { right: 8px; }
+  input[type=range] { width: 100%; margin: 10px 0 0; }
+  .box { position: absolute; border: 2px solid var(--bad); border-radius: 3px; pointer-events: none; }
+  .box.focus { border-color: #ffb000; box-shadow: 0 0 0 3px rgba(255,176,0,.35); }
+  ol { margin: 0; padding-left: 20px; }
+  li { margin: 0 0 6px; cursor: pointer; }
+  li:hover { color: var(--accent); }
+  .kind { font-weight: 600; }
+  .hint { color: var(--muted); font-size: 12.5px; }
+  textarea { width: 100%; min-height: 140px; font: 12px/1.4 Consolas, monospace; background: transparent; color: inherit; border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+  h2 { font-size: 15px; margin: 0 0 8px; font-weight: 600; }
+  .section { margin-top: 14px; }
+  @media (max-width: 1000px) { .layout { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Compared with Edge</h1>
+  <p class="meta" id="meta"></p>
+  <div class="summary" id="summary"></div>
+  <div class="layout">
+    <div class="card">
+      <div class="views" role="group" aria-label="View">
+        <button data-view="split" aria-pressed="true">Slider</button>
+        <button data-view="stillwater">Stillwater</button>
+        <button data-view="edge">Edge</button>
+        <button data-view="heat">Differences</button>
+      </div>
+      <div class="stage split" id="stage">
+        <img id="edge-img" alt="The page in Edge">
+        <img id="sw-img" class="over" alt="The page in Stillwater">
+        <canvas id="heat" class="over" hidden></canvas>
+        <div class="divider" id="divider"></div>
+        <span class="label left" id="label-left">Edge</span><span class="label right" id="label-right">Stillwater</span>
+        <div id="boxes"></div>
+      </div>
+      <input type="range" id="split" min="0" max="100" value="50" aria-label="Edge on the left, Stillwater on the right">
+      <p class="hint">Red outlines mark elements that differ; click a difference in the list to highlight it. In the Differences view, red pixels differ and blue areas were ignored because they also changed between two loads in Edge.</p>
+    </div>
+    <div>
+      <div class="card">
+        <h2>What's different</h2>
+        <ol id="issues"></ol>
+        <p class="hint" id="no-issues" hidden>No element differences found on this screen.</p>
+      </div>
+      <div class="card section">
+        <h2>Summary for a bug report</h2>
+        <textarea id="report" readonly></textarea>
+        <p class="hint">Select it all and copy it into "Report a broken site" (in Settings, or a tab's menu).</p>
+      </div>
+      <p class="hint section">Edge used a fresh profile, so if you're signed in to this site in Stillwater, signed-in parts will differ. Both were the same size and colour scheme.</p>
+    </div>
+  </div>
+</main>
+<script id="compare-data" type="application/json">__COMPARE_DATA__</script>
+<script>
+"use strict";
+const data = JSON.parse(document.getElementById("compare-data").textContent);
+const $ = (id) => document.getElementById(id);
+const edge = data.edge || {}, edge2 = data.edge2 || null, sw = data.stillwater || {};
+$("title").textContent = data.title || data.url;
+document.title = "Compared with Edge: " + (data.title || data.url);
+$("meta").textContent = `${data.url} · ${data.viewport[0]}×${data.viewport[1]} · ${data.scheme} mode · ${new Date(data.created * 1000).toLocaleString()}`;
+$("edge-img").src = edge.shot || "";
+$("sw-img").src = sw.shot || "";
+
+// ---- Element differences (the same rules as tools/sitecheck/compare.py) ----
+const num = (v) => parseFloat(v) || 0;
+const col = (v) => { const p = (String(v).match(/[\d.]+/g) || []).map(Number); if (p.length === 3) p.push(1); return p.length >= 4 ? p.slice(0, 4) : [0, 0, 0, 0]; };
+const colDiff = (a, b) => { const x = col(a), y = col(b); if (x[3] < 0.05 && y[3] < 0.05) return false; return [0, 1, 2].some((i) => Math.abs(x[i] - y[i]) > 10) || Math.abs(x[3] - y[3]) > 0.15; };
+const geoDiff = (a, b, t) => ["x", "y", "w", "h"].some((k) => Math.abs(a[k] - b[k]) > t);
+const labelOf = (e) => e.txt ? `${e.t} “${e.txt.slice(0, 40)}${e.txt.length > 40 ? "…" : ""}”` : `${e.t} (…${e.k.split(">").slice(-3).join(">")})`;
+function differences() {
+  const A = new Map(((edge.measure || {}).elements || []).map((e) => [e.k, e]));
+  const B = edge2 && edge2.measure ? new Map(edge2.measure.elements.map((e) => [e.k, e])) : A;
+  const S = new Map(((sw.measure || {}).elements || []).map((e) => [e.k, e]));
+  const height = data.viewport[1];
+  const issues = [], siblingMoves = new Map();
+  for (const [k, a] of A) {
+    const b = B.get(k);
+    if (!b || geoDiff(a, b, 6) || a.txt !== b.txt) continue;
+    const area = a.w * a.h, s = S.get(k);
+    if (!s) {
+      if (area >= 600 && a.y < height * 2) issues.push({ kind: "missing", what: labelOf(a), detail: `not found in Stillwater (${a.w}×${a.h} px in Edge)`, weight: Math.min(area, 60000) / 600, rect: [a.x, a.y, a.w, a.h] });
+      continue;
+    }
+    const parent = k.includes(">") ? k.slice(0, k.lastIndexOf(">")) : null;
+    const pa = A.get(parent), ps = S.get(parent);
+    const dw = s.w - a.w, dh = s.h - a.h;
+    const sameAsParent = pa && ps && Math.abs((ps.w - pa.w) - dw) <= 3 && Math.abs((ps.h - pa.h) - dh) <= 3;
+    if (!sameAsParent && ((Math.abs(dw) > 4 && Math.abs(dw) > 0.05 * a.w) || (Math.abs(dh) > 4 && Math.abs(dh) > 0.05 * a.h))) {
+      const parts = [];
+      if (Math.abs(dw) > 4) parts.push(`${Math.abs(dw)} px ${dw > 0 ? "wider" : "narrower"} (${a.w} → ${s.w})`);
+      if (Math.abs(dh) > 4) parts.push(`${Math.abs(dh)} px ${dh > 0 ? "taller" : "shorter"} (${a.h} → ${s.h})`);
+      issues.push({ kind: "size", what: labelOf(a), detail: parts.join(", "), weight: 1 + Math.min(Math.abs(dw) * a.h + Math.abs(dh) * a.w, 60000) / 1500, rect: [s.x, s.y, s.w, s.h] });
+    }
+    const dx = s.x - a.x, dy = s.y - a.y;
+    const prev = siblingMoves.get(parent);
+    siblingMoves.set(parent, [dx, dy]);
+    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
+      const withParent = pa && ps && Math.abs((ps.x - pa.x) - dx) <= 3 && Math.abs((ps.y - pa.y) - dy) <= 3;
+      const withSibling = prev && Math.abs(prev[0] - dx) <= 3 && Math.abs(prev[1] - dy) <= 3;
+      if (!withParent && !withSibling) {
+        const where = [];
+        if (Math.abs(dy) > 4) where.push(`${Math.abs(dy)} px ${dy > 0 ? "lower" : "higher"}`);
+        if (Math.abs(dx) > 4) where.push(`${Math.abs(dx)} px ${dx > 0 ? "right" : "left"}`);
+        issues.push({ kind: "moved", what: labelOf(a), detail: "sits " + where.join(", "), weight: 1 + Math.min(area, 60000) / 6000, rect: [s.x, s.y, s.w, s.h] });
+      }
+    }
+    if (a.txt) {
+      if (Math.abs(num(a.fs) - num(s.fs)) > 0.5) issues.push({ kind: "text size", what: labelOf(a), detail: `text size ${a.fs} → ${s.fs}`, weight: 3, rect: [s.x, s.y, s.w, s.h] });
+      if (a.fw !== s.fw) issues.push({ kind: "text weight", what: labelOf(a), detail: `weight ${a.fw} → ${s.fw}`, weight: 2, rect: [s.x, s.y, s.w, s.h] });
+      if (colDiff(a.c, s.c)) issues.push({ kind: "text colour", what: labelOf(a), detail: `text colour ${a.c} → ${s.c}`, weight: 2, rect: [s.x, s.y, s.w, s.h] });
+    }
+    if (area >= 400 && colDiff(a.bg, s.bg)) issues.push({ kind: "background", what: labelOf(a), detail: `background ${a.bg} → ${s.bg}`, weight: 1 + Math.min(area, 60000) / 6000, rect: [s.x, s.y, s.w, s.h] });
+  }
+  return issues.sort((x, y) => y.weight - x.weight);
+}
+
+// ---- Pixel differences, drawn into the heat map canvas ----
+function loadImage(src) {
+  return new Promise((resolve) => { const img = new Image(); img.onload = () => resolve(img); img.onerror = () => resolve(null); img.src = src; });
+}
+async function pixelDifferences() {
+  const [a, b, s] = await Promise.all([loadImage(edge.shot), edge2 ? loadImage(edge2.shot) : null, loadImage(sw.shot)]);
+  if (!a || !s) return null;
+  const w = Math.min(a.naturalWidth, s.naturalWidth), h = Math.min(a.naturalHeight, s.naturalHeight);
+  const pixels = (img) => { const c = document.createElement("canvas"); c.width = w; c.height = h; const x = c.getContext("2d"); x.drawImage(img, 0, 0); return x.getImageData(0, 0, w, h).data; };
+  const A = pixels(a), S = pixels(s), B = b ? pixels(b) : A;
+  const heat = $("heat"); heat.width = w; heat.height = h;
+  const ctx = heat.getContext("2d"), out = ctx.createImageData(w, h);
+  // Noise: what changed between Edge's two loads, grown by a few pixels.
+  const noisy = new Uint8Array(w * h);
+  for (let i = 0, p = 0; p < w * h; p++, i += 4) {
+    if (Math.max(Math.abs(A[i] - B[i]), Math.abs(A[i + 1] - B[i + 1]), Math.abs(A[i + 2] - B[i + 2])) > 32) noisy[p] = 1;
+  }
+  const grown = new Uint8Array(w * h), r = 8;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (noisy[y * w + x]) {
+    for (let yy = Math.max(0, y - r); yy <= Math.min(h - 1, y + r); yy += 2) for (let xx = Math.max(0, x - r); xx <= Math.min(w - 1, x + r); xx += 2) grown[yy * w + xx] = 1;
+  }
+  let different = 0, clean = 0;
+  for (let i = 0, p = 0; p < w * h; p++, i += 4) {
+    const faded = (v) => v * 0.35 + 255 * 0.65;
+    if (grown[p]) { out.data.set([faded(S[i]) * 0.6 + 90 * 0.4, faded(S[i + 1]) * 0.6 + 140 * 0.4, faded(S[i + 2]) * 0.6 + 255 * 0.4, 255], i); continue; }
+    clean++;
+    if (Math.max(Math.abs(A[i] - S[i]), Math.abs(A[i + 1] - S[i + 1]), Math.abs(A[i + 2] - S[i + 2])) > 40) { different++; out.data.set([230, 40, 40, 255], i); }
+    else out.data.set([faded(S[i]), faded(S[i + 1]), faded(S[i + 2]), 255], i);
+  }
+  ctx.putImageData(out, 0, 0);
+  return clean ? different / clean : 0;
+}
+
+// ---- Showing it ----
+const issues = differences();
+const scale = () => $("sw-img").clientWidth / data.viewport[0];
+function drawBoxes(focus) {
+  const k = scale();
+  $("boxes").replaceChildren(...issues.slice(0, 40).map((issue, index) => {
+    const [x, y, w, h] = issue.rect;
+    if (y > data.viewport[1] || y + h < 0) return document.createComment("off screen");
+    const box = document.createElement("div");
+    box.className = "box" + (index === focus ? " focus" : "");
+    Object.assign(box.style, { left: x * k + "px", top: y * k + "px", width: Math.max(4, w * k) + "px", height: Math.max(4, Math.min(h, data.viewport[1] - y) * k) + "px" });
+    return box;
+  }));
+}
+$("issues").replaceChildren(...issues.slice(0, 40).map((issue, index) => {
+  const li = document.createElement("li");
+  const kind = document.createElement("span"); kind.className = "kind"; kind.textContent = issue.kind;
+  li.append(kind, ` ${issue.what}: ${issue.detail}`);
+  li.addEventListener("click", () => { setView("stillwater"); drawBoxes(index); });
+  return li;
+}));
+$("no-issues").hidden = issues.length > 0;
+const kinds = {};
+for (const issue of issues) kinds[issue.kind] = (kinds[issue.kind] || 0) + 1;
+function summaryText(ratio) {
+  const lines = [`Compared with Edge: ${data.url}`, `Viewport ${data.viewport[0]}×${data.viewport[1]}, ${data.scheme} mode.`];
+  if (ratio !== null) lines.push(`${(ratio * 100).toFixed(1)}% of the screen looks different.`);
+  lines.push(...issues.slice(0, 15).map((issue) => `- ${issue.kind}: ${issue.what}: ${issue.detail}`));
+  return lines.join("\n");
+}
+pixelDifferences().then((ratio) => {
+  const pills = [];
+  if (ratio !== null) pills.push(`<b>${(ratio * 100).toFixed(1)}%</b> of the screen looks different`);
+  pills.push(`<b>${issues.length}</b> element differences`);
+  for (const [kind, count] of Object.entries(kinds).sort((a, b) => b[1] - a[1])) pills.push(`${count} ${kind}`);
+  $("summary").innerHTML = pills.map((text) => `<span class="pill">${text}</span>`).join("");
+  $("report").value = summaryText(ratio);
+});
+
+function setView(view) {
+  document.querySelectorAll(".views button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === view)));
+  const stage = $("stage");
+  stage.classList.toggle("split", view === "split");
+  $("sw-img").hidden = view === "edge" || view === "heat";
+  $("heat").hidden = view !== "heat";
+  $("divider").hidden = view !== "split";
+  $("split").hidden = view !== "split";
+  $("label-left").textContent = view === "split" || view === "edge" ? "Edge" : view === "heat" ? "Differences" : "Stillwater";
+  $("label-right").hidden = view !== "split";
+  $("boxes").hidden = view === "edge" || view === "heat";
+}
+document.querySelectorAll(".views button").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
+$("split").addEventListener("input", (event) => $("stage").style.setProperty("--split", event.target.value + "%"));
+window.addEventListener("resize", () => drawBoxes());
+$("sw-img").addEventListener("load", () => drawBoxes());
+</script>
+</body>
+</html>

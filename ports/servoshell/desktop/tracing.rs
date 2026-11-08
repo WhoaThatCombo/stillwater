@@ -60,6 +60,7 @@ mod from_winit {
                 Self::UserEvent(AppEvent::UpdateAvailable(..)) => target!("UserEvent(UpdateAvailable)"),
                 Self::UserEvent(AppEvent::UpdateStatus(..)) => target!("UserEvent(UpdateStatus)"),
                 Self::UserEvent(AppEvent::UpdateCheckDone(..)) => target!("UserEvent(UpdateCheckDone)"),
+                Self::UserEvent(AppEvent::Compare(..)) => target!("UserEvent(Compare)"),
                 Self::UserEvent(AppEvent::UpdateReadyToRestart) => {
                     target!("UserEvent(UpdateReadyToRestart)")
                 },

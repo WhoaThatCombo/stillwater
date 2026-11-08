@@ -9,6 +9,7 @@ pub(crate) mod adblock;
 pub(crate) mod app;
 mod bookmarks;
 pub(crate) mod cli;
+pub(crate) mod compare;
 mod command_bar;
 pub(crate) mod dialog;
 pub(crate) mod downloads;

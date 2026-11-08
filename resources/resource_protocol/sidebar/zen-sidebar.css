@@ -1085,3 +1085,20 @@ button.secondary.armed {
 .toggle-row .switch {
   flex: none;
 }
+
+/* ---- Compare with Edge: progress line above the bottom row ---- */
+.compare-status {
+  margin: 6px 0 2px;
+  padding: 8px 10px;
+  border-radius: var(--border-radius-medium);
+  background: var(--zen-urlbar-background);
+  opacity: 1;
+}
+
+.compare-status[hidden] {
+  display: none;
+}
+
+.compare-status.error {
+  color: rgb(230, 110, 100);
+}

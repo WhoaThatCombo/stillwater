@@ -545,6 +545,7 @@ impl HeadedWindow {
             .shortcut(CMD_OR_CONTROL, 'T', || post("new-tab"))
             .shortcut(CMD_OR_CONTROL | Modifiers::SHIFT, 'T', || post("session-reopen"))
             .shortcut(CMD_OR_CONTROL, ',', || post("open-settings"))
+            .shortcut(CMD_OR_CONTROL | Modifiers::SHIFT, 'E', || post("compare"))
             .shortcut(CMD_OR_CONTROL, 'H', || post("hist-show"))
             .shortcut(CMD_OR_CONTROL, 'D', || post("bm-star"))
             .shortcut(CMD_OR_CONTROL, 'J', || post("dl-panel"))

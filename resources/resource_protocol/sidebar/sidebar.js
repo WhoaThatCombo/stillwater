@@ -148,6 +148,7 @@ function tabMenu(tab, label) {
     { label: "Rename", run: () => startRename(label, tabLabel(tab), (title) => send("tab-rename", `${tab.id}\t${title}`)) },
     { label: "Open in split view", run: () => send("split-tab", tab.id) },
     ...otherSpaces().map((space) => ({ label: `Move to ${space.name}`, run: () => send("tab-move-space", `${tab.id}\t${space.id}`) })),
+    ...(tab.active && /^https?:/.test(tab.url || "") ? [{ label: "Compare with Edge", run: () => send("compare") }] : []),
     { label: "Report site isn't working", run: () => send("report-site", tab.id) },
     "-",
     ...(tab.loaded && !tab.active ? [{ label: "Unload (free memory)", run: () => send("tab-unload", tab.id) }] : []),
@@ -636,8 +637,26 @@ function renderZen() {
   status.textContent = zen.result || "";
 }
 
+// Compare with Edge: show progress; a finished message goes away after a few seconds.
+let compareHideTimer = 0;
+let lastCompareMessage = "";
+function renderCompare() {
+  const compare = state.compare || {};
+  const line = $("compare-status");
+  const message = compare.message || "";
+  if (message !== lastCompareMessage) {
+    lastCompareMessage = message;
+    clearTimeout(compareHideTimer);
+    line.hidden = !message;
+    if (message && !compare.busy) compareHideTimer = setTimeout(() => { line.hidden = true; }, compare.error ? 10000 : 5000);
+  }
+  line.textContent = message;
+  line.classList.toggle("error", !!compare.error);
+}
+
 function render() {
   renderSettings();
+  renderCompare();
   renderPasswordOffer();
   renderKey();
   renderZen();
