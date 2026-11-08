@@ -630,6 +630,7 @@ impl Gui {
     ) {
         headed_window.set_theme_override(self.sidebar.theme_override(), window);
         let theme = headed_window.theme();
+        state.sync_color_scheme_hint(theme);
         let hidpi_scale = window.platform_window().hidpi_scale_factor();
         self.sidebar.ensure_webview(state, theme, hidpi_scale);
         load_pending_favicons(window, &mut self.sidebar);

@@ -388,6 +388,11 @@ pub struct Preferences {
     pub network_use_webpki_roots: bool,
     /// The maximum content size we will forward for preallocation, defaults to 5MB
     pub network_max_content_length: u64,
+    /// "light" or "dark": sent as the `Sec-CH-Prefers-Color-Scheme` client hint when loading
+    /// pages, so sites that pick their theme on the server (e.g. Google) follow the embedder's
+    /// colour scheme. Empty (the default) sends nothing. Pages can read the same thing through
+    /// the `prefers-color-scheme` media query.
+    pub network_prefers_color_scheme_hint: String,
     /// Experimental option. If enabled servo will attempt to optimize thread placement
     /// and/or priority of critical servo threads to optimize performance.
     #[doc(hidden)]
@@ -607,6 +612,7 @@ impl Preferences {
             network_local_directory_listing_enabled: true,
             network_use_webpki_roots: false,
             network_max_content_length: 5 * 1024 * 1024,
+            network_prefers_color_scheme_hint: String::new(),
             perf_thread_boost_enabled: true,
             // Every page kept for back/forward navigation stays fully alive (DOM, JS, layout),
             // so keep only one step back and forward; older entries reload when visited.

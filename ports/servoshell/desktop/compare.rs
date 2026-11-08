@@ -113,7 +113,7 @@ struct Job {
 
 impl Job {
     fn run(self, send: &impl Fn(CompareEvent)) -> Result<url::Url, String> {
-        let mut edge = Edge::start().map_err(|error| format!("Edge didn't start: {error}"))?;
+        let mut edge = Edge::start(self.scheme == "dark").map_err(|error| format!("Edge didn't start: {error}"))?;
         let first = edge.load(&self, 1);
         send(CompareEvent::Status("Loading it in Edge again, to ignore changing content…".into()));
         let second = first.as_ref().ok().and_then(|_| edge.load(&self, 2).ok());
@@ -175,7 +175,9 @@ struct Edge {
 }
 
 impl Edge {
-    fn start() -> Result<Self, String> {
+    /// `dark`: Stillwater shows pages dark, so Edge's own theme (which some sites read through a
+    /// request header, not the page's colour scheme) must be dark too.
+    fn start(dark: bool) -> Result<Self, String> {
         let exe = find_edge().ok_or("not installed")?;
         let millis = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.as_millis());
         let profile = std::env::temp_dir().join(format!("stillwater-compare-{}-{millis}", std::process::id()));
@@ -195,6 +197,7 @@ impl Edge {
                 "about:blank",
             ])
             .arg(format!("--user-data-dir={}", profile.display()))
+            .args(dark.then_some("--force-dark-mode"))
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         #[cfg(windows)]

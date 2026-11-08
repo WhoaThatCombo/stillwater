@@ -114,7 +114,8 @@ class WebSocket:
 
 
 class Edge:
-    def __init__(self, exe: str | None = None):
+    def __init__(self, exe: str | None = None, dark: bool = False):
+        self.dark = dark
         self.exe = exe or find_edge()
         if not self.exe:
             raise FileNotFoundError("Microsoft Edge isn't installed")
@@ -136,6 +137,10 @@ class Edge:
                 "--mute-audio", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check",
                 "--disable-extensions", "--disable-sync", "--disable-background-networking",
                 "--force-device-scale-factor=1", "--window-size=1280,800", "about:blank"]
+        # Sites like Google pick light or dark on the server from a header that follows Windows'
+        # theme, not the page's emulated colour scheme: make it dark too when comparing in dark.
+        if self.dark:
+            args.insert(-1, "--force-dark-mode")
         self.process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                         creationflags=0x08000000)  # CREATE_NO_WINDOW
         port_file = self.profile / "DevToolsActivePort"
@@ -213,7 +218,7 @@ class Edge:
         try:
             self.send("Emulation.setDeviceMetricsOverride",
                       {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False}, session)
-            # Match Stillwater's test runs (light), whatever Windows' own theme is.
+            # The colour scheme to show pages in (compare.py passes Windows' theme).
             self.send("Emulation.setEmulatedMedia", {"features": [
                 {"name": "prefers-color-scheme", "value": color_scheme}]}, session)
             self.send("Page.enable", session=session)

@@ -238,6 +238,8 @@ pub(crate) struct RunningAppState {
     /// Downloads and the Downloads panel's list.
     #[cfg(not(any(target_os = "android", target_env = "ohos")))]
     pub(crate) downloads: crate::desktop::downloads::SharedDownloads,
+    /// The colour scheme last sent as a client hint ("light" or "dark").
+    color_scheme_hint: Cell<Option<&'static str>>,
     /// Tabs with audio or video playing, which the tab unloader leaves alone.
     playing_media: RefCell<HashMap<WebViewId, std::time::Instant>>,
     /// When to run an idle garbage collection: a few seconds after pages finish loading or
@@ -338,6 +340,7 @@ impl RunningAppState {
             user_content_manager,
             recent_console_errors: Default::default(),
             playing_media: Default::default(),
+            color_scheme_hint: Cell::new(None),
             gc_due: Default::default(),
             experimental_preferences_enabled,
             accessibility_active: Cell::new(false),
@@ -465,6 +468,19 @@ impl RunningAppState {
     #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
     pub(crate) fn experimental_preferences_enabled(&self) -> bool {
         self.experimental_preferences_enabled.get()
+    }
+
+    /// Keep the `Sec-CH-Prefers-Color-Scheme` client hint in step with the theme pages are shown
+    /// in, so sites that pick light or dark on the server (Google) match.
+    pub(crate) fn sync_color_scheme_hint(&self, theme: servo::Theme) {
+        let value = match theme {
+            servo::Theme::Dark => "dark",
+            servo::Theme::Light => "light",
+        };
+        if self.color_scheme_hint.replace(Some(value)) != Some(value) {
+            self.servo
+                .set_preference("network_prefers_color_scheme_hint", PrefValue::Str(value.to_owned()));
+        }
     }
 
     #[cfg_attr(target_env = "ohos", expect(dead_code))]

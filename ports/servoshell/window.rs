@@ -142,6 +142,8 @@ impl ServoShellWindow {
             webview_builder = webview_builder.gamepad_delegate(gamepad_delegate);
         }
 
+        // Before the first request: pages load with the colour-scheme hint for this window.
+        state.sync_color_scheme_hint(self.platform_window.theme());
         let webview = webview_builder.build();
         self.add_webview(webview.clone());
 
@@ -454,8 +456,13 @@ pub(crate) trait PlatformWindow {
     ) -> Rc<dyn servo::webxr::GlWindow>;
     /// This returns [`RenderingContext`] matching the viewport.
     fn rendering_context(&self) -> Rc<dyn RenderingContext>;
+    /// Windows without a theme of their own (headless) use light, or dark with
+    /// `STILLWATER_HEADLESS_THEME=dark` (tests comparing with another browser in dark mode).
     fn theme(&self) -> servo::Theme {
-        servo::Theme::Light
+        match std::env::var("STILLWATER_HEADLESS_THEME").as_deref() {
+            Ok("dark") => servo::Theme::Dark,
+            _ => servo::Theme::Light,
+        }
     }
     fn window_rect(&self) -> DeviceIndependentIntRect;
     fn maximize(&self, _: &WebView) {}

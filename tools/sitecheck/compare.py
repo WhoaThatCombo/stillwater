@@ -46,6 +46,21 @@ from driver import Stillwater, WebDriverError  # noqa: E402
 from edge import COLLECT_JS, Edge  # noqa: E402
 
 WIDTH, HEIGHT = 1280, 800
+
+
+def windows_color_scheme() -> str:
+    """Windows' own theme. Both browsers use it: some sites (Google) choose light or dark on the
+    server from a header Edge sends that follows Windows, whatever the page is told."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+            return "light" if winreg.QueryValueEx(key, "AppsUseLightTheme")[0] else "dark"
+    except OSError:
+        return "light"
+
+
+SCHEME = windows_color_scheme()
 # The measuring script as one expression (its leading comment lines removed), so WebDriver can
 # `return` it.
 COLLECT_EXPRESSION = "\n".join(line for line in COLLECT_JS.splitlines()
@@ -62,7 +77,7 @@ _local = threading.local()
 def worker_edge() -> Edge:
     edge = getattr(_local, "edge", None)
     if edge is None:
-        edge = Edge()
+        edge = Edge(dark=SCHEME == "dark")
         edge.start()
         _local.edge = edge
         with _edges_lock:
@@ -83,7 +98,7 @@ def restart_worker_edge() -> None:
 def edge_load(url: str, settle: float) -> dict:
     for attempt in range(2):
         try:
-            return worker_edge().load(url, WIDTH, HEIGHT, settle)
+            return worker_edge().load(url, WIDTH, HEIGHT, settle, color_scheme=SCHEME)
         except (OSError, ConnectionError, RuntimeError, TimeoutError, ValueError) as error:
             restart_worker_edge()
             if attempt:
@@ -93,7 +108,8 @@ def edge_load(url: str, settle: float) -> dict:
 
 def stillwater_load(exe: Path, url: str, settle: float, work: Path) -> dict:
     profile = work / "profile"
-    env = dict(os.environ, STILLWATER_NO_ADBLOCK="1")
+    profile.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, STILLWATER_NO_ADBLOCK="1", STILLWATER_HEADLESS_THEME=SCHEME)
     page = {"url": url, "shot": None, "measure": None, "loaded": False}
     try:
         with Stillwater(exe, profile, work / "log.txt", env=env, output=open(work / "out.txt", "wb"),
@@ -369,7 +385,7 @@ def main() -> None:
         sites = sites[:args.limit]
     out = HERE / "out" / f"compare-{args.label}"
     (out / "shots").mkdir(parents=True, exist_ok=True)
-    print(f"Comparing {len(sites)} sites with {args.jobs} jobs -> {out}")
+    print(f"Comparing {len(sites)} sites with {args.jobs} jobs, {SCHEME} mode (Windows' theme) -> {out}")
     results = []
     try:
         with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:

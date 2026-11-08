@@ -1568,6 +1568,19 @@ async fn http_network_or_cache_fetch(
     // unlike http_loader, we should not set the accept header here
     set_default_accept_encoding(&mut http_request.headers);
 
+    // The embedder's colour scheme as a client hint, for sites that choose light or dark on the
+    // server: https://wicg.github.io/user-preference-media-features-headers/
+    if http_request.is_navigation_request() {
+        let scheme = pref!(network_prefers_color_scheme_hint);
+        if (scheme == "light" || scheme == "dark") &&
+            let Ok(value) = HeaderValue::from_str(&format!("\"{scheme}\""))
+        {
+            http_request
+                .headers
+                .insert("Sec-CH-Prefers-Color-Scheme", value);
+        }
+    }
+
     let current_url = http_request.current_url();
 
     // Step 8.21: If includeCredentials is true, then:
