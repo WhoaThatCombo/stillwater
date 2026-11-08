@@ -1,0 +1,508 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/* Stillwater's settings page, laid out like Zen's (Firefox's) preferences: a category column
+   and a content column of rounded groups. Colours follow the sidebar's tokens. */
+
+:root {
+  color-scheme: light dark;
+  --page: rgb(242, 242, 244);
+  --nav: rgb(235, 235, 238);
+  --card: rgb(255, 255, 255);
+  --text: rgb(24, 24, 27);
+  --muted: rgb(96, 96, 104);
+  --line: rgba(0, 0, 0, 0.09);
+  --hover: rgba(0, 0, 0, 0.05);
+  --field: rgba(0, 0, 0, 0.05);
+  --selected: rgb(255, 255, 255);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  --danger: rgb(200, 60, 50);
+  --accent-default: rgb(100, 115, 255);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: rgb(24, 24, 26);
+    --nav: rgb(30, 30, 33);
+    --card: rgb(36, 36, 40);
+    --text: rgb(236, 236, 240);
+    --muted: rgb(160, 160, 170);
+    --line: rgba(255, 255, 255, 0.08);
+    --hover: rgba(255, 255, 255, 0.06);
+    --field: rgba(255, 255, 255, 0.07);
+    --selected: rgb(48, 48, 54);
+    --shadow: 0 0 0 1px rgba(255, 255, 255, 0.05);
+    --danger: rgb(240, 110, 100);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  background: var(--page);
+  color: var(--text);
+  font: 14px/1.5 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+}
+
+.icon {
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets";
+  font-size: 15px;
+  line-height: 1;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+a {
+  color: var(--accent, var(--accent-default));
+}
+
+/* ---- Category column ---- */
+#nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 260px;
+  flex: none;
+  padding: 20px 12px;
+  background: var(--nav);
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px 14px;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.brand img {
+  width: 30px;
+  height: 30px;
+}
+
+.search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  margin: 0 0 12px;
+  padding: 0 12px;
+  border-radius: 10px;
+  background: var(--field);
+}
+
+.search .icon {
+  font-size: 12px;
+  opacity: 0.6;
+}
+
+.search input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.search.inline {
+  max-width: 420px;
+}
+
+.category {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 38px;
+  padding: 0 12px;
+  border-radius: 10px;
+  text-align: left;
+}
+
+.category:hover {
+  background: var(--hover);
+}
+
+.category[aria-current="true"] {
+  background: var(--selected);
+  box-shadow: var(--shadow);
+  font-weight: 600;
+}
+
+.category[aria-current="true"] .icon {
+  color: var(--accent, var(--accent-default));
+}
+
+.nav-spacer {
+  flex: 1;
+}
+
+/* ---- Content column ---- */
+#main {
+  flex: 1;
+  min-width: 0;
+  padding: 28px 40px 60px;
+  overflow-y: auto;
+}
+
+.pane {
+  max-width: 760px;
+}
+
+.pane[hidden],
+.group[hidden] {
+  display: none;
+}
+
+h1 {
+  margin: 0 0 18px;
+  font-size: 26px;
+  font-weight: 600;
+}
+
+h2 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.group {
+  margin: 0 0 14px;
+  padding: 16px 18px;
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.hint {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.empty {
+  color: var(--muted);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.status {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.status.error {
+  color: var(--danger);
+}
+
+.links a + a {
+  margin-left: 14px;
+}
+
+/* Segmented choices and option lists */
+.segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--field);
+}
+
+.segmented button {
+  min-width: 84px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 8px;
+}
+
+.segmented button:hover {
+  background: var(--hover);
+}
+
+.segmented button[aria-pressed="true"] {
+  background: var(--selected);
+  box-shadow: var(--shadow);
+  font-weight: 600;
+}
+
+.options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.options button {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 9px 12px 9px 40px;
+  border-radius: 10px;
+  text-align: left;
+}
+
+.options button:hover {
+  background: var(--hover);
+}
+
+/* A radio dot */
+.options button::before {
+  content: "";
+  position: absolute;
+  left: 13px;
+  top: 12px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--muted);
+}
+
+.options button[aria-pressed="true"]::before {
+  border-color: var(--accent, var(--accent-default));
+  background: radial-gradient(var(--accent, var(--accent-default)) 45%, transparent 50%);
+}
+
+.options button span,
+.toggle > span:first-child > span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* On/off rows */
+.toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 0;
+  text-align: left;
+}
+
+.toggle + .toggle {
+  border-top: 1px solid var(--line);
+}
+
+.toggle > span:first-child {
+  display: flex;
+  flex-direction: column;
+}
+
+.switch {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 22px;
+  border-radius: 11px;
+  background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.toggle[aria-pressed="true"] .switch {
+  background: var(--accent, var(--accent-default));
+  box-shadow: none;
+}
+
+.toggle[aria-pressed="true"] .switch::after {
+  left: 21px;
+  background: white;
+}
+
+/* Buttons */
+.primary,
+.secondary {
+  height: 34px;
+  padding: 0 16px;
+  border-radius: 9px;
+}
+
+.primary {
+  background: var(--accent, var(--accent-default));
+  color: white;
+  font-weight: 600;
+}
+
+.primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.secondary {
+  background: var(--field);
+}
+
+.secondary:hover,
+.primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.armed {
+  background: var(--danger);
+  color: white;
+}
+
+/* Saved passwords */
+.logins {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 10px;
+}
+
+.login {
+  border-radius: 10px;
+}
+
+.login.open {
+  background: var(--field);
+}
+
+.login-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 10px;
+  text-align: left;
+}
+
+.login-head:hover {
+  background: var(--hover);
+}
+
+.login-host {
+  font-weight: 600;
+}
+
+.login-user {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.login-details {
+  padding: 0 12px 12px;
+}
+
+.secret {
+  display: inline-block;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--card);
+  font-family: Consolas, monospace;
+  user-select: text;
+}
+
+.login.never {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 6px 6px 12px;
+}
+
+/* Keyboard shortcuts */
+.shortcuts {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.shortcuts td {
+  padding: 8px 6px;
+  border-top: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.shortcuts tr:first-child td {
+  border-top: 0;
+}
+
+.shortcuts td:first-child {
+  width: 40%;
+  white-space: nowrap;
+}
+
+kbd {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 6px;
+  background: var(--field);
+  box-shadow: inset 0 -1px 0 var(--line);
+  font: 12.5px/1.6 "Segoe UI", system-ui, sans-serif;
+}
+
+/* About */
+.about {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.about img {
+  width: 64px;
+  height: 64px;
+}
+
+.version {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+#zen-found {
+  margin-top: 10px;
+}
+
+#zen-profiles {
+  margin-bottom: 6px;
+}
+
+@media (max-width: 760px) {
+  #nav {
+    width: 200px;
+  }
+
+  #main {
+    padding: 20px;
+  }
+}

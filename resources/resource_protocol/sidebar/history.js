@@ -368,8 +368,6 @@ historySearch.addEventListener("input", () => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !historyPanel.hidden && event.target !== url) closeHistory();
 });
-$("open-history").addEventListener("click", () => openHistory("history"));
-$("open-bookmarks").addEventListener("click", () => openHistory("bookmarks"));
 
 // ---- Calls from Rust ----
 

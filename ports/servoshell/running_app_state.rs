@@ -1166,6 +1166,18 @@ impl WebViewDelegate for RunningAppState {
             self.adblock.borrow().on_cosmetic_message(&webview, payload);
             return;
         }
+        // The settings page (only from a tab that really shows servo:settings: a web page can
+        // print the same prefix).
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        if let Some(payload) = message.strip_prefix(crate::desktop::sidebar::SETTINGS_MESSAGE_PREFIX) {
+            if webview.url().is_some_and(|url| crate::desktop::sidebar::is_settings_url(&url)) &&
+                let Some(headed_window) =
+                    self.window_for_webview(&webview).platform_window().as_headed_window()
+            {
+                headed_window.with_sidebar(|sidebar| sidebar.post_from_settings(&webview, payload));
+            }
+            return;
+        }
         // Sign-in forms and submitted logins: these carry passwords, so they're never printed
         // or logged.
         #[cfg(not(any(target_os = "android", target_env = "ohos")))]

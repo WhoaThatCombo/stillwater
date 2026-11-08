@@ -100,9 +100,14 @@ first install.
   and wrap-around next/previous. The engine searches the rendered text and paints the highlights
   itself, so the page's DOM is never touched.
 - **Audio indicator**: tabs playing audio or video show a speaker icon.
-- **Settings** (gear at the bottom of the sidebar, or <kbd>Ctrl</kbd>+<kbd>,</kbd>): light, dark or system
-  appearance (websites that support dark mode follow along), your search engine (DuckDuckGo, Google,
-  Bing or Brave Search), compact mode, and checking for updates.
+- **App menu** (the ≡ button at the top of the sidebar, like Zen's): new tab, history, bookmarks, downloads,
+  passwords, Compare with Edge, settings, updates and quit, with their shortcuts.
+- **Settings page** (`servo:settings`, from the menu or <kbd>Ctrl</kbd>+<kbd>,</kbd>): opens in a tab, laid out
+  like Zen's, with a category list and "Find in settings": appearance, startup, the new-tab bar, compact mode,
+  search engine, tab unloading, ad blocking, clearing browsing data, saved passwords, downloads, import from
+  Zen, a keyboard shortcut reference and updates. Only a tab that really shows `servo:settings` can change
+  settings; a web page sending the same messages is ignored.
+- **Downloads button** in the bottom-left corner, with a progress ring while files download.
 
 ![Stillwater's default sidebar](.github/assets/stillwater-sidebar.png)
 

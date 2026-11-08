@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
+<!-- Stillwater's settings page (servo:settings), laid out like Zen's: categories on the left,
+     the chosen category's settings on the right. Talks to Stillwater through settings.js. -->
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Settings</title>
+  <link rel="icon" href="resource:///stillwater-icon.png">
+  <link rel="stylesheet" href="servo:settings/settings.css">
+</head>
+<body>
+  <nav id="nav" aria-label="Settings categories">
+    <div class="brand">
+      <img src="resource:///stillwater-icon.png" alt="" draggable="false">
+      <span>Settings</span>
+    </div>
+    <label class="search">
+      <span class="icon" aria-hidden="true">&#xE721;</span>
+      <input id="search" type="search" spellcheck="false" autocomplete="off" placeholder="Find in settings" aria-label="Find in settings">
+    </label>
+    <button class="category" data-pane="general"><span class="icon">&#xE713;</span>General</button>
+    <button class="category" data-pane="search"><span class="icon">&#xE721;</span>Search</button>
+    <button class="category" data-pane="tabs"><span class="icon">&#xE737;</span>Tabs and memory</button>
+    <button class="category" data-pane="privacy"><span class="icon">&#xE72E;</span>Privacy and ad blocking</button>
+    <button class="category" data-pane="passwords"><span class="icon">&#xE8D7;</span>Passwords</button>
+    <button class="category" data-pane="downloads"><span class="icon">&#xE896;</span>Downloads</button>
+    <button class="category" data-pane="import"><span class="icon">&#xE8B5;</span>Import from Zen</button>
+    <button class="category" data-pane="shortcuts"><span class="icon">&#xE765;</span>Keyboard shortcuts</button>
+    <span class="nav-spacer"></span>
+    <button class="category" data-pane="about"><span class="icon">&#xE946;</span>About Stillwater</button>
+  </nav>
+
+  <main id="main">
+    <p id="no-results" class="empty" hidden>No settings match your search.</p>
+
+    <section class="pane" data-pane="general">
+      <h1>General</h1>
+      <div class="group" data-words="appearance theme dark light system mode colour color">
+        <h2>Appearance</h2>
+        <p class="hint">Websites that have their own dark design follow this too.</p>
+        <div class="segmented" id="theme" role="group" aria-label="Appearance">
+          <button data-value="system">System</button>
+          <button data-value="light">Light</button>
+          <button data-value="dark">Dark</button>
+        </div>
+      </div>
+      <div class="group" data-words="startup restore session tabs launch open">
+        <h2>On startup</h2>
+        <div class="options" id="startup" role="radiogroup" aria-label="On startup">
+          <button data-value="restore">Restore previous tabs<span>Restored tabs load when you click them.</span></button>
+          <button data-value="newtab">Open a new tab</button>
+        </div>
+      </div>
+      <div class="group" data-words="new tab address bar floating ctrl+t zen">
+        <h2>New tab opens</h2>
+        <div class="options" id="newtab" role="radiogroup" aria-label="New tab opens">
+          <button data-value="1">Floating address bar<span>Like Zen: Ctrl+T shows an address bar over the page, and a tab is only created when you pick something.</span></button>
+          <button data-value="0">New Tab page</button>
+        </div>
+      </div>
+      <div class="group" data-words="sidebar compact mode hide edge">
+        <h2>Sidebar</h2>
+        <button class="toggle" id="compact"><span>Compact mode<span>Hides the sidebar; touch the window's left edge to show it. Ctrl+Alt+C also toggles it.</span></span><span class="switch" aria-hidden="true"></span></button>
+      </div>
+    </section>
+
+    <section class="pane" data-pane="search">
+      <h1>Search</h1>
+      <div class="group" data-words="search engine default duckduckgo google bing brave address bar">
+        <h2>Search engine</h2>
+        <p class="hint">Used for searches from the address bar and the New Tab page.</p>
+        <div class="options" id="engines" role="radiogroup" aria-label="Search engine"></div>
+      </div>
+    </section>
+
+    <section class="pane" data-pane="tabs">
+      <h1>Tabs and memory</h1>
+      <div class="group" data-words="unload inactive tabs memory ram sleep discard">
+        <h2>Unload inactive tabs</h2>
+        <p class="hint">Frees the memory of tabs you haven't used for a while. They stay in the sidebar and reload when clicked. Tabs playing audio or video are kept.</p>
+        <div class="segmented" id="unload" role="group" aria-label="Unload inactive tabs after"></div>
+        <button class="toggle" id="lowmem"><span>Also when memory is low</span><span class="switch" aria-hidden="true"></span></button>
+      </div>
+    </section>
+
+    <section class="pane" data-pane="privacy">
+      <h1>Privacy and ad blocking</h1>
+      <div class="group" data-words="ad blocking ads trackers ublock filter lists shield">
+        <h2>Ad blocking</h2>
+        <button class="toggle" id="adblock"><span>Block ads and trackers<span id="adblock-hint">Uses uBlock Origin's filter lists. Turn it off for one site with the shield in the address bar.</span></span><span class="switch" aria-hidden="true"></span></button>
+      </div>
+      <div class="group" data-words="clear history cookies site data cache browsing privacy delete">
+        <h2>Clear browsing data</h2>
+        <div class="segmented" id="clear-range" role="group" aria-label="Clear history from">
+          <button data-value="hour">Last hour</button>
+          <button data-value="today">Today</button>
+          <button data-value="all">Everything</button>
+        </div>
+        <button class="toggle" id="clear-site-data"><span>Also clear cookies and site data<span>For every site and all time, not only this range. Signs you out of websites.</span></span><span class="switch" aria-hidden="true"></span></button>
+        <div class="row">
+          <button class="primary" id="clear">Clear history</button>
+          <span class="status" id="clear-status" aria-live="polite"></span>
+        </div>
+      </div>
+      <div class="group" data-words="history bookmarks visited pages">
+        <h2>History and bookmarks</h2>
+        <div class="row">
+          <button class="secondary" id="show-history">Show history</button>
+          <button class="secondary" id="show-bookmarks">Show bookmarks</button>
+        </div>
+        <p class="hint">They open in the sidebar. Ctrl+H shows history, Ctrl+D bookmarks the page.</p>
+      </div>
+    </section>
+
+    <section class="pane" data-pane="passwords">
+      <h1>Passwords</h1>
+      <div class="group" data-words="passwords autofill fill save logins sign in">
+        <button class="toggle" id="autofill"><span>Fill saved passwords<span>Stillwater offers to save a password when you sign in, and fills it in next time. Passwords are encrypted with your Windows account.</span></span><span class="switch" aria-hidden="true"></span></button>
+      </div>
+      <div class="group" data-words="saved passwords logins usernames show copy delete manage">
+        <h2>Saved passwords</h2>
+        <label class="search inline">
+          <span class="icon" aria-hidden="true">&#xE721;</span>
+          <input id="login-search" type="search" spellcheck="false" autocomplete="off" placeholder="Search saved passwords" aria-label="Search saved passwords">
+        </label>
+        <p class="status error" id="logins-problem" hidden></p>
+        <div class="logins" id="logins"></div>
+        <p class="empty" id="logins-empty" hidden></p>
+      </div>
+      <div class="group" id="never-group" data-words="never save sites exceptions" hidden>
+        <h2>Never saved for</h2>
+        <div class="logins" id="never"></div>
+      </div>
+    </section>
+
+    <section class="pane" data-pane="downloads">
+      <h1>Downloads</h1>
+      <div class="group" data-words="downloads folder save ask where files">
+        <button class="toggle" id="ask-where"><span>Ask where to save each file<span id="download-folder"></span></span><span class="switch" aria-hidden="true"></span></button>
+        <div class="row"><button class="secondary" id="show-downloads">Show downloads</button></div>
+      </div>
+    </section>
+
+    <section class="pane" data-pane="import">
+      <h1>Import from Zen</h1>
+      <div class="group" data-words="import zen browser firefox spaces pinned tabs essentials passwords bookmarks history migrate">
+        <p class="hint">Copies your spaces, pinned tabs, Essentials, passwords, bookmarks and history from Zen Browser on this computer. Zen isn't changed.</p>
+        <div class="row"><button class="secondary" id="zen-scan">Find Zen's data</button></div>
+        <div id="zen-found" hidden>
+          <div class="options" id="zen-profiles" role="radiogroup" aria-label="Zen profile"></div>
+          <button class="toggle" data-zen="pins"><span>Spaces and pinned tabs<span data-zen-count="pins"></span></span><span class="switch" aria-hidden="true"></span></button>
+          <button class="toggle" data-zen="tabs"><span>Open tabs<span data-zen-count="tabs"></span></span><span class="switch" aria-hidden="true"></span></button>
+          <button class="toggle" data-zen="passwords"><span>Passwords<span data-zen-count="passwords"></span></span><span class="switch" aria-hidden="true"></span></button>
+          <button class="toggle" data-zen="bookmarks"><span>Bookmarks<span data-zen-count="bookmarks"></span></span><span class="switch" aria-hidden="true"></span></button>
+          <button class="toggle" data-zen="history"><span>History<span data-zen-count="history"></span></span><span class="switch" aria-hidden="true"></span></button>
+          <div class="row"><button class="primary" id="zen-import">Import</button></div>
+        </div>
+        <p class="status" id="zen-status" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <section class="pane" data-pane="shortcuts">
+      <h1>Keyboard shortcuts</h1>
+      <div class="group" data-words="keyboard shortcuts keys ctrl hotkeys">
+        <table class="shortcuts" id="shortcuts"></table>
+      </div>
+    </section>
+
+    <section class="pane" data-pane="about">
+      <h1>About Stillwater</h1>
+      <div class="group about" data-words="about version update check stillwater servo license">
+        <img src="resource:///stillwater-icon.png" alt="" draggable="false">
+        <div>
+          <p class="version" id="version">Stillwater</p>
+          <p class="hint">A calm, lightweight browser built on <a href="https://servo.org">Servo</a>, written in Rust.</p>
+          <div class="row">
+            <button class="secondary" id="check-updates">Check for updates</button>
+            <span class="status" id="update-status" aria-live="polite"></span>
+          </div>
+          <p class="hint links"><a href="https://github.com/WhoaThatCombo/stillwater">Source code</a><a href="servo:license">Licenses</a></p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="servo:settings/settings.js"></script>
+</body>
+</html>

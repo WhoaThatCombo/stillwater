@@ -176,7 +176,8 @@
   function openPanel() {
     confirmOpen = null;
     // Shown instead of settings (Ctrl+J can open it from anywhere).
-    $("settings").hidden = true;
+    const settings = $("settings");
+    if (settings) settings.hidden = true;
     panel.hidden = false;
     send("dl-refresh");
     render();

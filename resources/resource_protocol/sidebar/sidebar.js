@@ -102,9 +102,34 @@ function openMenu(items, x, y) {
       line.className = "menu-separator";
       return line;
     }
+    if (item.header) {
+      const header = document.createElement("div");
+      header.className = "menu-header";
+      const logo = document.createElement("img");
+      logo.src = "resource:///stillwater-icon.png";
+      logo.alt = "";
+      const name = document.createElement("span");
+      name.textContent = item.header;
+      header.append(logo, name);
+      return header;
+    }
     const button = document.createElement("button");
     button.className = "menu-item";
-    button.textContent = item.label;
+    if (item.glyph || item.shortcut) {
+      button.classList.add("rich");
+      const glyph = document.createElement("span");
+      glyph.className = "menu-glyph";
+      glyph.textContent = item.glyph || "";
+      const label = document.createElement("span");
+      label.className = "menu-label";
+      label.textContent = item.label;
+      const shortcut = document.createElement("span");
+      shortcut.className = "menu-shortcut";
+      shortcut.textContent = item.shortcut || "";
+      button.append(glyph, label, shortcut);
+    } else {
+      button.textContent = item.label;
+    }
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       closeMenu();
@@ -394,41 +419,35 @@ function shieldMenu() {
       ? { label: "Turn off for this site", run: () => send("adblock-site") }
       : { label: "Turn back on for this site", run: () => send("adblock-site") },
     "-",
-    { label: "Ad blocking settings", run: () => send("open-settings") },
+    { label: "Ad blocking settings", run: () => send("open-settings", "privacy") },
   ];
 }
 
-function renderSettings() {
-  const settings = state.settings;
-  if (!settings) return;
-  document.querySelectorAll("#theme-choice button").forEach((button) => {
-    button.setAttribute("aria-pressed", String(button.dataset.theme === settings.theme));
-  });
-  $("search-choice").replaceChildren(...settings.searchEngines.map((engine) => {
-    const button = document.createElement("button");
-    button.className = "option";
-    button.textContent = engine.name;
-    button.setAttribute("aria-pressed", String(engine.id === settings.searchEngine));
-    button.addEventListener("click", () => send("set-search", engine.id));
-    return button;
-  }));
-  $("compact-toggle").setAttribute("aria-pressed", String(state.compact));
-  $("unload-choice").replaceChildren(...(settings.tabUnloadChoices || []).map((minutes) => {
-    const button = document.createElement("button");
-    button.textContent = minutes === 0 ? "Off" : minutes < 60 ? `${minutes}m` : `${minutes / 60}h`;
-    button.title = minutes === 0 ? "Never unload tabs on a timer" : `After ${minutes} minutes`;
-    button.setAttribute("aria-pressed", String(minutes === settings.tabUnloadMinutes));
-    button.addEventListener("click", () => send("set-tab-unload", minutes));
-    return button;
-  }));
-  $("lowmem-toggle").setAttribute("aria-pressed", String(!!settings.unloadOnLowMemory));
-  const adblock = state.adblock || {};
-  $("adblock-toggle").setAttribute("aria-pressed", String(!!adblock.enabled));
-  $("adblock-hint").textContent = adblock.enabled && !adblock.ready
-    ? "Downloading filter lists…"
-    : "Uses uBlock Origin's filter lists. Turn it off for one site with the shield in the address bar.";
-  $("version-line").textContent = `Stillwater ${settings.version}`;
-  $("update-check").textContent = state.updateCheck || "";
+// The app menu (the ≡ button), like Zen's: everything Stillwater can open, with shortcuts.
+function appMenu() {
+  const version = (state.settings && state.settings.version) || "";
+  const page = /^https?:/.test(state.url || "");
+  return [
+    { header: `Stillwater ${version}` },
+    { label: "New tab", glyph: "\uE710", shortcut: "Ctrl+T", run: () => send("new-tab") },
+    { label: "Reopen closed tab", glyph: "\uE7A7", run: () => send("session-reopen") },
+    "-",
+    { label: "History", glyph: "\uE81C", shortcut: "Ctrl+H", run: () => send("hist-show", "history") },
+    { label: "Bookmarks", glyph: "\uE728", run: () => send("hist-show", "bookmarks") },
+    { label: "Downloads", glyph: "\uE896", shortcut: "Ctrl+J", run: () => send("dl-panel") },
+    { label: "Passwords", glyph: "\uE8D7", run: openPasswords },
+    "-",
+    ...(page ? [
+      { label: "Bookmark this page", glyph: "\uE734", shortcut: "Ctrl+D", run: () => send("bm-star") },
+      { label: "Compare with Edge", glyph: "\uE8F9", run: () => send("compare") },
+      { label: "Report a broken site", glyph: "\uEBE8", run: () => send("report-site", "") },
+      "-",
+    ] : []),
+    { label: "Settings", glyph: "\uE713", shortcut: "Ctrl+,", run: () => send("open-settings") },
+    { label: "Check for updates", glyph: "\uE895", run: () => send("check-updates") },
+    "-",
+    { label: "Quit Stillwater", glyph: "\uE7E8", shortcut: "Ctrl+Q", run: () => send("win-close") },
+  ];
 }
 
 // ---- Saved passwords ----
@@ -590,53 +609,6 @@ function closePasswords() {
   shownPassword = null;
 }
 
-// ---- Import from Zen ----
-
-const zenChoice = { profile: 0, pins: true, tabs: false, passwords: true, bookmarks: true, history: false };
-const zenKinds = ["pins", "tabs", "passwords", "bookmarks", "history"];
-let zenBusy = false;
-
-function renderZen() {
-  const zen = state.zen;
-  const status = $("zen-status");
-  const found = $("zen-found");
-  if (!zen) {
-    found.hidden = true;
-    status.textContent = zenBusy ? "Looking for Zen…" : "Copies your spaces, pinned tabs, Essentials, passwords, bookmarks and history from Zen Browser on this computer. Zen isn't changed.";
-    return;
-  }
-  zenBusy = false;
-  const profiles = zen.profiles || [];
-  if (profiles.length === 0) {
-    found.hidden = true;
-    status.textContent = "Zen Browser's data wasn't found on this computer.";
-    return;
-  }
-  found.hidden = false;
-  zenChoice.profile = zen.profile || 0;
-  $("zen-profiles").hidden = profiles.length < 2;
-  $("zen-profiles").replaceChildren(...profiles.map((name, index) => {
-    const button = document.createElement("button");
-    button.className = "option";
-    button.textContent = name;
-    button.setAttribute("aria-pressed", String(index === zenChoice.profile));
-    button.addEventListener("click", () => send("zen-scan", index));
-    return button;
-  }));
-  const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
-  $("zen-pins-count").textContent = zen.sessionProblem ||
-    `${count(zen.spaces, "space", "spaces")}, ${count(zen.pins, "pinned tab", "pinned tabs")}, ${count(zen.essentials, "Essential", "Essentials")}`;
-  $("zen-tabs-count").textContent = zen.sessionProblem ? "" : `${count(zen.tabs, "tab", "tabs")}, added unloaded`;
-  $("zen-passwords-count").textContent = zen.passwordProblem || count(zen.passwords, "password", "passwords");
-  $("zen-bookmarks-count").textContent = zen.placesProblem || count(zen.bookmarks || 0, "bookmark", "bookmarks");
-  $("zen-history-count").textContent = zen.placesProblem || `${count(zen.visits || 0, "visit", "visits")} in the last 90 days`;
-  for (const what of zenKinds) {
-    $(`zen-${what}`).setAttribute("aria-pressed", String(zenChoice[what]));
-  }
-  $("zen-import").disabled = !zenKinds.some((what) => zenChoice[what]);
-  status.textContent = zen.result || "";
-}
-
 // Compare with Edge: show progress; a finished message goes away after a few seconds.
 let compareHideTimer = 0;
 let lastCompareMessage = "";
@@ -655,14 +627,10 @@ function renderCompare() {
 }
 
 function render() {
-  renderSettings();
   renderCompare();
   renderPasswordOffer();
   renderKey();
-  renderZen();
   if (!passwordsPanel.hidden) renderPasswordList();
-  $("autofill-toggle").setAttribute("aria-pressed", String(!!passwords().autofill));
-  $("open-passwords").textContent = `Saved passwords (${(passwords().list || []).length})`;
   renderShield();
   renderUpdate();
   if (state.workspaces) renderWorkspaces();
@@ -689,8 +657,9 @@ window.sidebar = {
     state = newState;
     render();
   },
+  // Settings are a page in a tab now.
   openSettings() {
-    document.getElementById("settings").hidden = false;
+    send("open-settings");
   },
   // A saved password the user asked to see (sent only on request, never in the state).
   revealPassword(id, password) {
@@ -734,28 +703,17 @@ $("ws-new-folder").addEventListener("click", () => send("folder-new", 0));
 // Frameless window: caption buttons, and dragging/double-clicking empty sidebar space.
 update.addEventListener("click", () => send("update"));
 
-// Settings panel (the gear in the bottom row).
-const settingsPanel = $("settings");
-$("settings-button").addEventListener("click", () => { settingsPanel.hidden = false; });
-$("main-menu").addEventListener("click", () => { settingsPanel.hidden = false; });
-$("settings-close").addEventListener("click", () => { settingsPanel.hidden = true; });
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !settingsPanel.hidden) settingsPanel.hidden = true;
+// The app menu (≡), under its button.
+$("main-menu").addEventListener("click", (event) => {
+  event.stopPropagation();
+  const box = $("main-menu").getBoundingClientRect();
+  openMenu(appMenu(), box.left, box.bottom + 4);
 });
-document.querySelectorAll("#theme-choice button").forEach((button) => {
-  button.addEventListener("click", () => send("set-theme", button.dataset.theme));
-});
-$("compact-toggle").addEventListener("click", () => send("toggle-compact"));
-$("lowmem-toggle").addEventListener("click", () => send("set-unload-low-memory", state.settings && state.settings.unloadOnLowMemory ? "0" : "1"));
-$("adblock-toggle").addEventListener("click", () => send("adblock-enabled", (state.adblock && state.adblock.enabled) ? "0" : "1"));
 $("shield").addEventListener("click", (event) => {
   event.stopPropagation();
   const box = $("shield").getBoundingClientRect();
   openMenu(shieldMenu(), box.left, box.bottom);
 });
-$("check-updates").addEventListener("click", () => send("check-updates"));
-$("report-site").addEventListener("click", () => send("report-site", ""));
-
 const isDragSurface = (target) =>
   target.matches("[data-drag], body, #tab-area, #tabs, #pinned, #essentials, #footer, #workspaces, #workspace-header, .spacer");
 let lastDragDown = 0;
@@ -832,8 +790,6 @@ $("key").addEventListener("click", (event) => {
   const box = $("key").getBoundingClientRect();
   openMenu(keyMenu(), box.left, box.bottom);
 });
-$("autofill-toggle").addEventListener("click", () => send("pw-autofill", passwords().autofill ? "0" : "1"));
-$("open-passwords").addEventListener("click", openPasswords);
 $("passwords-close").addEventListener("click", closePasswords);
 passwordSearch.addEventListener("input", () => {
   passwordSearch.parentElement.classList.toggle("has-value", passwordSearch.value.length > 0);
@@ -841,26 +797,6 @@ passwordSearch.addEventListener("input", () => {
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !passwordsPanel.hidden) closePasswords();
-});
-
-// Import from Zen
-$("zen-scan").addEventListener("click", () => {
-  zenBusy = true;
-  state.zen = null;
-  renderZen();
-  send("zen-scan", zenChoice.profile);
-});
-for (const what of zenKinds) {
-  $(`zen-${what}`).addEventListener("click", () => {
-    zenChoice[what] = !zenChoice[what];
-    renderZen();
-  });
-}
-$("zen-import").addEventListener("click", () => {
-  const what = zenKinds.filter((name) => zenChoice[name]);
-  if (what.length === 0) return;
-  $("zen-status").textContent = "Importing…";
-  send("zen-import", `${zenChoice.profile}\t${what.join(",")}`);
 });
 
 send("ready");

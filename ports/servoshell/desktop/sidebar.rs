@@ -49,6 +49,23 @@ pub(crate) const CONTENT_RADIUS: f32 = 8.0;
 const PEEK_EDGE: f32 = 10.0;
 
 const MESSAGE_PREFIX: &str = "__sidebar__";
+
+/// The settings page, opened in a tab (`servo:settings`, with `#<category>`).
+pub(crate) const SETTINGS_URL: &str = "servo:settings";
+/// Console messages from the settings page start with this.
+pub(crate) const SETTINGS_MESSAGE_PREFIX: &str = "__stillwater_settings__";
+/// The commands the settings page may send: settings only, nothing that acts on other tabs.
+const SETTINGS_COMMANDS: &[&str] = &[
+    "ready", "set-theme", "set-search", "set-tab-unload", "set-unload-low-memory", "set-newtab",
+    "toggle-compact", "session-startup", "adblock-enabled", "pw-autofill", "pw-delete", "pw-reveal",
+    "pw-copy", "pw-copy-user", "pw-forget-never", "zen-scan", "zen-import", "check-updates",
+    "hist-clear", "hist-show", "dl-ask", "dl-panel",
+];
+
+/// Whether `url` is the settings page (whatever category it shows).
+pub(crate) fn is_settings_url(url: &Url) -> bool {
+    url.scheme() == "servo" && url.path() == "settings"
+}
 const SIDEBAR_URL: &str = "servo:sidebar/index.html";
 
 /// Window operations requested by the sidebar's own caption buttons.
@@ -174,6 +191,10 @@ pub(crate) struct Sidebar {
     zen: serde_json::Value,
     /// Compare with Edge: whether it's running and what to tell the user.
     compare: serde_json::Value,
+    /// Open settings pages and the state last sent to each.
+    settings_pages: Vec<(WebView, Option<String>)>,
+    /// The settings page that asked to see a password, if one did.
+    reveal_target: Option<WebView>,
     /// Saves the open tabs (only the first window's sidebar has one).
     session: Option<crate::desktop::session::SessionWriter>,
     /// History and bookmarks: whether the page in the URL bar is bookmarked.
@@ -222,6 +243,8 @@ impl Sidebar {
             passwords: serde_json::Value::Null,
             zen: serde_json::Value::Null,
             compare: serde_json::Value::Null,
+            settings_pages: Vec::new(),
+            reveal_target: None,
             hist: serde_json::Value::Null,
             command_bar: false,
             downloads: serde_json::Value::Null,
@@ -368,9 +391,79 @@ impl Sidebar {
     }
 
     /// Show a saved password the user asked to see. It's sent once, not kept in the state.
-    pub(crate) fn reveal_password(&self, id: u64, password: &str) {
+    pub(crate) fn reveal_password(&mut self, id: u64, password: &str) {
         let password = serde_json::to_string(password).unwrap_or_default();
-        self.call(&format!("revealPassword({id}, {password})"));
+        // Back to the settings page that asked, if it still shows the settings page.
+        match self.reveal_target.take() {
+            Some(page) if page.url().is_some_and(|url| is_settings_url(&url)) => {
+                page.evaluate_javascript(
+                    format!("window.stillwaterSettings && window.stillwaterSettings.revealPassword({id}, {password})"),
+                    |_| {},
+                );
+            },
+            _ => self.call(&format!("revealPassword({id}, {password})")),
+        }
+    }
+
+    /// A message from a settings page (`SETTINGS_MESSAGE_PREFIX` removed). The caller has checked
+    /// that `page` shows `servo:settings`; only settings commands are accepted.
+    pub(crate) fn post_from_settings(&mut self, page: &WebView, message: &str) {
+        let command = message.split_once('\t').map_or(message, |(command, _)| command);
+        if !SETTINGS_COMMANDS.contains(&command) {
+            warn!("ignored settings page message: {command}");
+            return;
+        }
+        match command {
+            // A (re)loaded page: send it the whole state.
+            "ready" => {
+                self.settings_pages.retain(|(other, _)| other.id() != page.id());
+                self.settings_pages.push((page.clone(), None));
+            },
+            "pw-reveal" => {
+                self.reveal_target = Some(page.clone());
+                self.post(message);
+            },
+            _ => self.post(message),
+        }
+        self.waker.wake_by_ref();
+    }
+
+    /// Run `script` (a call on `window.stillwaterSettings`) in every open settings page.
+    pub(crate) fn call_settings(&self, script: &str) {
+        for (page, _) in &self.settings_pages {
+            if page.url().is_some_and(|url| is_settings_url(&url)) {
+                page.evaluate_javascript(
+                    format!("window.stillwaterSettings && window.stillwaterSettings.{script}"),
+                    |_| {},
+                );
+            }
+        }
+    }
+
+    /// Show the settings page (`section` = a category), in its tab if one is open.
+    fn open_settings(&mut self, window: &ServoShellWindow, section: &str) {
+        let section: String = section.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+        let target = if section.is_empty() {
+            SETTINGS_URL.to_owned()
+        } else {
+            format!("{SETTINGS_URL}#{section}")
+        };
+        let Ok(url) = Url::parse(&target) else {
+            return;
+        };
+        let open = window
+            .webviews()
+            .into_iter()
+            .find(|(_, webview)| webview.url().is_some_and(|url| is_settings_url(&url)));
+        match open {
+            Some((id, webview)) => {
+                window.activate_webview(id);
+                if !section.is_empty() {
+                    webview.load(url);
+                }
+            },
+            None => window.queue_user_interface_command(UserInterfaceCommand::NewWebViewWithUrl(url)),
+        }
     }
 
     /// Add Zen's spaces and tabs to the sidebar.
@@ -857,13 +950,8 @@ impl Sidebar {
                 "win-close" => self.window_actions.push(WindowAction::Close),
                 "win-drag" => self.window_actions.push(WindowAction::Drag),
                 "update" => self.window_actions.push(WindowAction::Update),
-                "open-settings" => {
-                    if self.compact.get() {
-                        self.peek.set(true);
-                    }
-                    self.call("openSettings()");
-                    layout_changed = true;
-                },
+                // The settings page, in a tab: `[<category>]`.
+                "open-settings" => self.open_settings(window, argument),
                 "report-site" => {
                     let tab = self.webview_for_tab(window, argument);
                     self.window_actions.push(WindowAction::ReportSite(tab));
@@ -1046,6 +1134,19 @@ impl Sidebar {
         })
         .to_string();
 
+        // Settings pages get the same state (it has no passwords, only the list of logins).
+        self.settings_pages.retain(|(page, _)| {
+            webviews.iter().any(|(id, _)| *id == page.id()) && page.url().is_some_and(|url| is_settings_url(&url))
+        });
+        for (page, last) in &mut self.settings_pages {
+            if last.as_ref() != Some(&state) {
+                page.evaluate_javascript(
+                    format!("window.stillwaterSettings && window.stillwaterSettings.setState({state})"),
+                    |_| {},
+                );
+                *last = Some(state.clone());
+            }
+        }
         if self.last_pushed_state.as_ref() != Some(&state) {
             self.call(&format!("setState({state})"));
             self.last_pushed_state = Some(state);

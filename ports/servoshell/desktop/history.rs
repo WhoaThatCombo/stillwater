@@ -853,9 +853,11 @@ pub(crate) fn on_command(
         },
         // The URL bar got focus: load the suggestion index now rather than on the first key.
         "hist-warm" => history.warm(),
+        // Optional argument: "history" (the default) or "bookmarks".
         "hist-show" => {
             sidebar.set_focused(true, window);
-            sidebar.call("openHistory()");
+            let view = if argument == "bookmarks" { "bookmarks" } else { "history" };
+            sidebar.call(&format!("openHistory({})", json!(view)));
         },
         // `<before (ms), 0 for the newest>\t<search text>`
         "hist-list" => {
@@ -886,6 +888,7 @@ pub(crate) fn on_command(
                 (true, false) => "History cleared.",
             };
             sidebar.call(&format!("histCleared({})", json!(message)));
+            sidebar.call_settings(&format!("histCleared({})", json!(message)));
         },
         // Bookmark the page in the URL bar (if it isn't yet) and show its editor.
         "bm-star" => {

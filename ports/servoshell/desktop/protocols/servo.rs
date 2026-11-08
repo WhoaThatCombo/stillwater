@@ -8,6 +8,7 @@
 //! - servo:experimental-preferences
 //! - servo:config
 //! - servo:newtab
+//! - servo:settings (Stillwater's settings page)
 //! - servo:preferences
 
 use std::future::Future;
@@ -46,6 +47,17 @@ impl ProtocolHandler for ServoProtocolHandler {
         match url.path() {
             // The Zen-style sidebar UI: `servo:sidebar/<file>`.
             path if path.starts_with("sidebar/") => {
+                let path = format!("/{path}");
+                ResourceProtocolHandler::response_for_path(request, done_chan, context, &path)
+            },
+            // Stillwater's settings page: `servo:settings` and its files `servo:settings/<file>`.
+            "settings" => ResourceProtocolHandler::response_for_path(
+                request,
+                done_chan,
+                context,
+                "/settings/index.html",
+            ),
+            path if path.starts_with("settings/") => {
                 let path = format!("/{path}");
                 ResourceProtocolHandler::response_for_path(request, done_chan, context, &path)
             },

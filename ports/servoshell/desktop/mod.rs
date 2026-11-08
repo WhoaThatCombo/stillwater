@@ -31,7 +31,7 @@ mod protocols;
 mod report;
 pub(crate) mod session;
 mod settings;
-mod sidebar;
+pub(crate) mod sidebar;
 mod single_instance;
 mod tracing;
 mod updater;

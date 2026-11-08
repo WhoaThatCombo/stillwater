@@ -1102,3 +1102,41 @@ button.secondary.armed {
 .compare-status.error {
   color: rgb(230, 110, 100);
 }
+
+/* ---- App menu (≡): a header, icons and shortcut hints ---- */
+.menu-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 8px;
+  font-weight: 600;
+}
+
+.menu-header img {
+  width: 18px;
+  height: 18px;
+}
+
+.menu-item.rich {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.menu-glyph {
+  width: 16px;
+  flex: none;
+  font-family: 'Segoe Fluent Icons', 'Segoe MDL2 Assets';
+  font-size: 13px;
+  opacity: 0.8;
+}
+
+.menu-label {
+  flex: 1;
+}
+
+.menu-shortcut {
+  margin-left: 16px;
+  font-size: 11.5px;
+  opacity: 0.55;
+}

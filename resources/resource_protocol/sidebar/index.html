@@ -16,7 +16,7 @@
   <!-- Zen's top row: menu and sidebar toggle on the left, navigation on the right.
        The window buttons live in the hover-reveal top bar over the page. -->
   <header id="toolbar" data-drag>
-    <button id="main-menu" class="icon" title="Menu and settings (Ctrl+,)">&#xE712;</button>
+    <button id="main-menu" class="icon" title="Menu">&#xE700;</button>
     <button id="compact" class="icon" title="Toggle compact mode (Ctrl+Alt+C)">&#xE89F;</button>
     <span class="spacer" data-drag></span>
     <button id="back" class="icon" title="Back">&#xE72B;</button>
@@ -93,139 +93,10 @@
   </section>
 
   <footer id="footer">
-    <button id="settings-button" class="icon footer-button" title="Settings">&#xE713;</button>
     <button id="dl-button" class="footer-button" title="Downloads"><span class="dl-ring" aria-hidden="true"></span><span class="icon dl-glyph">&#xE896;</span><span id="dl-count" class="dl-count" hidden></span></button>
     <div id="workspaces"></div>
   </footer>
 
-  <section id="settings" hidden aria-label="Settings">
-    <header class="settings-header">
-      <button id="settings-close" class="icon" title="Back">&#xE72B;</button>
-      <h2>Settings</h2>
-    </header>
-
-    <div class="setting-group">
-      <h3>Appearance</h3>
-      <div class="segmented" id="theme-choice" role="group" aria-label="Appearance">
-        <button data-theme="system">System</button>
-        <button data-theme="light">Light</button>
-        <button data-theme="dark">Dark</button>
-      </div>
-    </div>
-
-    <div class="setting-group">
-      <h3>Search engine</h3>
-      <div class="options" id="search-choice" role="group" aria-label="Search engine"></div>
-    </div>
-
-    <div class="setting-group">
-      <h3>Sidebar</h3>
-      <button class="toggle-row" id="compact-toggle">
-        <span>Compact mode</span>
-        <span class="switch" aria-hidden="true"></span>
-      </button>
-      <p class="hint">Ctrl+Alt+C also toggles it. Touch the window's left edge to show the sidebar.</p>
-    </div>
-
-    <div class="setting-group">
-      <h3>On startup</h3>
-      <div class="options" id="session-startup" role="group" aria-label="On startup">
-        <button class="option" data-startup="restore">Restore previous tabs</button>
-        <button class="option" data-startup="newtab">Open a new tab</button>
-      </div>
-      <p class="hint">Restored tabs load when you click them. Ctrl+Shift+T reopens a closed tab.</p>
-    </div>
-
-    <div class="setting-group">
-      <h3>New tab opens</h3>
-      <div class="segmented" id="newtab-choice" role="group" aria-label="New tab opens">
-        <button data-bar="1">Address bar</button>
-        <button data-bar="0">New Tab page</button>
-      </div>
-      <p class="hint">With the address bar, Ctrl+T and New Tab show a floating address bar over the page, like Zen. A tab is only created when you pick something.</p>
-    </div>
-
-    <div class="setting-group">
-      <h3>Unload inactive tabs</h3>
-      <div class="segmented" id="unload-choice" role="group" aria-label="Unload inactive tabs after"></div>
-      <button class="toggle-row" id="lowmem-toggle">
-        <span>Also when memory is low</span>
-        <span class="switch" aria-hidden="true"></span>
-      </button>
-      <p class="hint">Frees the memory of tabs you haven't used for a while. They stay in the sidebar and reload when clicked. Tabs playing audio or video are kept.</p>
-    </div>
-
-    <div class="setting-group">
-      <h3>Ad blocking</h3>
-      <button class="toggle-row" id="adblock-toggle">
-        <span>Block ads and trackers</span>
-        <span class="switch" aria-hidden="true"></span>
-      </button>
-      <p class="hint" id="adblock-hint">Uses uBlock Origin's filter lists. Turn it off for one site with the shield in the address bar.</p>
-    </div>
-
-    <div class="setting-group">
-      <h3>Passwords</h3>
-      <button class="toggle-row" id="autofill-toggle">
-        <span>Fill saved passwords</span>
-        <span class="switch" aria-hidden="true"></span>
-      </button>
-      <button id="open-passwords" class="secondary">Saved passwords</button>
-      <p class="hint" id="passwords-hint">Stillwater offers to save a password when you sign in. Passwords are encrypted with your Windows account.</p>
-    </div>
-
-    <div class="setting-group">
-      <h3>History and bookmarks</h3>
-      <div class="hist-buttons">
-        <button id="open-history" class="secondary">History</button>
-        <button id="open-bookmarks" class="secondary">Bookmarks</button>
-      </div>
-      <p class="hint">Ctrl+H shows your history and Ctrl+D bookmarks the current page. Visits are kept on this computer for 90 days.</p>
-    </div>
-
-    <div class="setting-group" id="zen-group">
-      <h3>Import from Zen</h3>
-      <button id="zen-scan" class="secondary">Find Zen's data</button>
-      <div id="zen-found" hidden>
-        <div class="options" id="zen-profiles" role="group" aria-label="Zen profile"></div>
-        <button class="toggle-row tall" id="zen-pins" aria-pressed="true">
-          <span><span>Spaces and pinned tabs</span><span class="row-detail" id="zen-pins-count"></span></span>
-          <span class="switch" aria-hidden="true"></span>
-        </button>
-        <button class="toggle-row tall" id="zen-tabs" aria-pressed="false">
-          <span><span>Open tabs</span><span class="row-detail" id="zen-tabs-count"></span></span>
-          <span class="switch" aria-hidden="true"></span>
-        </button>
-        <button class="toggle-row tall" id="zen-passwords" aria-pressed="true">
-          <span><span>Passwords</span><span class="row-detail" id="zen-passwords-count"></span></span>
-          <span class="switch" aria-hidden="true"></span>
-        </button>
-        <button class="toggle-row tall" id="zen-bookmarks" aria-pressed="true">
-          <span><span>Bookmarks</span><span class="row-detail" id="zen-bookmarks-count"></span></span>
-          <span class="switch" aria-hidden="true"></span>
-        </button>
-        <button class="toggle-row tall" id="zen-history" aria-pressed="false">
-          <span><span>History</span><span class="row-detail" id="zen-history-count"></span></span>
-          <span class="switch" aria-hidden="true"></span>
-        </button>
-        <button id="zen-import" class="primary">Import</button>
-      </div>
-      <p id="zen-status" class="hint"></p>
-    </div>
-
-    <div class="setting-group">
-      <h3>Help</h3>
-      <button id="report-site" class="secondary">Report a broken site</button>
-      <p class="hint">Opens a pre-filled GitHub issue for the current page in another browser. You can review it before sending.</p>
-    </div>
-
-    <div class="setting-group">
-      <h3>Updates</h3>
-      <p id="version-line"></p>
-      <button id="check-updates" class="secondary">Check for updates</button>
-      <p id="update-check" class="hint"></p>
-    </div>
-  </section>
 
   <section id="passwords" class="panel" hidden aria-label="Saved passwords">
     <header class="settings-header">
