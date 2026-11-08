@@ -1,0 +1,61 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/* Drag and drop in the sidebar (session.js). */
+
+#session-drop-line {
+  position: fixed;
+  z-index: 20;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--ws-accent, var(--toolbox-textcolor));
+  pointer-events: none;
+}
+
+#session-drop-line[hidden] {
+  display: none;
+}
+
+.session-ghost {
+  position: fixed;
+  z-index: 21;
+  max-width: 180px;
+  padding: 6px 10px;
+  border-radius: var(--border-radius-medium);
+  background: var(--zen-urlbar-background-focus);
+  box-shadow: var(--zen-big-shadow);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+body.session-drag,
+body.session-drag * {
+  cursor: grabbing;
+}
+
+/* The row being dragged stays in place, dimmed. */
+.session-dragging {
+  opacity: 0.4;
+}
+
+/* A folder, Essentials or space the tab would go into. */
+.session-drop-into {
+  box-shadow: inset 0 0 0 2px var(--ws-accent, var(--toolbox-textcolor));
+  background: var(--toolbarbutton-background-color-hover);
+}
+
+/* Where to drop a tab to pin it, while this space has no pinned tabs. */
+.session-pin-dropzone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  border: 1px dashed currentColor;
+  border-radius: var(--border-radius-medium);
+  font-size: 12px;
+  opacity: 0.55;
+  flex-shrink: 0;
+}

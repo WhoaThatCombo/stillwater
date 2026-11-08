@@ -7,6 +7,7 @@
   <meta charset="utf-8">
   <title>Sidebar</title>
   <link rel="stylesheet" href="servo:sidebar/zen-sidebar.css">
+  <link rel="stylesheet" href="servo:sidebar/session.css">
 </head>
 <body>
   <!-- Zen's top row: menu and sidebar toggle on the left, navigation on the right.
@@ -108,6 +109,15 @@
     </div>
 
     <div class="setting-group">
+      <h3>On startup</h3>
+      <div class="options" id="session-startup" role="group" aria-label="On startup">
+        <button class="option" data-startup="restore">Restore previous tabs</button>
+        <button class="option" data-startup="newtab">Open a new tab</button>
+      </div>
+      <p class="hint">Restored tabs load when you click them. Ctrl+Shift+T reopens a closed tab.</p>
+    </div>
+
+    <div class="setting-group">
       <h3>Unload inactive tabs</h3>
       <div class="segmented" id="unload-choice" role="group" aria-label="Unload inactive tabs after"></div>
       <button class="toggle-row" id="lowmem-toggle">
@@ -194,5 +204,6 @@
   </section>
 
   <script src="servo:sidebar/sidebar.js"></script>
+  <script src="servo:sidebar/session.js"></script>
 </body>
 </html>

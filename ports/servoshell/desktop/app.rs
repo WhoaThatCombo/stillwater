@@ -69,12 +69,20 @@ impl App {
         servo_shell_preferences: ServoShellPreferences,
         event_loop: &ServoShellEventLoop,
     ) -> Self {
-        let initial_url = get_default_url(
+        // Unless a page was asked for, the first tab is the previous session's active tab.
+        let restored_url = crate::desktop::session::init(
             servo_shell_preferences.url.as_deref(),
-            env::current_dir().unwrap(),
-            |path| fs::metadata(path).is_ok(),
-            &servo_shell_preferences,
+            servo_shell_preferences.headless,
+            servo_shell_preferences.webdriver_port.get().is_some(),
         );
+        let initial_url = restored_url.map(ServoUrl::from_url).unwrap_or_else(|| {
+            get_default_url(
+                servo_shell_preferences.url.as_deref(),
+                env::current_dir().unwrap(),
+                |path| fs::metadata(path).is_ok(),
+                &servo_shell_preferences,
+            )
+        });
 
         let t = Instant::now();
         App {

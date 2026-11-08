@@ -17,6 +17,9 @@ use servo::{Theme, WebViewId};
 use crate::running_app_state::UserInterfaceCommand;
 use crate::window::ServoShellWindow;
 
+/// Session restore, reopening closed tabs, drag and drop.
+mod session;
+
 /// Segoe Fluent Icons glyphs offered as workspace icons.
 const ICONS: &[&str] = &[
     "\u{E80F}", // Home
@@ -174,6 +177,10 @@ pub(crate) struct Workspaces {
     /// Tabs that were loaded again since the sidebar last asked: (new WebView, sidebar key,
     /// favicon), so the sidebar keeps showing the same row.
     restored: Vec<(WebViewId, u32, Option<String>)>,
+    /// Recently closed ordinary tabs, newest last (Ctrl+Shift+T).
+    closed: Vec<UnloadedTab>,
+    /// For each space not visited since launch: the restored tab that was active in it.
+    session_active: HashMap<u32, u32>,
 }
 
 impl Workspaces {
@@ -230,6 +237,8 @@ impl Workspaces {
             unloaded: Vec::new(),
             pending_restore: None,
             restored: Vec::new(),
+            closed: Vec::new(),
+            session_active: Default::default(),
         }
     }
 
@@ -444,8 +453,12 @@ impl Workspaces {
             .or(tabs.last().copied());
         match target {
             Some(id) => window.activate_webview(id),
-            // Only unloaded tabs left: load the last one rather than opening a new tab.
-            None => match self.entries_in(window, workspace).last().copied() {
+            // Only unloaded tabs left: load the one that was active last session, or the
+            // last one, rather than opening a new tab.
+            None => match self
+                .take_session_active(workspace)
+                .or_else(|| self.entries_in(window, workspace).last().copied())
+            {
                 Some(entry) => self.activate_entry(window, entry),
                 None => self.open_tab(window),
             },

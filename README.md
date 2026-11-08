@@ -52,6 +52,12 @@ first install.
   and a reset button takes it back to its pinned page.
 - **Tab menu**: right-click a tab (or use its `…` button) to pin it, add it to Essentials, move it to a folder or
   another space, rename it or close it.
+- **Session restore**: your tabs in every space come back when you start Stillwater again, even after a crash.
+  Only the tab you were on loads; the others load when you click them. Settings → **On startup** can open a
+  new tab instead. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> (or **Reopen closed tab** in the tab menu) brings
+  back the last closed tab, up to 25.
+- **Drag and drop**: drag tabs to reorder them, onto the pinned section or a folder to pin them, onto Essentials,
+  back into the tab list to unpin them, or onto a space's button to move them there.
 - **URL bar in the sidebar**: type an address or a search and press Enter. <kbd>Ctrl</kbd>+<kbd>L</kbd> focuses it.
 - **Workspaces (spaces)**: each tab belongs to one space. Each space has its own name, icon and accent
   colour, and the colour tints the whole window. Space definitions are saved between launches.
@@ -83,6 +89,7 @@ first install.
 | <kbd>Ctrl</kbd>+<kbd>L</kbd> / <kbd>Alt</kbd>+<kbd>D</kbd> | Focus the URL bar |
 | <kbd>Ctrl</kbd>+<kbd>T</kbd> | New tab in the current space |
 | <kbd>Ctrl</kbd>+<kbd>W</kbd> | Close tab (stays in the current space) |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> | Reopen the last closed tab |
 | <kbd>Ctrl</kbd>+<kbd>1</kbd>–<kbd>8</kbd>, <kbd>Ctrl</kbd>+<kbd>9</kbd> | Go to tab *n* / the last tab in this space |
 | <kbd>Ctrl</kbd>+<kbd>PgUp</kbd> / <kbd>PgDn</kbd> | Previous / next tab in this space |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>9</kbd> | Switch to space *n* |
@@ -150,8 +157,8 @@ cd stillwater
 ## Roadmap
 
 - [x] Split view (two pages side by side)
-- [ ] Session restore
-- [ ] Drag tabs between spaces, pinned tabs, folders
+- [x] Session restore
+- [x] Drag tabs between spaces, pinned tabs, folders
 - [ ] Command palette
 - [x] Prebuilt Windows downloads
 - [x] Installer, default-browser registration and auto-updates

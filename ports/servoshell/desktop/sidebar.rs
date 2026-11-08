@@ -35,6 +35,9 @@ use crate::desktop::zen_import::ZenSession;
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
 use crate::window::ServoShellWindow;
 
+/// Session restore, reopening closed tabs, drag and drop.
+mod session;
+
 /// Width of the expanded sidebar, in device-independent pixels.
 pub(crate) const SIDEBAR_WIDTH: f32 = 240.0;
 /// Gap between the window edge / sidebar and the rounded web content card.
@@ -154,6 +157,8 @@ pub(crate) struct Sidebar {
     passwords: serde_json::Value,
     /// Import from Zen: profiles found, what they hold, the last result.
     zen: serde_json::Value,
+    /// Saves the open tabs (only the first window's sidebar has one).
+    session: Option<crate::desktop::session::SessionWriter>,
 }
 
 impl Sidebar {
@@ -162,6 +167,7 @@ impl Sidebar {
         waker: RepaintEventLoopWaker,
     ) -> Self {
         let settings = Settings::load();
+        let (workspaces, next_tab_id) = session::load_workspaces();
         Self {
             rendering_context,
             webview: None,
@@ -170,7 +176,7 @@ impl Sidebar {
             waker: Waker::from(Arc::new(waker)),
             last_pushed_state: None,
             tab_ids: Default::default(),
-            next_tab_id: 1,
+            next_tab_id,
             favicons: Default::default(),
             // STILLWATER_START_COMPACT: start with the sidebar collapsed (used for testing).
             compact: Cell::new(
@@ -178,7 +184,7 @@ impl Sidebar {
             ),
             peek: Cell::new(false),
             focused: Cell::new(false),
-            workspaces: Workspaces::load(),
+            workspaces,
             theme: Theme::Light,
             window_actions: Vec::new(),
             frameless: false,
@@ -193,6 +199,7 @@ impl Sidebar {
             zen: serde_json::Value::Null,
             settings: RefCell::new(settings),
             update_check: None,
+            session: crate::desktop::session::SessionWriter::claim(),
         }
     }
 
@@ -673,8 +680,10 @@ impl Sidebar {
                 },
                 "close" => {
                     if let Some(id) = self.webview_for_tab(window, argument) {
+                        self.remember_closed(window, TabEntry::Live(id));
                         self.workspaces.close_tab(window, id);
                     } else if let Some(key) = self.unloaded_tab(argument) {
+                        self.remember_closed(window, TabEntry::Unloaded(key));
                         self.workspaces.close_unloaded(key);
                     }
                 },
@@ -685,6 +694,7 @@ impl Sidebar {
                 },
                 "close-active" => {
                     if let Some(active) = window.active_webview() {
+                        self.remember_closed(window, TabEntry::Live(active.id()));
                         self.workspaces.close_tab(window, active.id());
                     }
                 },
@@ -820,6 +830,9 @@ impl Sidebar {
                     .settings
                     .borrow_mut()
                     .set_unload_on_low_memory(argument == "1"),
+                command if command.starts_with("session-") => {
+                    self.session_command(window, command, argument)
+                },
                 _ => warn!("unknown sidebar message: {message}"),
             }
             window.set_needs_update();
@@ -891,6 +904,7 @@ impl Sidebar {
             "adblock": self.adblock,
             "passwords": self.passwords,
             "zen": self.zen,
+            "session": self.session_state(),
             "compact": self.compact.get(),
             "workspaces": self.workspaces.to_json(),
             "background": background,
@@ -915,6 +929,7 @@ impl Sidebar {
             self.call(&format!("setState({state})"));
             self.last_pushed_state = Some(state);
         }
+        self.save_session(window);
     }
 }
 

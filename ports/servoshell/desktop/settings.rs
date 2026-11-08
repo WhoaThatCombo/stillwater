@@ -92,6 +92,8 @@ pub(crate) struct Settings {
     pub(crate) tab_unload_minutes: u32,
     /// Unload the least recently used background tabs when Windows runs low on memory.
     pub(crate) unload_on_low_memory: bool,
+    /// On startup, restore the previous session's tabs (otherwise open a new tab).
+    pub(crate) restore_session: bool,
     path: Option<PathBuf>,
 }
 
@@ -120,6 +122,7 @@ impl Settings {
                 .filter(|minutes| TAB_UNLOAD_CHOICES.contains(minutes))
                 .unwrap_or(DEFAULT_TAB_UNLOAD_MINUTES),
             unload_on_low_memory: saved["unloadOnLowMemory"].as_bool().unwrap_or(true),
+            restore_session: saved["startup"].as_str() != Some("newtab"),
             path,
         };
         settings.publish_search_template();
@@ -136,6 +139,7 @@ impl Settings {
             "compact": self.compact,
             "tabUnloadMinutes": self.tab_unload_minutes,
             "unloadOnLowMemory": self.unload_on_low_memory,
+            "startup": self.startup_id(),
         });
         let result = path
             .parent()
@@ -192,6 +196,18 @@ impl Settings {
         self.save();
     }
 
+    fn startup_id(&self) -> &'static str {
+        if self.restore_session { "restore" } else { "newtab" }
+    }
+
+    /// "restore" (the previous session's tabs) or "newtab".
+    pub(crate) fn set_startup(&mut self, id: &str) {
+        if matches!(id, "restore" | "newtab") {
+            self.restore_session = id == "restore";
+            self.save();
+        }
+    }
+
     pub(crate) fn to_json(&self) -> Value {
         let engines: Vec<Value> = SEARCH_ENGINES
             .iter()
@@ -204,6 +220,7 @@ impl Settings {
             "tabUnloadMinutes": self.tab_unload_minutes,
             "tabUnloadChoices": TAB_UNLOAD_CHOICES,
             "unloadOnLowMemory": self.unload_on_low_memory,
+            "startup": self.startup_id(),
             "version": crate::desktop::updater::CURRENT_VERSION,
         })
     }

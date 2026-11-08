@@ -23,6 +23,7 @@ pub(crate) mod passwords;
 pub(crate) mod panes;
 mod protocols;
 mod report;
+pub(crate) mod session;
 mod settings;
 mod sidebar;
 mod single_instance;

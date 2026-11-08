@@ -152,6 +152,7 @@ function tabMenu(tab, label) {
     "-",
     ...(tab.loaded && !tab.active ? [{ label: "Unload (free memory)", run: () => send("tab-unload", tab.id) }] : []),
     { label: "Close tab", run: () => send("close", tab.id) },
+    ...(state.session && state.session.closed ? [{ label: "Reopen closed tab", run: () => send("session-reopen") }] : []),
   ];
 }
 
@@ -194,6 +195,13 @@ function renderRow(item, isPin) {
     (item.loading ? " loading" : "") +
     (item.loaded === false ? " unloaded" : "");
   row.title = item.url;
+  // For drag and drop (session.js).
+  if (isPin) {
+    row.dataset.pin = item.pinId;
+    row.dataset.folder = item.folder || "";
+  } else {
+    row.dataset.tab = item.id;
+  }
 
   const label = document.createElement("span");
   label.className = "tab-label";
@@ -255,6 +263,8 @@ function renderEssentials() {
     const tile = document.createElement("button");
     tile.className = "essential" + (pin.active ? " selected" : "") + (pin.loaded ? "" : " unloaded");
     tile.title = pin.title;
+    tile.dataset.pin = pin.pinId;
+    tile.dataset.essential = "1";
     const icon = tabIcon(pin);
     icon.classList.add("essential-icon");
     tile.append(icon);
@@ -274,6 +284,7 @@ function renderPinned() {
   for (const folder of pinned.folders) {
     const header = document.createElement("div");
     header.className = "tab folder" + (folder.collapsed ? " collapsed" : "");
+    header.dataset.folderId = folder.folderId;
     const icon = document.createElement("span");
     icon.className = "icon tab-icon folder-icon";
     icon.textContent = folder.collapsed ? "" : "";
@@ -327,6 +338,7 @@ function renderWorkspaces() {
     const button = document.createElement("button");
     button.className = "workspace" + (space.id === workspace.id ? " active" : "");
     button.title = `${space.name} (Ctrl+Alt+${index + 1})`;
+    button.dataset.space = space.id;
     button.textContent = space.icon;
     button.addEventListener("click", () => send("ws-switch", space.id));
     return button;
