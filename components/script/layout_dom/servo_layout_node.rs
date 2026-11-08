@@ -259,6 +259,13 @@ impl<'dom> LayoutNode<'dom> for ServoLayoutNode<'dom> {
         self.node.selection_for_text_node()
     }
 
+    fn text_node_find_highlights(&self) -> Vec<layout_api::FindHighlight> {
+        if !self.pseudo_element_chain.is_empty() {
+            return Vec::new();
+        }
+        self.node.find_highlights_for_text_node()
+    }
+
     fn text_node_paints_caret(&self) -> bool {
         self.node.text_node_paints_caret()
     }

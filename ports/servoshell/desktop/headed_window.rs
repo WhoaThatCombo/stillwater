@@ -49,6 +49,7 @@ use crate::desktop::accelerated_gl_media::setup_gl_accelerated_media;
 use crate::desktop::diagnostics;
 use crate::desktop::dialog::Dialog;
 use crate::desktop::event_loop::{AppEvent, RepaintEventLoopWaker};
+use crate::desktop::find_bar::FindCommand;
 use crate::desktop::gui::{Gui, PaneRequest};
 use crate::desktop::panes::PaneKind;
 use crate::desktop::sidebar::Sidebar;
@@ -448,6 +449,15 @@ impl HeadedWindow {
         webview.notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(point.into())));
     }
 
+    /// Open or step the find bar and move keyboard focus to it.
+    fn find(&self, window: &ServoShellWindow, command: FindCommand) {
+        let gui = self.gui.borrow();
+        gui.sidebar.set_focused(false, window);
+        gui.find_bar.handle(command);
+        window.set_needs_update();
+        self.winit_window.request_redraw();
+    }
+
     /// Handle key events before sending them to Servo.
     fn handle_intercepted_key_bindings(
         &self,
@@ -540,6 +550,14 @@ impl HeadedWindow {
             .shortcut(CMD_OR_CONTROL, 'J', || post("dl-panel"))
             .shortcut(CMD_OR_CONTROL, 'Q', || state.schedule_exit())
             .shortcut(CMD_OR_CONTROL, 'L', || self.gui.borrow().sidebar.focus_url(window))
+            // Find in page.
+            .shortcut(CMD_OR_CONTROL, 'F', || self.find(window, FindCommand::Open))
+            .shortcut(Modifiers::empty(), Key::Named(NamedKey::F3), || {
+                self.find(window, FindCommand::Step(true))
+            })
+            .shortcut(Modifiers::SHIFT, Key::Named(NamedKey::F3), || {
+                self.find(window, FindCommand::Step(false))
+            })
             .optional_shortcut(
                 cfg!(not(target_os = "macos")),
                 Modifiers::ALT,
@@ -823,7 +841,9 @@ impl HeadedWindow {
             return false;
         };
         // The pane buttons and the top bar are egui's.
-        let on_ui = gui.pane_controls_contain(point) || gui.top_bar_contains(point);
+        let on_ui = gui.pane_controls_contain(point) ||
+            gui.top_bar_contains(point) ||
+            gui.find_bar_contains(point);
         let scale = self.hidpi_scale_factor();
         let to_servo_button = |button: &MouseButton| match button {
             MouseButton::Left => ServoMouseButton::Primary,
@@ -971,6 +991,10 @@ impl HeadedWindow {
                 true
             },
             WindowEvent::KeyboardInput { event, .. } => {
+                // Typing in the find bar.
+                if gui.has_keyboard_focus() {
+                    return false;
+                }
                 let Some(kind) = gui.pane_focus() else {
                     return false;
                 };
@@ -1048,7 +1072,9 @@ impl HeadedWindow {
                 .get()
                 .is_none_or(|point| {
                     let gui = self.gui.borrow();
-                    gui.is_outside_content_rect(point) || gui.top_bar_contains(point)
+                    gui.is_outside_content_rect(point) ||
+                        gui.top_bar_contains(point) ||
+                        gui.find_bar_contains(point)
                 })
         };
 
@@ -1135,7 +1161,9 @@ impl HeadedWindow {
             should_forward_mouse_event_to_egui() &&
             !self.last_mouse_position.get().is_some_and(|point| {
                 let gui = self.gui.borrow();
-                gui.top_bar_contains(point) || gui.pane_controls_contain(point)
+                gui.top_bar_contains(point) ||
+                    gui.pane_controls_contain(point) ||
+                    gui.find_bar_contains(point)
             })
         {
             let now = std::time::Instant::now();
@@ -1207,6 +1235,20 @@ impl HeadedWindow {
                 if !should_forward_mouse_event_to_egui() =>
             {
                 self.gui.borrow().surrender_focus();
+            },
+            // While typing in the find bar, browser shortcuts (Ctrl+T, Ctrl+W, Ctrl+L, ...)
+            // still work.
+            WindowEvent::KeyboardInput {
+                event: ref key_event,
+                ..
+            } if self.gui.borrow().has_keyboard_focus() &&
+                self.handle_intercepted_key_bindings(
+                    state.clone(),
+                    &window,
+                    &keyboard_event_from_winit(key_event, self.modifiers_state.get()),
+                ) =>
+            {
+                consumed = true;
             },
             WindowEvent::KeyboardInput { .. } if !self.gui.borrow().has_keyboard_focus() => {
                 // Keyboard events should go to the WebView unless some other GUI

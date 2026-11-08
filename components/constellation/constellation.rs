@@ -109,12 +109,13 @@ use devtools_traits::{
 use embedder_traits::resources::{self, Resource};
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
-    AnimationState, EmbedderControlId, EmbedderControlResponse, EmbedderProxy, FocusSequenceNumber,
-    GenericEmbedderProxy, InputEvent, InputEventAndId, InputEventOutcome, JSValue,
-    JavaScriptEvaluationError, JavaScriptEvaluationId, KeyboardEvent, MediaSessionActionType,
-    MediaSessionEvent, MediaSessionPlaybackState, MouseButtonAction, MouseButtonEvent,
-    NewWebViewDetails, PaintHitTestResult, Theme, ViewportDetails, WakeLockDelegate, WakeLockType,
-    WebDriverCommandMsg, WebDriverLoadStatus, WebDriverScriptCommand,
+    AnimationState, EmbedderControlId, EmbedderControlResponse, EmbedderProxy, FindInPageRequest,
+    FocusSequenceNumber, GenericEmbedderProxy, InputEvent, InputEventAndId, InputEventOutcome,
+    JSValue, JavaScriptEvaluationError, JavaScriptEvaluationId, KeyboardEvent,
+    MediaSessionActionType, MediaSessionEvent, MediaSessionPlaybackState, MouseButtonAction,
+    MouseButtonEvent, NewWebViewDetails, PaintHitTestResult, Theme, ViewportDetails,
+    WakeLockDelegate, WakeLockType, WebDriverCommandMsg, WebDriverLoadStatus,
+    WebDriverScriptCommand,
 };
 use euclid::default::Size2D as UntypedSize2D;
 use fonts::SystemFontServiceProxy;
@@ -1439,6 +1440,9 @@ where
             ) => {
                 self.handle_evaluate_javascript(webview_id, evaluation_id, script);
             },
+            EmbedderToConstellationMessage::FindInPage(webview_id, request) => {
+                self.handle_find_in_page(webview_id, request);
+            },
             EmbedderToConstellationMessage::CreateMemoryReport(sender) => {
                 self.mem_profiler_chan.send(ProfilerMsg::Report(sender));
             },
@@ -1604,6 +1608,25 @@ where
         for event_loop in self.event_loops() {
             event_loop.send_message_to_background_hang_monitor(&message);
         }
+    }
+
+    /// Forward a find-in-page request to the script thread of the `WebView`'s top-level
+    /// document.
+    #[servo_tracing::instrument(skip_all)]
+    fn handle_find_in_page(&mut self, webview_id: WebViewId, request: FindInPageRequest) {
+        let browsing_context_id = BrowsingContextId::from(webview_id);
+        let Some(pipeline) = self
+            .browsing_contexts
+            .get(&browsing_context_id)
+            .and_then(|browsing_context| self.pipelines.get(&browsing_context.pipeline_id))
+        else {
+            return;
+        };
+        let _ = pipeline.event_loop.send(ScriptThreadMessage::FindInPage(
+            webview_id,
+            pipeline.id,
+            request,
+        ));
     }
 
     #[servo_tracing::instrument(skip_all)]

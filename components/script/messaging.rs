@@ -104,6 +104,7 @@ impl MixedMessage {
                 ScriptThreadMessage::SetWebGPUPort(..) => None,
                 ScriptThreadMessage::SetScrollStates(id, ..) => Some(*id),
                 ScriptThreadMessage::EvaluateJavaScript(_, id, _, _) => Some(*id),
+                ScriptThreadMessage::FindInPage(_, id, _) => Some(*id),
                 ScriptThreadMessage::SendImageKeysBatch(..) => None,
                 ScriptThreadMessage::PreferencesUpdated(..) => None,
                 ScriptThreadMessage::NoLongerWaitingOnAsychronousImageUpdates(_) => None,

@@ -12,10 +12,11 @@ use accesskit::{
 };
 use dpi::PhysicalSize;
 use embedder_traits::{
-    ContextMenuAction, ContextMenuItem, Cursor, EmbedderControlId, EmbedderControlRequest, Image,
-    InputEvent, InputEventAndId, InputEventId, JSValue, JavaScriptEvaluationError, LoadStatus,
-    MediaSessionActionType, NewWebViewDetails, ScreenGeometry, ScreenshotCaptureError, Scroll,
-    Theme, TraversalId, UrlRequest, ViewportDetails, WebViewPoint, WebViewRect,
+    ContextMenuAction, ContextMenuItem, Cursor, EmbedderControlId, EmbedderControlRequest,
+    FindInPageOptions, FindInPageRequest, Image, InputEvent, InputEventAndId, InputEventId,
+    JSValue, JavaScriptEvaluationError, LoadStatus, MediaSessionActionType, NewWebViewDetails,
+    ScreenGeometry, ScreenshotCaptureError, Scroll, Theme, TraversalId, UrlRequest,
+    ViewportDetails, WebViewPoint, WebViewRect,
 };
 use euclid::{Scale, Size2D};
 use image::RgbaImage;
@@ -519,6 +520,38 @@ impl WebView {
                 self.id(),
                 theme,
             ))
+    }
+
+    /// Find every visible occurrence of `query` in this [`WebView`]'s page, highlight them
+    /// and scroll the active one into view, without changing the page's DOM. Calling this
+    /// again with a longer query narrows the search in place; an empty query stops finding.
+    /// The result arrives through [`WebViewDelegate::notify_find_in_page_result`].
+    pub fn find_in_page(&self, query: &str, options: FindInPageOptions) {
+        self.send_find_in_page_request(FindInPageRequest::Find {
+            query: query.to_owned(),
+            options,
+        });
+    }
+
+    /// Make the next find-in-page match active (wrapping around) and scroll it into view.
+    pub fn find_next(&self) {
+        self.send_find_in_page_request(FindInPageRequest::Next);
+    }
+
+    /// Make the previous find-in-page match active (wrapping around) and scroll it into view.
+    pub fn find_previous(&self) {
+        self.send_find_in_page_request(FindInPageRequest::Previous);
+    }
+
+    /// Remove the find-in-page highlights.
+    pub fn stop_finding(&self) {
+        self.send_find_in_page_request(FindInPageRequest::Stop);
+    }
+
+    fn send_find_in_page_request(&self, request: FindInPageRequest) {
+        self.servo()
+            .constellation_proxy()
+            .send(EmbedderToConstellationMessage::FindInPage(self.id(), request));
     }
 
     /// Load the given URL into this [`WebView`] using the default request headers.

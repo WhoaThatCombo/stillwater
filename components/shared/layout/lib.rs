@@ -100,6 +100,34 @@ pub trait GenericLayoutDataTrait: Any + MallocSizeOfTrait + Send + Sync + 'stati
     /// Get the text rendered by this node, if it is a `CharacterData` node and produces
     /// a `TextRun` in the box tree.
     fn rendered_text(&self, range: RangeAny<Utf32CodeUnits>) -> Option<String>;
+
+    /// Replace the find-in-page highlights painted over this node's text run. Returns
+    /// whether there was a text run to update.
+    fn set_text_run_find_highlights(&self, highlights: Vec<FindHighlight>) -> bool;
+
+    /// For a text node that produced a text run, what find in page needs to know about it.
+    fn text_run_find_info(&self) -> Option<TextRunFindInfo>;
+}
+
+/// A find-in-page match painted over part of a text node.
+#[derive(Clone, Copy, Debug, Eq, MallocSizeOf, PartialEq)]
+pub struct FindHighlight {
+    /// Where the match starts, counted in `char`s of the text node's data.
+    pub start: Utf32CodeUnits,
+    /// Where the match ends (exclusive), counted in `char`s of the text node's data.
+    pub end: Utf32CodeUnits,
+    /// Whether this is the active match, painted differently from the others.
+    pub active: bool,
+}
+
+/// Rendering facts about a text node's text run, for find in page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TextRunFindInfo {
+    /// Identifies the inline formatting context the text is part of. Text in different
+    /// inline formatting contexts (e.g. different paragraphs) is never matched as one.
+    pub inline_formatting_context: usize,
+    /// Whether the text is visible (`visibility: visible`).
+    pub visible: bool,
 }
 
 pub trait LayoutDataTrait: GenericLayoutDataTrait + Default {}
@@ -391,6 +419,13 @@ pub trait Layout {
         exclude_transform_and_inline: bool,
     ) -> Option<Rect<Au, CSSPixel>>;
     fn query_box_areas(&self, node: TrustedNodeAddress, area: BoxAreaType) -> CSSPixelRectVec;
+    /// The border box (in the same space as [`Layout::query_box_area`]) of the lines of the
+    /// text node `node` that contain the `char`s in `range`.
+    fn query_text_range_rect(
+        &self,
+        node: TrustedNodeAddress,
+        range: std::ops::Range<Utf32CodeUnits>,
+    ) -> Option<Rect<Au, CSSPixel>>;
     fn query_client_rect(&self, node: TrustedNodeAddress) -> Rect<i32, CSSPixel>;
     fn query_current_css_zoom(&self, node: TrustedNodeAddress) -> f32;
     fn query_element_inner_outer_text(&self, node: TrustedNodeAddress) -> String;

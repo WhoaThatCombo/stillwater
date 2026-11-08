@@ -9,10 +9,11 @@ use embedder_traits::{
     AlertResponse, AllowOrDeny, AuthenticationResponse, BluetoothDeviceDescription,
     ConfirmResponse, ConsoleLogLevel, ContextMenuAction, ContextMenuElementInformation,
     ContextMenuItem, Cursor, EmbedderControlId, EmbedderControlResponse, FilePickerRequest,
-    FilterPattern, InputEventId, InputEventResult, InputMethodType, LoadStatus, MediaSessionEvent,
-    NewWebViewDetails, Notification, PermissionFeature, PromptResponse, RgbColor, ScreenGeometry,
-    SelectElementOptionOrOptgroup, SelectElementRequest, SimpleDialogRequest, TraversalId,
-    WebResourceRequest, WebResourceResponse, WebResourceResponseMsg,
+    FilterPattern, FindInPageResult, InputEventId, InputEventResult, InputMethodType, LoadStatus,
+    MediaSessionEvent, NewWebViewDetails, Notification, PermissionFeature, PromptResponse,
+    RgbColor, ScreenGeometry, SelectElementOptionOrOptgroup, SelectElementRequest,
+    SimpleDialogRequest, TraversalId, WebResourceRequest, WebResourceResponse,
+    WebResourceResponseMsg,
 };
 use paint_api::rendering_context::RenderingContext;
 use servo_base::generic_channel::{GenericCallback, GenericSender, SendError};
@@ -928,6 +929,10 @@ pub trait WebViewDelegate {
     /// The page title of the currently loaded page in this [`WebView`] has changed. The new
     /// title can accessed via [`WebView::page_title`].
     fn notify_page_title_changed(&self, _webview: WebView, _title: Option<String>) {}
+    /// A find-in-page request made with [`WebView::find_in_page`], [`WebView::find_next`] or
+    /// [`WebView::find_previous`] has finished: `result` holds the match count and which match
+    /// is active.
+    fn notify_find_in_page_result(&self, _webview: WebView, _result: FindInPageResult) {}
     /// The status text of the currently loaded page in this [`WebView`] has changed. The new
     /// status text can accessed via [`WebView::status_text`].
     fn notify_status_text_changed(&self, _webview: WebView, _status: Option<String>) {}

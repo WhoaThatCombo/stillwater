@@ -19,9 +19,9 @@ use crossbeam_channel::RecvTimeoutError;
 use devtools_traits::ScriptToDevtoolsControlMsg;
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
-    EmbedderControlId, EmbedderControlResponse, FocusSequenceNumber, InputEvent, InputEventAndId,
-    JavaScriptEvaluationId, MediaSessionActionType, MouseButton, PaintHitTestResult,
-    ScriptToEmbedderChan, Theme, ViewportDetails, WebDriverScriptCommand,
+    EmbedderControlId, EmbedderControlResponse, FindInPageRequest, FocusSequenceNumber, InputEvent,
+    InputEventAndId, JavaScriptEvaluationId, MediaSessionActionType, MouseButton,
+    PaintHitTestResult, ScriptToEmbedderChan, Theme, ViewportDetails, WebDriverScriptCommand,
 };
 use euclid::{Scale, Size2D};
 use fonts_traits::{SystemFontServiceProxySender, WebFontLoadEvent};
@@ -316,6 +316,8 @@ pub enum ScriptThreadMessage {
     /// Evaluate the given JavaScript and return a result via a corresponding message
     /// to the Constellation.
     EvaluateJavaScript(WebViewId, PipelineId, JavaScriptEvaluationId, String),
+    /// Find text in the given pipeline's document and send the result to the embedder.
+    FindInPage(WebViewId, PipelineId, FindInPageRequest),
     /// A new batch of keys for the image cache for the specific pipeline.
     SendImageKeysBatch(PipelineId, Vec<ImageKey>),
     /// Preferences were updated in the parent process.

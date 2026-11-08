@@ -186,6 +186,9 @@ pub trait LayoutNode<'dom>: Copy + Debug + NodeInfo + Send + Sync {
     /// Returned offsets are counted in `char`s in the `self.text_content()` string.
     fn text_node_selection(&self) -> Option<RangeAny<Utf32CodeUnits>>;
 
+    /// For a text node, the find-in-page matches to paint over its text.
+    fn text_node_find_highlights(&self) -> Vec<crate::FindHighlight>;
+
     /// For a text node, whether a caret should be painted when the selection is an empty range
     /// (start == end)
     fn text_node_paints_caret(&self) -> bool;
