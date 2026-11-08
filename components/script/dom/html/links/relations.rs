@@ -4,10 +4,12 @@
 
 //! Defines shared hyperlink behaviour for `<link>`, `<a>`, `<area>` and `<form>` elements.
 
+use content_security_policy::sandboxing_directive::SandboxingFlagSet;
 use html5ever::local_name;
 use js::context::JSContext;
 use malloc_size_of::malloc_size_of_is_0;
-use net_traits::request::Referrer;
+use net_traits::request::{CredentialsMode, Destination, Referrer, RequestBuilder, RequestMode};
+use net_traits::{CoreResourceMsg, FetchChannels};
 use servo_constellation_traits::{LoadData, LoadOrigin, NavigationHistoryBehavior};
 use style::str::HTML_SPACE_CHARACTERS;
 
@@ -22,7 +24,9 @@ use crate::dom::html::htmllinkelement::HTMLLinkElement;
 use crate::dom::node::NodeTraits;
 use crate::dom::types::Element;
 use crate::dom::window::windowproxy::WindowOpenType;
+use crate::fetch::fetch::RequestWithGlobalScope;
 use crate::navigation::navigate;
+use crate::url::ensure_blob_referenced_by_url_is_kept_alive;
 
 bitflags::bitflags! {
     /// Describes the different relations that can be specified on elements using the `rel`
@@ -511,4 +515,67 @@ pub(crate) fn follow_hyperlink(
             .dom_manipulation_task_source()
             .queue(task);
     };
+}
+
+/// <https://html.spec.whatwg.org/multipage/#downloading-hyperlinks>
+///
+/// Starts saving the link's target as a file. Returns false if the link should be followed
+/// instead: like other browsers, the `download` attribute is only honoured for same-origin,
+/// `blob:` and `data:` URLs (a cross-origin navigation can still turn into a download if the
+/// server says so).
+pub(crate) fn download_hyperlink(subject: &Element) -> bool {
+    // Step 1. If subject cannot navigate, then return.
+    if subject.cannot_navigate() {
+        return true;
+    }
+
+    // Step 2. If subject's node document's active sandboxing flag set has the sandboxed
+    // downloads browsing context flag set, then return.
+    let document = subject.owner_document();
+    if document.has_active_sandboxing_flag(
+        SandboxingFlagSet::SANDBOXED_DOWNLOADS_BROWSING_CONTEXT_FLAG,
+    ) {
+        return true;
+    }
+
+    // Step 3. Let urlString be the result of encoding-parsing-and-serializing a URL given
+    // subject's href attribute value, relative to subject's node document.
+    // Step 4. If urlString is failure, then return.
+    let Some(href) = subject.get_attribute_string_value(&local_name!("href")) else {
+        return true;
+    };
+    let Ok(url) = document.encoding_parse_a_url(&href) else {
+        return true;
+    };
+    if !matches!(url.scheme(), "blob" | "data") && url.origin() != *document.origin().immutable() {
+        return false;
+    }
+
+    // Step 5. Let navigation be subject's node navigable.
+    // Step 6. Let filename be the value of subject's download attribute.
+    let filename = subject
+        .get_attribute_string_value(&local_name!("download"))
+        .unwrap_or_default();
+
+    // Step 7. Run these steps in parallel: fetch url and handle the result as a download.
+    // The network stack saves the response; the embedder chooses where.
+    let window = document.window();
+    let global = window.as_global_scope();
+    // Claim a blob: URL now, as pages often revoke it right after clicking the link.
+    let url = ensure_blob_referenced_by_url_is_kept_alive(global, url);
+    let request = RequestBuilder::new(Some(document.webview_id()), url, global.get_referrer())
+        .origin(document.origin().immutable().clone())
+        .mode(RequestMode::Navigate)
+        .destination(Destination::Document)
+        .credentials_mode(CredentialsMode::Include)
+        .use_url_credentials(true)
+        .referrer_policy(referrer_policy_for_element(subject))
+        .with_global_scope(global);
+    if let Err(error) = global
+        .core_resource_thread()
+        .send(CoreResourceMsg::Fetch(request, FetchChannels::Download(Some(filename))))
+    {
+        warn!("Could not start download: {error:?}");
+    }
+    true
 }

@@ -85,6 +85,11 @@ first install.
 - **Import from Zen**: Settings → **Import from Zen** copies Zen Browser's spaces, pinned tabs, Essentials,
   folders, open tabs, saved passwords, bookmarks and history (last 90 days) from this computer. Zen's profile is only read. Passwords protected
   by a Zen primary password can't be imported.
+- **Downloads**: links to files (`Content-Disposition: attachment`, archives, programs, PDFs) and
+  `<a download>` links (including pages' `blob:` and `data:` exports) save to your Downloads folder, with
+  the page's cookies. The button next to the gear shows progress; its panel (<kbd>Ctrl</kbd>+<kbd>J</kbd>) lists downloads with Cancel,
+  Retry, Open, Show in folder and Remove. Optionally ask where to save each file. Files are never opened
+  automatically, and opening a program asks first.
 - **Settings** (gear at the bottom of the sidebar, or <kbd>Ctrl</kbd>+<kbd>,</kbd>): light, dark or system
   appearance (websites that support dark mode follow along), your search engine (DuckDuckGo, Google,
   Bing or Brave Search), compact mode, and checking for updates.
@@ -106,6 +111,7 @@ first install.
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>9</kbd> | Switch to space *n* |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> | Toggle compact mode |
 | <kbd>Ctrl</kbd>+<kbd>,</kbd> | Open settings |
+| <kbd>Ctrl</kbd>+<kbd>J</kbd> | Show downloads |
 | <kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd> | Back / forward |
 | <kbd>Ctrl</kbd>+<kbd>R</kbd> / <kbd>F5</kbd> | Reload |
 
@@ -180,7 +186,8 @@ cd stillwater
 - [x] Essentials, pinned tabs, folders
 - [x] Split view and Glance
 - [x] Bookmarks, history and address-bar suggestions
-- [ ] Downloads, find in page
+- [x] Downloads
+- [ ] Find in page
 - [x] Import from Zen
 - [x] Saved passwords
 - [x] Stillwater name and icon in the window and installer

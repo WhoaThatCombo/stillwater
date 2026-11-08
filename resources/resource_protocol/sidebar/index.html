@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="servo:sidebar/zen-sidebar.css">
   <link rel="stylesheet" href="servo:sidebar/session.css">
   <link rel="stylesheet" href="servo:sidebar/history.css">
+  <link rel="stylesheet" href="servo:sidebar/downloads.css">
 </head>
 <body>
   <!-- Zen's top row: menu and sidebar toggle on the left, navigation on the right.
@@ -89,6 +90,7 @@
 
   <footer id="footer">
     <button id="settings-button" class="icon footer-button" title="Settings">&#xE713;</button>
+    <button id="dl-button" class="footer-button" title="Downloads"><svg class="dl-ring" viewBox="0 0 28 28" aria-hidden="true"><circle class="dl-ring-track" cx="14" cy="14" r="11.5"></circle><circle class="dl-ring-fill" cx="14" cy="14" r="11.5"></circle></svg><span class="icon dl-glyph">&#xE896;</span><span id="dl-count" class="dl-count" hidden></span></button>
     <div id="workspaces"></div>
   </footer>
 
@@ -283,9 +285,29 @@
     </div>
   </section>
 
+  <section id="downloads" class="panel" hidden aria-label="Downloads">
+    <header class="settings-header">
+      <button id="downloads-close" class="icon" title="Back">&#xE72B;</button>
+      <h2>Downloads</h2>
+      <span class="spacer"></span>
+      <button id="dl-open-folder" class="icon" title="Open the downloads folder">&#xE838;</button>
+    </header>
+    <div id="dl-list" class="dl-list"></div>
+    <p id="dl-empty" class="hint" hidden>Files you download appear here.</p>
+    <div class="setting-group">
+      <button class="toggle-row" id="dl-ask">
+        <span>Ask where to save each file</span>
+        <span class="switch" aria-hidden="true"></span>
+      </button>
+      <p class="hint" id="dl-folder"></p>
+      <button id="dl-clear" class="secondary">Clear list</button>
+    </div>
+  </section>
+
   <script src="servo:sidebar/sidebar.js"></script>
   <script src="servo:sidebar/session.js"></script>
   <script src="servo:sidebar/suggestions.js"></script>
   <script src="servo:sidebar/history.js"></script>
+  <script src="servo:sidebar/downloads.js"></script>
 </body>
 </html>

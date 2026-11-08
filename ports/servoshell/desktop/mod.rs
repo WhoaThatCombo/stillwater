@@ -11,6 +11,7 @@ mod bookmarks;
 pub(crate) mod cli;
 mod command_bar;
 pub(crate) mod dialog;
+pub(crate) mod downloads;
 pub(crate) mod diagnostics;
 pub(crate) mod event_loop;
 #[cfg(feature = "gamepad")]

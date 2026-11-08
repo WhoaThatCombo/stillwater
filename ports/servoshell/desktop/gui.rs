@@ -700,6 +700,13 @@ impl Gui {
                     &argument,
                 ),
                 WindowAction::CommandBar => self.command_bar.request_toggle(),
+                WindowAction::Download(command, argument) => {
+                    let page = self.sidebar.navigated_webview(window).map(|webview| webview.id());
+                    state
+                        .downloads
+                        .borrow_mut()
+                        .command(&command, &argument, state.servo(), page);
+                },
                 WindowAction::CheckForUpdates => {
                     updater::check_now(headed_window.event_loop_proxy());
                 },
@@ -754,6 +761,11 @@ impl Gui {
             || RepaintEventLoopWaker::new(headed_window.event_loop_proxy(), headed_window.id()),
             theme,
         );
+        {
+            let mut downloads = state.downloads.borrow_mut();
+            downloads.set_event_loop_proxy(headed_window.event_loop_proxy());
+            self.sidebar.set_downloads(downloads.to_json());
+        }
         self.sidebar
             .set_window_state(!winit_window.is_decorated(), winit_window.is_maximized());
         self.sidebar.push_state(window);

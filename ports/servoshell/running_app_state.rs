@@ -235,6 +235,9 @@ pub(crate) struct RunningAppState {
     /// Browsing history and bookmarks.
     #[cfg(not(any(target_os = "android", target_env = "ohos")))]
     pub(crate) history: RefCell<crate::desktop::history::History>,
+    /// Downloads and the Downloads panel's list.
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    pub(crate) downloads: crate::desktop::downloads::SharedDownloads,
     /// Tabs with audio or video playing, which the tab unloader leaves alone.
     playing_media: RefCell<HashMap<WebViewId, std::time::Instant>>,
     /// When to run an idle garbage collection: a few seconds after pages finish loading or
@@ -283,7 +286,12 @@ impl RunningAppState {
         ))]
         gamepad_delegate: Option<Rc<ServoshellGamepadDelegate>>,
     ) -> Self {
-        servo.set_delegate(Rc::new(ServoShellServoDelegate));
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        let downloads = crate::desktop::downloads::Downloads::load();
+        servo.set_delegate(Rc::new(ServoShellServoDelegate {
+            #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+            downloads: downloads.clone(),
+        }));
 
         let webdriver_receiver = servoshell_preferences.webdriver_port.get().map(|port| {
             let (embedder_sender, embedder_receiver) = unbounded();
@@ -326,6 +334,7 @@ impl RunningAppState {
             )),
             #[cfg(not(any(target_os = "android", target_env = "ohos")))]
             history: RefCell::new(crate::desktop::history::History::new()),
+            downloads,
             user_content_manager,
             recent_console_errors: Default::default(),
             playing_media: Default::default(),
@@ -514,6 +523,14 @@ impl RunningAppState {
         self.handle_webdriver_messages(create_platform_window);
 
         self.servo.spin_event_loop();
+
+        // Download progress: refresh the sidebar's downloads indicator and panel.
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        if self.downloads.borrow_mut().take_changed() {
+            for window in self.windows.borrow().iter() {
+                window.set_needs_update();
+            }
+        }
 
         for window in self.windows.borrow().iter() {
             window.update_and_request_repaint_if_necessary(self);
@@ -935,6 +952,28 @@ impl WebViewDelegate for RunningAppState {
             .show_http_authentication_dialog(webview.id(), authentication_request);
     }
 
+    fn request_download(&self, webview: WebView, request: servo::DownloadRequest) {
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        {
+            // Headless and WebDriver runs are automated tests and site sweeps: only save files
+            // when they choose a download folder, never into the user's.
+            let automated = self.servoshell_preferences.headless ||
+                self.servoshell_preferences.webdriver_port.get().is_some();
+            if automated && std::env::var_os("STILLWATER_DOWNLOAD_DIR").is_none() {
+                crate::desktop::diagnostics::log(format!(
+                    "download not saved (automated run without STILLWATER_DOWNLOAD_DIR): {}",
+                    request.suggested_filename()
+                ));
+                request.cancel();
+                return;
+            }
+            self.downloads.borrow_mut().start(request);
+            self.window_for_webview(&webview).set_needs_update();
+        }
+        #[cfg(any(target_os = "android", target_env = "ohos"))]
+        let _ = (webview, request);
+    }
+
     fn request_create_new(&self, parent_webview: WebView, request: CreateNewWebViewRequest) {
         let window = self.window_for_webview(&parent_webview);
 
@@ -1145,8 +1184,19 @@ impl WebViewDelegate for RunningAppState {
     }
 }
 
-struct ServoShellServoDelegate;
+struct ServoShellServoDelegate {
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    downloads: crate::desktop::downloads::SharedDownloads,
+}
+
 impl ServoDelegate for ServoShellServoDelegate {
+    fn notify_download_update(&self, id: servo::DownloadId, update: servo::DownloadUpdate) {
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        self.downloads.borrow_mut().update(id, update);
+        #[cfg(any(target_os = "android", target_env = "ohos"))]
+        let _ = (id, update);
+    }
+
     fn notify_devtools_server_started(&self, port: u16, _token: String) {
         info!("Devtools Server running on port {port}");
     }

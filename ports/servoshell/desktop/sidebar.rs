@@ -88,6 +88,8 @@ pub(crate) enum WindowAction {
     History(String, String),
     /// New tab: open (or close) Zen's floating address bar over the page.
     CommandBar,
+    /// A command from the Downloads panel (`dl-*`) and its argument.
+    Download(String, String),
 }
 
 struct SidebarDelegate {
@@ -169,6 +171,8 @@ pub(crate) struct Sidebar {
     hist: serde_json::Value,
     /// The floating new-tab address bar is open: no tab shows as selected.
     command_bar: bool,
+    /// Downloads in progress and finished, for the downloads indicator and panel.
+    downloads: serde_json::Value,
 }
 
 impl Sidebar {
@@ -209,6 +213,7 @@ impl Sidebar {
             zen: serde_json::Value::Null,
             hist: serde_json::Value::Null,
             command_bar: false,
+            downloads: serde_json::Value::Null,
             settings: RefCell::new(settings),
             update_check: None,
             session: crate::desktop::session::SessionWriter::claim(),
@@ -322,6 +327,14 @@ impl Sidebar {
                 })
             })
             .collect()
+    }
+
+    pub(crate) fn set_downloads(&mut self, downloads: serde_json::Value) {
+        // A new download: show the sidebar if compact mode hid it, so its progress is visible.
+        if downloads["active"].as_u64() > self.downloads["active"].as_u64() && self.compact.get() {
+            self.peek.set(true);
+        }
+        self.downloads = downloads;
     }
 
     pub(crate) fn set_zen(&mut self, zen: serde_json::Value) {
@@ -888,6 +901,17 @@ impl Sidebar {
                 _ if command.starts_with("hist-") || command.starts_with("bm-") => self
                     .window_actions
                     .push(WindowAction::History(command.to_owned(), argument.to_owned())),
+                // Ctrl+J: show the Downloads panel.
+                "dl-panel" => {
+                    if self.compact.get() {
+                        self.peek.set(true);
+                    }
+                    self.call("openDownloads()");
+                    layout_changed = true;
+                },
+                command if command.starts_with("dl-") => self
+                    .window_actions
+                    .push(WindowAction::Download(command.to_owned(), argument.to_owned())),
                 "set-unload-low-memory" => self
                     .settings
                     .borrow_mut()
@@ -969,6 +993,7 @@ impl Sidebar {
             "session": self.session_state(),
             "hist": self.hist,
             "commandBar": self.command_bar,
+            "downloads": self.downloads,
             "compact": self.compact.get(),
             "workspaces": self.workspaces.to_json(),
             "background": background,

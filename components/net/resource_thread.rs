@@ -54,6 +54,7 @@ use crate::connector::{
 };
 use crate::cookie::ServoCookie;
 use crate::cookie_storage::CookieStorage;
+use crate::download::DownloadInterceptor;
 use crate::embedder::NetToEmbedderMsg;
 use crate::fetch::cors_cache::CorsCache;
 use crate::fetch::fetch_params::{FetchParams, SharedPreloadedResources};
@@ -413,6 +414,13 @@ impl ResourceChannelManager {
                 FetchChannels::ResponseMsg(sender) => {
                     let cancellation_listener =
                         self.get_or_create_cancellation_listener(request_builder.id);
+                    // A navigation's response may turn out to be a download.
+                    let sender = DownloadInterceptor::new(
+                        sender,
+                        &request_builder,
+                        http_state.embedder_proxy.clone(),
+                        cancellation_listener.clone(),
+                    );
                     self.resource_manager.fetch(
                         request_builder,
                         None,
@@ -446,6 +454,23 @@ impl ResourceChannelManager {
                     Arc::new(Default::default()),
                     protocols,
                 ),
+                FetchChannels::Download(link_filename) => {
+                    let cancellation_listener =
+                        self.get_or_create_cancellation_listener(request_builder.id);
+                    let target = DownloadInterceptor::for_download(
+                        link_filename,
+                        http_state.embedder_proxy.clone(),
+                        cancellation_listener.clone(),
+                    );
+                    self.resource_manager.fetch(
+                        request_builder,
+                        None,
+                        target,
+                        http_state,
+                        cancellation_listener,
+                        protocols,
+                    );
+                },
             },
             CoreResourceMsg::Cancel(request_ids) => {
                 for cancellation_listener in request_ids
@@ -486,6 +511,13 @@ impl ResourceChannelManager {
             CoreResourceMsg::FetchRedirect(request_builder, res_init, sender) => {
                 let cancellation_listener =
                     self.get_or_create_cancellation_listener(request_builder.id);
+                // A redirected navigation's response may turn out to be a download.
+                let sender = DownloadInterceptor::new(
+                    sender,
+                    &request_builder,
+                    http_state.embedder_proxy.clone(),
+                    cancellation_listener.clone(),
+                );
                 self.resource_manager.fetch(
                     request_builder,
                     Some(res_init),

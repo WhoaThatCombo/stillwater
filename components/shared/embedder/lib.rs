@@ -8,6 +8,7 @@
 //! is not exposed in the API or doesn't involve messages sent to the embedding/libservo layer, it
 //! is probably a better fit for the `servo_constellation_traits` crate.
 
+pub mod downloads;
 pub mod embedder_controls;
 pub mod geolocation;
 pub mod input_events;
@@ -50,6 +51,7 @@ use webrender_api::units::{
     DeviceVector2D, LayoutPoint, LayoutRect, LayoutSize, LayoutVector2D,
 };
 
+pub use crate::downloads::*;
 pub use crate::embedder_controls::*;
 pub use crate::geolocation::*;
 pub use crate::input_events::*;

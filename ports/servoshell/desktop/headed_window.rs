@@ -537,6 +537,7 @@ impl HeadedWindow {
             .shortcut(CMD_OR_CONTROL, ',', || post("open-settings"))
             .shortcut(CMD_OR_CONTROL, 'H', || post("hist-show"))
             .shortcut(CMD_OR_CONTROL, 'D', || post("bm-star"))
+            .shortcut(CMD_OR_CONTROL, 'J', || post("dl-panel"))
             .shortcut(CMD_OR_CONTROL, 'Q', || state.schedule_exit())
             .shortcut(CMD_OR_CONTROL, 'L', || self.gui.borrow().sidebar.focus_url(window))
             .optional_shortcut(
