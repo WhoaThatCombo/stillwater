@@ -145,7 +145,9 @@ pub fn start_server(
     thread::Builder::new()
         .name("WebDriverHttpServer".to_owned())
         .spawn(move || {
-            let address = SocketAddrV4::new("0.0.0.0".parse().unwrap(), port);
+            // Only this computer: listening on every interface would let other machines on the
+            // network drive the browser (and makes Windows' firewall ask about every new build).
+            let address = SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, port);
             match webdriver::server::start(
                 SocketAddr::V4(address),
                 vec![],

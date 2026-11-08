@@ -1214,3 +1214,56 @@ impl Workspaces {
         counts
     }
 }
+
+/// A tab the address bar offers to switch to.
+pub(crate) enum TabTarget {
+    Tab(TabEntry),
+    Pin(u32),
+}
+
+impl Workspaces {
+    /// Every tab, pinned tab and Essential in every space (but not the active tab), with its
+    /// title, URL and space name, for the address bar's "Switch to tab" suggestions.
+    pub(crate) fn switch_targets(&self, window: &ServoShellWindow) -> Vec<(TabTarget, String, String, String)> {
+        let active = window.active_webview().map(|webview| webview.id());
+        let space_name = |space: u32| {
+            if space == ESSENTIALS {
+                return "Essentials".to_owned();
+            }
+            self.list
+                .iter()
+                .find(|workspace| workspace.id == space)
+                .map(|workspace| workspace.name.clone())
+                .unwrap_or_default()
+        };
+        let mut targets = Vec::new();
+        for pin in &self.pins {
+            if pin.webview.is_some() && pin.webview == active {
+                continue;
+            }
+            let title = pin.custom_title.clone().unwrap_or_else(|| pin.title.clone());
+            targets.push((TabTarget::Pin(pin.id), title, pin.url.clone(), space_name(pin.space)));
+        }
+        for (id, webview) in window.webviews() {
+            if Some(id) == active || self.pin_for_webview(id).is_some() {
+                continue;
+            }
+            let Some(space) = self.tab_workspace.get(&id) else {
+                continue;
+            };
+            let title = self
+                .custom_titles
+                .get(&id)
+                .cloned()
+                .or_else(|| webview.page_title())
+                .unwrap_or_default();
+            let url = webview.url().map(|url| url.to_string()).unwrap_or_default();
+            targets.push((TabTarget::Tab(TabEntry::Live(id)), title, url, space_name(*space)));
+        }
+        for tab in &self.unloaded {
+            let title = tab.custom_title.clone().unwrap_or_else(|| tab.title.clone());
+            targets.push((TabTarget::Tab(TabEntry::Unloaded(tab.key)), title, tab.url.clone(), space_name(tab.space)));
+        }
+        targets
+    }
+}

@@ -7,7 +7,9 @@
 mod accelerated_gl_media;
 pub(crate) mod adblock;
 pub(crate) mod app;
+mod bookmarks;
 pub(crate) mod cli;
+mod command_bar;
 pub(crate) mod dialog;
 pub(crate) mod diagnostics;
 pub(crate) mod event_loop;
@@ -16,6 +18,7 @@ pub(crate) mod gamepad;
 pub mod geometry;
 mod gui;
 pub(crate) mod headed_window;
+pub(crate) mod history;
 mod headless_window;
 mod keyutils;
 mod memory;

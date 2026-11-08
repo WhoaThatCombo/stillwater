@@ -1,0 +1,65 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/* The floating new-tab address bar (commandbar.html). The page is only as tall as its
+   content; Stillwater sizes its window to fit and draws the rounded card around it. */
+:root {
+  font-size: 14px;
+}
+
+html,
+body {
+  height: auto;
+}
+
+body {
+  display: block;
+  padding: 0;
+  background: var(--zen-urlbar-background-focus);
+}
+
+#bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 44px;
+  padding: 0 8px;
+}
+
+.bar-icon {
+  font-size: 14px;
+  opacity: 0.6;
+}
+
+#input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 15px;
+}
+
+.field .placeholder {
+  font-size: 15px;
+}
+
+#list {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0 2px;
+  border-top: 1px solid var(--zen-pinned-separator-color);
+}
+
+#list[hidden] {
+  display: none;
+}
+
+#list .suggestion {
+  min-height: 42px;
+  padding: 3px 10px;
+}

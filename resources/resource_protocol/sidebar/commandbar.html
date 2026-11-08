@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>New tab</title>
+  <link rel="stylesheet" href="servo:sidebar/zen-sidebar.css">
+  <link rel="stylesheet" href="servo:sidebar/history.css">
+  <link rel="stylesheet" href="servo:sidebar/commandbar.css">
+</head>
+<body>
+  <!-- Zen's floating address bar for a new tab (desktop/command_bar.rs). -->
+  <div id="bar">
+    <span class="icon bar-icon">&#xE721;</span>
+    <span class="field">
+      <input id="input" type="text" spellcheck="false" autocomplete="off" aria-label="Search or enter address">
+      <span class="placeholder" aria-hidden="true">Search or enter address</span>
+    </span>
+  </div>
+  <div id="list" role="listbox" aria-label="Suggestions" hidden></div>
+  <script src="servo:sidebar/suggestions.js"></script>
+  <script src="servo:sidebar/commandbar.js"></script>
+</body>
+</html>

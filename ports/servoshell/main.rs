@@ -14,22 +14,23 @@
 //!
 //! [winit]: https://github.com/rust-windowing/winit
 
+// A windowed program on Windows: a console program gets a console window that pops up (and
+// takes focus) for a moment on every launch, even though it's freed straight away.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::System::Console;
 
 fn main() {
     #[cfg(target_os = "windows")]
     // SAFETY: No safety related side effects or requirements.
-    // See <https://learn.microsoft.com/en-au/windows/console/freeconsole#remarks>
     unsafe {
-        // Free the console pop-up when started by double clicking.
-        // If started from the command line, nothing would happen.
-        let _ = Console::FreeConsole();
-        // Try to attach to the console of the parent process.
-        // If servo was started from the command line,
-        // this would allow continous stdout/stderr output to be seen in the console.
-        // Otherwise, the call will fail, which we can ignore.
-        let _result = Console::AttachConsole(Console::ATTACH_PARENT_PROCESS);
+        // Started from a terminal: print to it. Leave output that's redirected (to a file or
+        // a pipe, e.g. by tests) alone. Otherwise there's no console, which is fine.
+        let output = Console::GetStdHandle(Console::STD_OUTPUT_HANDLE);
+        if output.is_null() || output == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            let _result = Console::AttachConsole(Console::ATTACH_PARENT_PROCESS);
+        }
     }
     cfg_if::cfg_if! {
         if #[cfg(not(any(target_os = "android", target_env = "ohos")))] {

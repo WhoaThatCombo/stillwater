@@ -232,6 +232,9 @@ pub(crate) struct RunningAppState {
     /// Saved passwords.
     #[cfg(not(any(target_os = "android", target_env = "ohos")))]
     pub(crate) passwords: RefCell<crate::desktop::passwords::Passwords>,
+    /// Browsing history and bookmarks.
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    pub(crate) history: RefCell<crate::desktop::history::History>,
     /// Tabs with audio or video playing, which the tab unloader leaves alone.
     playing_media: RefCell<HashMap<WebViewId, std::time::Instant>>,
     /// When to run an idle garbage collection: a few seconds after pages finish loading or
@@ -321,6 +324,8 @@ impl RunningAppState {
             passwords: RefCell::new(crate::desktop::passwords::Passwords::new(
                 &user_content_manager,
             )),
+            #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+            history: RefCell::new(crate::desktop::history::History::new()),
             user_content_manager,
             recent_console_errors: Default::default(),
             playing_media: Default::default(),
@@ -890,7 +895,16 @@ impl WebViewDelegate for RunningAppState {
         self.window_for_webview(&webview).set_needs_update();
     }
 
+    fn notify_url_changed(&self, webview: WebView, url: Url) {
+        // Record the visit in history (tabs only: split view and Glance have their own delegate).
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        self.history.borrow_mut().on_url_changed(webview.id(), &url);
+        let _ = (&webview, &url);
+    }
+
     fn notify_page_title_changed(&self, webview: WebView, _: Option<String>) {
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        self.history.borrow_mut().on_title(&webview);
         self.window_for_webview(&webview).set_needs_update();
     }
 
@@ -1003,6 +1017,8 @@ impl WebViewDelegate for RunningAppState {
         }
         if status == LoadStatus::Complete {
             self.schedule_idle_gc();
+            #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+            self.history.borrow_mut().on_title(&webview);
         }
 
         let webdriver_status = match status {

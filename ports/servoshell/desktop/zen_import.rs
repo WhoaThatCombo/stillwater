@@ -11,6 +11,9 @@
 //! - `logins.json` holds the passwords, encrypted with a key kept in `key4.db` (NSS). Without a
 //!   primary password the key is protected by an empty password, so it can be read.
 //!
+//! - `places.sqlite` holds bookmarks (`moz_bookmarks`) and history (`moz_places`,
+//!   `moz_historyvisits`). Zen keeps it open, so a copy is read.
+//!
 //! Nothing in the Zen profile is changed.
 
 use std::path::{Path, PathBuf};
@@ -68,9 +71,27 @@ pub(crate) struct ZenLogin {
     pub(crate) times_used: u64,
 }
 
+/// A visit to a page, from Zen's history.
+pub(crate) struct ZenVisit {
+    pub(crate) url: String,
+    pub(crate) title: String,
+    /// Milliseconds since 1970.
+    pub(crate) time: i64,
+}
+
+/// Zen's bookmarks and recent history.
+#[derive(Default)]
+pub(crate) struct ZenPlaces {
+    /// (url, title, folder name, added in seconds since 1970), oldest first.
+    pub(crate) bookmarks: Vec<(String, String, String, u64)>,
+    /// Visits from the last 90 days (what Stillwater keeps), oldest first.
+    pub(crate) visits: Vec<ZenVisit>,
+}
+
 /// Everything read from one Zen profile.
 pub(crate) struct ZenData {
     pub(crate) session: Result<ZenSession, String>,
+    pub(crate) places: Result<ZenPlaces, String>,
     pub(crate) logins: Result<Vec<ZenLogin>, String>,
     /// Saved logins that can't be imported (HTTP authentication, unreadable).
     pub(crate) skipped_logins: usize,
@@ -161,6 +182,7 @@ pub(crate) fn read_profile(profile: &Path) -> ZenData {
     };
     ZenData {
         session: read_session(profile),
+        places: read_places(profile),
         logins,
         skipped_logins,
     }
@@ -533,4 +555,90 @@ fn read_logins(profile: &Path) -> Result<(Vec<ZenLogin>, usize), String> {
         });
     }
     Ok((logins, skipped))
+}
+
+// ---- Bookmarks and history: places.sqlite ----
+
+fn read_places(profile: &Path) -> Result<ZenPlaces, String> {
+    let source = profile.join("places.sqlite");
+    if !source.exists() {
+        return Ok(ZenPlaces::default());
+    }
+    // Copy the database and its write-ahead log (recent changes while Zen runs) and read the
+    // copy: Zen keeps the original open and locked.
+    let copy = std::env::temp_dir().join(format!("stillwater-zen-places-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&copy);
+    let result = (|| {
+        std::fs::create_dir_all(&copy).map_err(|_| "Zen's history couldn't be copied.")?;
+        std::fs::copy(&source, copy.join("places.sqlite"))
+            .map_err(|_| "Zen's bookmarks and history (places.sqlite) couldn't be read.")?;
+        let wal = profile.join("places.sqlite-wal");
+        if wal.exists() {
+            let _ = std::fs::copy(&wal, copy.join("places.sqlite-wal"));
+        }
+        let connection = rusqlite::Connection::open(copy.join("places.sqlite"))
+            .map_err(|_| "Zen's bookmarks and history couldn't be opened.")?;
+        read_places_from(&connection).map_err(|_| "Zen's bookmarks and history couldn't be read.")
+    })();
+    let _ = std::fs::remove_dir_all(&copy);
+    result.map_err(str::to_owned)
+}
+
+fn read_places_from(connection: &rusqlite::Connection) -> rusqlite::Result<ZenPlaces> {
+    // Bookmarks (type 1), except tags (bookmarks inside the tags root's folders).
+    let mut statement = connection.prepare(
+        "SELECT p.url, coalesce(b.title, p.title, ''), coalesce(f.title, ''), coalesce(f.guid, ''),
+                coalesce(b.dateAdded, 0)
+         FROM moz_bookmarks b
+         JOIN moz_places p ON p.id = b.fk
+         LEFT JOIN moz_bookmarks f ON f.id = b.parent
+         WHERE b.type = 1 AND
+               coalesce(f.guid, '') <> 'tags________' AND
+               coalesce(f.parent, 0) NOT IN (SELECT id FROM moz_bookmarks WHERE guid = 'tags________')
+         ORDER BY b.dateAdded",
+    )?;
+    let bookmarks = statement
+        .query_map([], |row| {
+            let folder: String = row.get(2)?;
+            let guid: String = row.get(3)?;
+            let folder = match guid.as_str() {
+                "menu________" => "Bookmarks menu".to_owned(),
+                "toolbar_____" => "Bookmarks toolbar".to_owned(),
+                "unfiled_____" => "Other bookmarks".to_owned(),
+                "mobile______" => "Mobile bookmarks".to_owned(),
+                _ => folder,
+            };
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                folder,
+                (row.get::<_, i64>(4)? / 1_000_000).max(0) as u64,
+            ))
+        })?
+        .filter_map(Result::ok)
+        .filter(|(url, ..)| url.starts_with("http://") || url.starts_with("https://"))
+        .collect();
+    // Visits from links, typed URLs, bookmarks and redirects; not embedded frames, downloads or
+    // reloads. Times are in microseconds.
+    let cutoff = (crate::desktop::history::now_ms() -
+        crate::desktop::history::KEEP_DAYS * 24 * 60 * 60 * 1000) *
+        1000;
+    let mut statement = connection.prepare(
+        "SELECT p.url, coalesce(p.title, ''), v.visit_date
+         FROM moz_historyvisits v JOIN moz_places p ON p.id = v.place_id
+         WHERE p.hidden = 0 AND v.visit_type IN (1, 2, 3, 5, 6, 8) AND v.visit_date >= ?1
+         ORDER BY v.visit_date",
+    )?;
+    let visits = statement
+        .query_map([cutoff], |row| {
+            Ok(ZenVisit {
+                url: row.get(0)?,
+                title: row.get(1)?,
+                time: row.get::<_, i64>(2)? / 1000,
+            })
+        })?
+        .filter_map(Result::ok)
+        .filter(|visit| crate::desktop::history::recordable(&visit.url))
+        .collect();
+    Ok(ZenPlaces { bookmarks, visits })
 }
