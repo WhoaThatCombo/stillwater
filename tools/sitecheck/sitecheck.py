@@ -15,6 +15,7 @@ Examples (from the repo root, after `./mach build --release`):
     python tools/sitecheck/sitecheck.py --category video --jobs 6
     python tools/sitecheck/sitecheck.py --label after --compare before
     python tools/sitecheck/sitecheck.py -- --pref=dom_webgl2_enabled   # extra Stillwater args
+    python tools/sitecheck/sitecheck.py --sites big.json --label big --gentle --compact  # thousands
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -45,6 +47,7 @@ DEFAULT_EXE = REPO / "target" / "release" / ("servoshell.exe" if os.name == "nt"
 CRASH, NETWORK, BLOCKED, BLANK, BROKEN, LAYOUT, PARTIAL, SLOW, OK = (
     "crash", "network", "blocked", "blank", "broken", "layout", "partial", "slow", "ok")
 STATUS_ORDER = [CRASH, NETWORK, BLOCKED, BLANK, BROKEN, LAYOUT, PARTIAL, SLOW, OK]
+WORKING = (OK, SLOW, PARTIAL)
 STATUS_LABEL = {
     CRASH: "Crashed", NETWORK: "Network failure", BLOCKED: "Blocked by a browser check",
     BLANK: "Blank page", BROKEN: "Broken (script errors)", LAYOUT: "Layout broken",
@@ -254,7 +257,75 @@ def check_site(url: str, category: str, args, run_dir: Path) -> Result:
         result.blank_screenshot = screenshot_is_blank(png)
 
     classify(result, probe, text)
+    if args.compact:
+        compact(result, site_dir, run_dir)
     return result
+
+
+def compact(result: Result, site_dir: Path, run_dir: Path) -> None:
+    """Keep big runs small: a JPEG screenshot, and logs only for sites that don't work."""
+    png = site_dir / "screenshot.png"
+    if png.exists():
+        try:
+            from PIL import Image
+            with Image.open(png) as image:
+                image.convert("RGB").save(site_dir / "screenshot.jpg", quality=72)
+            png.unlink()
+            result.screenshot = str((site_dir / "screenshot.jpg").relative_to(run_dir)).replace("\\", "/")
+        except (ImportError, OSError):
+            pass
+    if result.status in WORKING:
+        for name in ("stillwater.log", "output.txt"):
+            (site_dir / name).unlink(missing_ok=True)
+
+
+# Gentle mode: while a full-screen program (a game) is in front, one site is checked at a time.
+_worker = threading.local()
+_worker_count = iter(range(1_000_000))
+_worker_lock = threading.Lock()
+
+
+def fullscreen_app_in_front() -> bool:
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    window = user32.GetForegroundWindow()
+    if not window:
+        return False
+    name = ctypes.create_unicode_buffer(64)
+    user32.GetClassNameW(window, name, 64)
+    if name.value in ("Progman", "WorkerW", "Shell_TrayWnd"):
+        return False
+
+    class MonitorInfo(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+    rect = wintypes.RECT()
+    user32.GetWindowRect(window, ctypes.byref(rect))
+    info = MonitorInfo(cbSize=ctypes.sizeof(MonitorInfo))
+    user32.GetMonitorInfoW(user32.MonitorFromWindow(window, 2), ctypes.byref(info))
+    screen = info.rcMonitor
+    return (rect.left <= screen.left and rect.top <= screen.top and
+            rect.right >= screen.right and rect.bottom >= screen.bottom)
+
+
+def wait_while_gaming() -> None:
+    if not hasattr(_worker, "index"):
+        with _worker_lock:
+            _worker.index = next(_worker_count)
+    while _worker.index > 0 and fullscreen_app_in_front():
+        time.sleep(15)
+
+
+def lower_priority() -> None:
+    """Below-normal CPU priority for this script and every Stillwater it starts."""
+    if os.name == "nt":
+        import ctypes
+        ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x4000)
+    else:
+        os.nice(10)
 
 
 def run_webdriver(url, args, env, browser_args, profile, log, png, output) -> dict:
@@ -379,8 +450,30 @@ def write_report(run_dir: Path, results: list[Result], label: str, previous: dic
                 better = STATUS_ORDER.index(r.status) > STATUS_ORDER.index(before)
                 changes.append((r.site, before, r.status, better))
 
+    # Thousands of screenshots make a page no browser can scroll: big runs show cards only for the
+    # sites that don't work, and list the working ones.
+    big = len(results) > 2000
+    working_rows = ""
+    if big:
+        working = sorted((r for r in results if r.status in WORKING), key=lambda r: (r.category, r.site))
+        working_rows = "".join(
+            f'<tr><td><a href="{esc(r.screenshot)}">{esc(slug(r.site))}</a></td><td>{esc(r.category)}</td>'
+            f'<td>{esc(STATUS_LABEL[r.status])}</td><td>{esc(r.diagnosis[:120])}</td></tr>' for r in working)
+    categories = list(dict.fromkeys(r.category for r in results))
+    category_rows = ""
+    if len(categories) > 1:
+        for category in categories:
+            group = [r for r in results if r.category == category]
+            usable = sum(1 for r in group if r.status in WORKING)
+            cells = "".join(f"<td>{sum(1 for r in group if r.status == s) or ''}</td>" for s in STATUS_ORDER)
+            category_rows += (f"<tr><td>{esc(category)}</td><td>{len(group)}</td>"
+                              f"<td><b>{100 * usable / len(group):.0f}%</b></td>{cells}</tr>")
+    category_head = "".join(f"<th>{esc(STATUS_LABEL[s])}</th>" for s in STATUS_ORDER)
+
     cards = []
     for r in sorted(results, key=lambda r: (STATUS_ORDER.index(r.status), r.site)):
+        if big and r.status in WORKING:
+            continue
         timing = f"loaded in {r.complete:.1f}s" if r.complete is not None else "never finished loading"
         details = "".join(f"<li>{esc(e)}</li>" for e in r.script_errors[:8])
         net = "".join(f"<li>{esc(e)}</li>" for e in r.network_errors[:5])
@@ -432,6 +525,7 @@ td, th {{ text-align:left; padding:6px 10px; border-bottom:1px solid var(--edge)
 <p class="muted">{len(results)} sites · {time.strftime('%Y-%m-%d %H:%M')} · Stillwater on Servo</p>
 <ul class="summary">{summary}</ul>
 {f'<h2>Changes since previous run</h2><ul>{change_rows}</ul>' if change_rows else ''}
+{f'<h2>By category</h2><table><tr><th>Category</th><th>Sites</th><th>Usable</th>{category_head}</tr>{category_rows}</table>' if category_rows else ''}
 <h2>Most common missing web features</h2>
 <p class="muted">Guessed from script errors. Fixing the top entries in Servo should help the most sites.</p>
 {f'<table><tr><th>Feature</th><th>Sites</th><th>Where</th></tr>{rows}</table>' if rows else '<p>None detected.</p>'}
@@ -440,8 +534,9 @@ td, th {{ text-align:left; padding:6px 10px; border-bottom:1px solid var(--edge)
 (vendor-prefixed hacks left out). Rejected CSS is silently ignored, so popular entries here are likely
 causes of pages that look wrong.</p>
 {f'<table><tr><th>CSS</th><th>Sites</th><th>Where</th></tr>{css_rows}</table>' if css_rows else '<p>None detected.</p>'}
-<h2>Sites</h2>
+<h2>{'Sites that don&rsquo;t work' if big else 'Sites'}</h2>
 <div class="grid">{''.join(cards)}</div>
+{f'<h2>Sites that work</h2><table><tr><th>Site</th><th>Category</th><th>Status</th><th>Notes</th></tr>{working_rows}</table>' if working_rows else ''}
 </body></html>"""
     report = run_dir / "report.html"
     report.write_text(page, "utf-8")
@@ -463,6 +558,11 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=HERE / "out", help="output folder")
     parser.add_argument("--legacy", action="store_true",
                         help="drive Stillwater with -o and console output instead of WebDriver")
+    parser.add_argument("--gentle", action="store_true",
+                        help="below-normal CPU priority, and one site at a time while a full-screen "
+                             "program such as a game is in front")
+    parser.add_argument("--compact", action="store_true",
+                        help="JPEG screenshots, and logs kept only for sites that don't work")
     parser.add_argument("extra", nargs="*", help="extra Stillwater arguments (after --)")
     args = parser.parse_args()
 
@@ -470,18 +570,50 @@ def main() -> int:
         print(f"Can't find {args.exe}; build Stillwater first (./mach build --release).", file=sys.stderr)
         return 2
     sites = load_sites(args)
+    order = {url: index for index, (url, _) in enumerate(sites)}
     run_dir = args.out / args.label
     run_dir.mkdir(parents=True, exist_ok=True)
+    if args.gentle:
+        lower_priority()
+
+    # Each result is saved as soon as it's known, so an interrupted run carries on where it stopped
+    # when started again with the same --label.
+    progress = run_dir / "results.jsonl"
+    results: list[Result] = []
+    if progress.exists():
+        wanted = {url for url, _ in sites}
+        for line in progress.read_text("utf-8").splitlines():
+            try:
+                saved = Result(**json.loads(line))
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if saved.site in wanted:
+                results.append(saved)
+        done = {r.site for r in results}
+        sites = [(url, category) for url, category in sites if url not in done]
+        if results:
+            print(f"{len(results)} sites already checked in this run; carrying on.")
     print(f"Checking {len(sites)} sites, {args.jobs} at a time, {args.seconds}s each -> {run_dir}")
 
-    results: list[Result] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = {pool.submit(check_site, url, category, args, run_dir): url for url, category in sites}
-        for future in concurrent.futures.as_completed(futures):
+    def check(url: str, category: str) -> Result:
+        if args.gentle:
+            wait_while_gaming()
+        return check_site(url, category, args, run_dir)
+
+    started = time.monotonic()
+    with open(progress, "a", encoding="utf-8") as saved, \
+            concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        futures = {pool.submit(check, url, category): url for url, category in sites}
+        for count, future in enumerate(concurrent.futures.as_completed(futures), 1):
             result = future.result()
             results.append(result)
-            print(f"  {STATUS_LABEL[result.status]:<28} {slug(result.site):<40} {result.diagnosis[:90]}")
+            saved.write(json.dumps(asdict(result)) + "\n")
+            saved.flush()
+            left = (time.monotonic() - started) / count * (len(sites) - count)
+            print(f"  {count}/{len(sites)} ~{left / 3600:.1f}h left  {STATUS_LABEL[result.status]:<28} "
+                  f"{slug(result.site):<40} {result.diagnosis[:70]}", flush=True)
 
+    results.sort(key=lambda r: order.get(r.site, len(order)))
     (run_dir / "results.json").write_text(json.dumps([asdict(r) for r in results], indent=2), "utf-8")
     previous = None
     if args.compare:
@@ -489,7 +621,7 @@ def main() -> int:
         if previous_file.exists():
             previous = {r["site"]: r["status"] for r in json.loads(previous_file.read_text("utf-8"))}
     report = write_report(run_dir, results, args.label, previous)
-    working = sum(1 for r in results if r.status in (OK, SLOW, PARTIAL))
+    working = sum(1 for r in results if r.status in WORKING)
     css_count: dict[str, int] = {}
     for r in results:
         for key in r.unsupported_css:

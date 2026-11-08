@@ -28,6 +28,27 @@ python tools/sitecheck/sitecheck.py --jobs 8 -- --pref=dom_webgl2_enabled  # pas
 Results go to `tools/sitecheck/out/<label>/`: `report.html` (screenshots and diagnoses) and
 `results.json`.
 
+## Thousands of sites
+
+`big_list.py` builds a catalog from the sites people really visit: Chrome's CrUX top-origins list,
+all of the top 10,000 and a random pick from ranks 10k-50k (15,000 by default). Adult, gambling and
+throwaway-domain sites are left out. Categories are rank buckets, so the report's "By category"
+table shows how Stillwater does on the biggest sites versus the long tail.
+
+```powershell
+python tools/sitecheck/big_list.py                 # -> tools/sitecheck/sites-big.json
+python tools/sitecheck/sitecheck.py --sites tools/sitecheck/sites-big.json --label big --jobs 6 --gentle --compact
+```
+
+This takes about 7 hours with 6 at a time. Each result is saved as it comes in
+(`results.jsonl`), so if the run is stopped, the same command carries on where it left off.
+`--gentle` runs at below-normal CPU priority and checks one site at a time while a full-screen
+program such as a game is in front. `--compact` keeps screenshots as JPEG and logs only for sites
+that don't work (about 80 KB a site). With more than 2,000 sites, the report shows cards only for
+sites that don't work and lists the rest.
+
+Pages that start a download save it inside the test profile, never your Downloads folder.
+
 ## What the statuses mean
 
 | Status | Meaning |

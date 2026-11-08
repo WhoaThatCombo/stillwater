@@ -53,6 +53,8 @@ class Stillwater:
         if "STILLWATER_TEST_SOUND" not in environment:
             environment["STILLWATER_MUTE_AUDIO"] = "1"
         environment["STILLWATER_BACKGROUND_WINDOW"] = "1"
+        # Files a page downloads stay in the test profile, never the user's Downloads folder.
+        environment.setdefault("STILLWATER_DOWNLOAD_DIR", str(Path(profile) / "downloads"))
         if log_file:
             environment["STILLWATER_LOG_FILE"] = str(log_file)
         if slow_script_seconds is not None:
@@ -63,7 +65,8 @@ class Stillwater:
         if headless:
             command.insert(1, "--headless")
         self.process = subprocess.Popen(command, env=environment, stdout=output,
-                                        stderr=subprocess.STDOUT if output else None)
+                                        stderr=subprocess.STDOUT if output else None,
+                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self.session = None
         self.timeouts = {"pageLoad": int(page_load_seconds * 1000), "script": int(script_seconds * 1000)}
 
