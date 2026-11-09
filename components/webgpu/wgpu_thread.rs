@@ -5,9 +5,10 @@
 //! Data and main loop of WebGPU thread.
 
 use std::borrow::Cow;
+use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use std::slice;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use log::{info, warn};
 use paint_api::{CrossProcessPaintApi, WebRenderExternalImageIdManager, WebRenderImageHandlerType};
@@ -143,6 +144,20 @@ impl WGPU {
     }
 
     pub(crate) fn run(&mut self) {
+        // wgpu-core panics when handed an id it does not know. If that ever happens, keep the
+        // WebGPU thread alive: when it dies, every script thread blocked on it panics too and
+        // the page (or the whole browser) goes down with it.
+        while std::panic::catch_unwind(AssertUnwindSafe(|| self.handle_requests())).is_err() {
+            warn!("Recovered from a panic in the WebGPU thread");
+            self.devices.clear_poison();
+        }
+        if let Err(e) = self.script_sender.send(WebGPUMsg::Exit) {
+            warn!("Failed to send WebGPUMsg::Exit to script ({})", e);
+        }
+    }
+
+    /// Handles requests until [`WebGPURequest::Exit`] is received.
+    fn handle_requests(&mut self) {
         loop {
             if let Ok(msg) = self.receiver.recv() {
                 log::trace!("recv: {msg:?}");
@@ -513,14 +528,14 @@ impl WGPU {
                         };
                     },
                     WebGPURequest::DropDevice(device_id) => {
-                        let global = &self.global;
-                        global.device_drop(device_id);
-                        let device_scope = self
-                            .devices
-                            .lock()
-                            .unwrap()
-                            .remove(&device_id)
-                            .expect("Device should not be dropped by this point");
+                        // Only devices that wgpu actually created are in `devices`; dropping an
+                        // unknown id would panic inside wgpu-core.
+                        let Some(device_scope) = self.devices.lock().unwrap().remove(&device_id)
+                        else {
+                            warn!("Ignoring DropDevice for unknown {device_id:?}");
+                            continue;
+                        };
+                        self.global.device_drop(device_id);
                         if let Err(e) = self.script_sender.send(WebGPUMsg::FreeDevice {
                             device_id,
                             pipeline_id: device_scope.pipeline_id,
@@ -613,13 +628,14 @@ impl WGPU {
                                         },
                                     };
                                     // make device lost by removing error scopes stack
-                                    let _ = devices
+                                    // (the scope may already be gone if the device was dropped)
+                                    if let Some(scope) = devices
                                         .lock()
-                                        .unwrap()
+                                        .unwrap_or_else(PoisonError::into_inner)
                                         .get_mut(&device_id)
-                                        .expect("Device should not be dropped by this point")
-                                        .error_scope_stack
-                                        .take();
+                                    {
+                                        scope.error_scope_stack.take();
+                                    }
                                     if let Err(e) = script_sender.send(WebGPUMsg::DeviceLost {
                                         device,
                                         pipeline_id,
@@ -1001,12 +1017,12 @@ impl WGPU {
                     WebGPURequest::PushErrorScope { device_id, filter } => {
                         // <https://www.w3.org/TR/webgpu/#dom-gpudevice-pusherrorscope>
                         let mut devices = self.devices.lock().unwrap();
-                        let device_scope = devices
+                        if let Some(error_scope_stack) = devices
                             .get_mut(&device_id)
-                            .expect("Device should not be dropped by this point");
-                        if let Some(error_scope_stack) = &mut device_scope.error_scope_stack {
+                            .and_then(|scope| scope.error_scope_stack.as_mut())
+                        {
                             error_scope_stack.push(ErrorScope::new(filter));
-                        } // else device is lost
+                        } // else device is lost or unknown
                     },
                     WebGPURequest::DispatchError { device_id, error } => {
                         self.dispatch_error(device_id, error);
@@ -1017,23 +1033,22 @@ impl WGPU {
                     } => {
                         // <https://www.w3.org/TR/webgpu/#dom-gpudevice-poperrorscope>
                         let mut devices = self.devices.lock().unwrap();
-                        let device_scope = devices
+                        let result = if let Some(error_scope_stack) = devices
                             .get_mut(&device_id)
-                            .expect("Device should not be dropped by this point");
-                        let result =
-                            if let Some(error_scope_stack) = &mut device_scope.error_scope_stack {
-                                if let Some(error_scope) = error_scope_stack.pop() {
-                                    Ok(
-                                        // TODO: Do actual selection instead of selecting first error
-                                        error_scope.errors.first().cloned(),
-                                    )
-                                } else {
-                                    Err(PopError::Empty)
-                                }
+                            .and_then(|scope| scope.error_scope_stack.as_mut())
+                        {
+                            if let Some(error_scope) = error_scope_stack.pop() {
+                                Ok(
+                                    // TODO: Do actual selection instead of selecting first error
+                                    error_scope.errors.first().cloned(),
+                                )
                             } else {
-                                // This means the device has been lost.
-                                Err(PopError::Lost)
-                            };
+                                Err(PopError::Empty)
+                            }
+                        } else {
+                            // This means the device has been lost (or was never created).
+                            Err(PopError::Lost)
+                        };
                         if let Err(error) = sender.send(result) {
                             warn!("Error while sending PopErrorScope result: {error}");
                         }
@@ -1288,9 +1303,6 @@ impl WGPU {
                 }
             }
         }
-        if let Err(e) = self.script_sender.send(WebGPUMsg::Exit) {
-            warn!("Failed to send WebGPUMsg::Exit to script ({})", e);
-        }
     }
 
     #[inline]
@@ -1313,9 +1325,10 @@ impl WGPU {
     fn dispatch_error(&mut self, device_id: id::DeviceId, error: Error) {
         log::trace!("Dispatching error for device {:?}: {:?}", device_id, error);
         let mut devices = self.devices.lock().unwrap();
-        let device_scope = devices
-            .get_mut(&device_id)
-            .expect("Device should not be dropped by this point");
+        let Some(device_scope) = devices.get_mut(&device_id) else {
+            warn!("Dropping error for unknown {device_id:?}: {error:?}");
+            return;
+        };
         if let Some(error_scope_stack) = &mut device_scope.error_scope_stack {
             if let Some(error_scope) = error_scope_stack
                 .iter_mut()

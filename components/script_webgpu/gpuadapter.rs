@@ -11,7 +11,7 @@ use malloc_size_of_derive::MallocSizeOf;
 use script_bindings::callback::CallbackContainer;
 use script_bindings::codegen::GenericBindings::EventHandlerBinding::EventHandlerNonNull;
 use script_bindings::codegen::GenericBindings::WebGPUBinding::{
-    GPUAdapterMethods, GPUAdapterWrap, GPUDeviceDescriptor, GPUDeviceLostReason,
+    GPUAdapterMethods, GPUAdapterWrap, GPUDeviceDescriptor,
 };
 use script_bindings::domstring::TracedDOMString;
 use script_bindings::interfaces::{GlobalScopeHelpers, PromiseHelpers};
@@ -340,26 +340,13 @@ where
                 )
             },
             // 3. user agent otherwise cannot fulfill the request
-            (device_id, queue_id, Err(RequestDeviceError::Other(e))) => {
-                // TODO(sagudev): firefox always says operation error,
-                // meanwhile we create "invalid" device that is not invalid in wgpu
-                // causing crashes when one tries to use it
-                // 1. Let device be a new device.
-                let device = GPUDevice::<D>::new(
-                    cx,
-                    &self.global_from_reflector(),
-                    self.channel(),
-                    self,
-                    HandleObject::null(),
-                    Features::default(),
-                    Limits::default(),
-                    device_id,
-                    queue_id,
-                    String::new(),
-                );
-                // 2. Lose the device(device, "unknown").
-                device.lose(GPUDeviceLostReason::Unknown, e);
-                promise.resolve_native(cx, &device);
+            (_, _, Err(RequestDeviceError::Other(e))) => {
+                // The spec resolves with an already-lost device here, but wgpu never
+                // registered these ids, so any later call on such a device (error scopes,
+                // resource creation, drop) would reach wgpu-core with an unknown id and
+                // panic the WebGPU thread. Reject like Firefox does instead.
+                warn!("requestDevice failed: {e}");
+                promise.reject_error(cx, Error::Operation(Some(e)))
             },
         }
     }
