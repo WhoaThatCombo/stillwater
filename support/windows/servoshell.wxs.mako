@@ -59,12 +59,12 @@
                 <RegistryValue Type="string" Value="Stillwater URL"/>
                 <RegistryValue Name="URL Protocol" Type="string" Value=""/>
                 <RegistryValue Key="DefaultIcon" Type="string" Value="[INSTALLDIR]Stillwater.exe,0"/>
-                <RegistryValue Key="shell\open\command" Type="string" Value="&quot;[INSTALLDIR]Stillwater.exe&quot; &quot;%1&quot;"/>
+                <RegistryValue Key="shell\open\command" Type="string" Value="&quot;[INSTALLDIR]Stillwater.exe&quot; -- &quot;%1&quot;"/>
               </RegistryKey>
               <RegistryKey Root="HKCU" Key="Software\Classes\StillwaterHTML">
                 <RegistryValue Type="string" Value="Stillwater HTML Document"/>
                 <RegistryValue Key="DefaultIcon" Type="string" Value="[INSTALLDIR]Stillwater.exe,0"/>
-                <RegistryValue Key="shell\open\command" Type="string" Value="&quot;[INSTALLDIR]Stillwater.exe&quot; &quot;%1&quot;"/>
+                <RegistryValue Key="shell\open\command" Type="string" Value="&quot;[INSTALLDIR]Stillwater.exe&quot; -- &quot;%1&quot;"/>
               </RegistryKey>
               <RegistryValue Root="HKCU" Key="Software\Stillwater" Name="InstallDir" Type="string" Value="[INSTALLDIR]"/>
             </Component>

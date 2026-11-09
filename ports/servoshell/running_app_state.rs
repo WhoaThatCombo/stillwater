@@ -929,7 +929,14 @@ impl WebViewDelegate for RunningAppState {
             self.window_for_webview(&webview).set_needs_update();
             return;
         }
-        let _ = &webview;
+        // Web pages can't send a tab (or a popup) to the browser's own pages: only the user
+        // and those pages themselves can.
+        if request.url.scheme() == "servo" &&
+            webview.url().is_some_and(|url| !matches!(url.scheme(), "servo" | "resource"))
+        {
+            request.deny();
+            return;
+        }
         request.allow();
     }
     fn screen_geometry(&self, webview: WebView) -> Option<servo::ScreenGeometry> {

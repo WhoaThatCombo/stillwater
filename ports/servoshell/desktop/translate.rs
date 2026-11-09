@@ -356,7 +356,7 @@ fn installed(pair: &str) -> bool {
 }
 
 fn curl() -> Command {
-    let mut command = Command::new("curl.exe");
+    let mut command = Command::new(crate::desktop::updater::system_program("curl.exe"));
     command.args([
         "--silent",
         "--show-error",

@@ -43,6 +43,13 @@ impl ProtocolHandler for ServoProtocolHandler {
         context: &FetchContext,
     ) -> Pin<Box<dyn Future<Output = Response> + Send>> {
         let url = request.current_url();
+        // The browser's own pages can't be framed by, or reached through a redirect from,
+        // web pages.
+        if ResourceProtocolHandler::is_framed_or_redirected(request) {
+            return Box::pin(std::future::ready(Response::network_error(
+                NetworkError::ResourceLoadError("Not available to web pages".to_owned()),
+            )));
+        }
 
         match url.path() {
             // The Zen-style sidebar UI: `servo:sidebar/<file>`.

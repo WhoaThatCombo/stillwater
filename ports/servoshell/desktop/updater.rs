@@ -22,6 +22,20 @@ use winit::event_loop::EventLoopProxy;
 use crate::desktop::diagnostics;
 use crate::desktop::event_loop::AppEvent;
 
+/// The full path of a program that comes with Windows. A bare name would be looked up in
+/// Stillwater's own folder first, where a downloaded file of that name could be waiting.
+pub(crate) fn system_program(name: &str) -> std::path::PathBuf {
+    let root = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+    let path = match name {
+        "explorer.exe" => root.join(name),
+        "powershell.exe" => root.join("System32/WindowsPowerShell/v1.0").join(name),
+        _ => root.join("System32").join(name),
+    };
+    if path.is_file() { path } else { name.into() }
+}
+
 /// This build's Stillwater version. Keep in sync with `support/windows/*.wxs*` and the
 /// `ProductVersion` in `ports/servoshell/Cargo.toml` when releasing.
 pub(crate) const CURRENT_VERSION: &str = "0.8.2";
@@ -58,7 +72,7 @@ fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
 }
 
 fn curl() -> Command {
-    let mut command = Command::new("curl.exe");
+    let mut command = Command::new(crate::desktop::updater::system_program("curl.exe"));
     command.args([
         "--silent",
         "--show-error",
@@ -279,7 +293,7 @@ pub(crate) fn install(update: UpdateInfo, proxy: EventLoopProxy<AppEvent>) {
                 script
             };
             diagnostics::log(format!("update: starting installer: {script}"));
-            let mut command = Command::new("powershell.exe");
+            let mut command = Command::new(crate::desktop::updater::system_program("powershell.exe"));
             command.args([
                 "-NoProfile",
                 "-NonInteractive",

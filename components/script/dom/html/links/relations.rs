@@ -551,6 +551,11 @@ pub(crate) fn download_hyperlink(subject: &Element) -> bool {
         return false;
     }
 
+    // A page the user has never interacted with can't save files by itself.
+    if !document.window().has_sticky_activation() {
+        return true;
+    }
+
     // Step 5. Let navigation be subject's node navigable.
     // Step 6. Let filename be the value of subject's download attribute.
     let filename = subject

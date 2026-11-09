@@ -51,7 +51,7 @@ pub(crate) fn issue_url(site: &Url, errors: &[String]) -> String {
 
 /// Whether Windows is set to open https links with Stillwater.
 fn stillwater_is_default_browser() -> bool {
-    let output = Command::new("reg")
+    let output = Command::new(crate::desktop::updater::system_program("reg.exe"))
         .args([
             "query",
             r"HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice",

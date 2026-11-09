@@ -407,7 +407,7 @@ impl Sidebar {
         match self.reveal_target.take() {
             Some(page) if page.url().is_some_and(|url| is_settings_url(&url)) => {
                 page.evaluate_javascript(
-                    format!("window.stillwaterSettings && window.stillwaterSettings.revealPassword({id}, {password})"),
+                    format!("location.protocol === 'servo:' && location.pathname === 'settings' && window.top === window && window.stillwaterSettings.revealPassword({id}, {password})"),
                     |_| {},
                 );
             },
@@ -443,7 +443,7 @@ impl Sidebar {
         for (page, _) in &self.settings_pages {
             if page.url().is_some_and(|url| is_settings_url(&url)) {
                 page.evaluate_javascript(
-                    format!("window.stillwaterSettings && window.stillwaterSettings.{script}"),
+                    format!("location.protocol === 'servo:' && location.pathname === 'settings' && window.top === window && window.stillwaterSettings.{script}"),
                     |_| {},
                 );
             }

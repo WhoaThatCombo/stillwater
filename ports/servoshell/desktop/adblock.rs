@@ -576,7 +576,7 @@ fn publish(engine: Engine) {
 /// Download `url` to `path` (via a temporary file, so a failure keeps the old copy).
 fn download(url: &str, path: &std::path::Path) -> Result<(), String> {
     let partial = path.with_extension("part");
-    let mut command = Command::new("curl.exe");
+    let mut command = Command::new(crate::desktop::updater::system_program("curl.exe"));
     command.args([
         "--silent",
         "--show-error",

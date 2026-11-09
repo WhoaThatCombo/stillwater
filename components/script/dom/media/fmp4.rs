@@ -49,7 +49,7 @@ pub(crate) fn read_box(data: &[u8], offset: usize) -> Result<Option<BoxRef>, ()>
     if size < header_len as u64 {
         return Err(());
     }
-    let end = offset as u64 + size;
+    let end = (offset as u64).checked_add(size).ok_or(())?;
     if end > data.len() as u64 {
         return Ok(None);
     }
@@ -60,6 +60,9 @@ pub(crate) fn read_box(data: &[u8], offset: usize) -> Result<Option<BoxRef>, ()>
         payload: offset + header_len..end,
     }))
 }
+
+/// More samples than any real fragment has in one run; a run claiming more is refused.
+const MAX_SAMPLES_PER_RUN: usize = 100_000;
 
 /// The complete child boxes of the payload `range` of `data`.
 pub(crate) fn children(data: &[u8], range: Range<usize>) -> Vec<BoxRef> {
@@ -283,7 +286,9 @@ fn rescale_movie_times(trak: &[u8], from: u32, to: u32) -> Vec<u8> {
     for child in children(trak, outer.payload.clone()) {
         match &child.kind {
             b"tkhd" => {
-                let version = trak[child.payload.start];
+                let Some(&version) = trak.get(child.payload.start) else {
+                    continue;
+                };
                 if version == 1 {
                     let at = child.payload.start + 4 + 24;
                     if let Some(value) = be_u64(trak, at) {
@@ -302,9 +307,12 @@ fn rescale_movie_times(trak: &[u8], from: u32, to: u32) -> Vec<u8> {
                     if &elst.kind != b"elst" {
                         continue;
                     }
-                    let version = trak[elst.payload.start];
-                    let count = be_u32(trak, elst.payload.start + 4).unwrap_or(0) as usize;
+                    let Some(&version) = trak.get(elst.payload.start) else {
+                        continue;
+                    };
                     let entry_len = if version == 1 { 20 } else { 12 };
+                    let count = (be_u32(trak, elst.payload.start + 4).unwrap_or(0) as usize)
+                        .min(elst.payload.len() / entry_len);
                     for index in 0..count {
                         let at = elst.payload.start + 8 + index * entry_len;
                         if version == 1 {
@@ -576,13 +584,23 @@ fn parse_trafs<'a>(
             let mut offset = next_data;
             if flags & 0x01 != 0 {
                 let relative = be_u32(data, at)? as i32;
-                offset = (traf_base as i64 + relative as i64) as usize;
+                offset = usize::try_from(traf_base as i64 + relative as i64).ok()?;
                 at += 4;
             }
             let mut first_flags = None;
             if flags & 0x04 != 0 {
                 first_flags = Some(be_u32(data, at)?);
                 at += 4;
+            }
+            // Each sample needs its fields in the box, or at least a byte of data.
+            let per_sample = (flags >> 8 & 0xf).count_ones() as usize * 4;
+            let room = if per_sample > 0 {
+                data.len().saturating_sub(at) / per_sample
+            } else {
+                data.len()
+            };
+            if count as usize > room.min(MAX_SAMPLES_PER_RUN) {
+                return None;
             }
             for index in 0..count {
                 let mut sample = Sample {
@@ -611,7 +629,7 @@ fn parse_trafs<'a>(
                     sample.composition_offset = be_u32(data, at)?;
                     at += 4;
                 }
-                let end = offset + sample.size as usize;
+                let end = offset.checked_add(sample.size as usize)?;
                 if end > data.len() {
                     return None;
                 }

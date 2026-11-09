@@ -44,6 +44,7 @@ use crate::dom::bindings::codegen::Bindings::ConsoleBinding::consoleMethods;
 #[cfg(feature = "devtools")]
 use crate::dom::bindings::error::report_pending_exception;
 #[cfg(feature = "devtools")]
+use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::globalscope::GlobalScope;
@@ -164,6 +165,24 @@ impl Console {
     }
 
     fn send_to_embedder(global: &GlobalScope, level: ConsoleLogLevel, message: String) {
+        // Stillwater's settings page and its password script talk to the browser through
+        // console messages. The embedder only learns which tab a message came from, so the
+        // sender is checked here: a web page, a frame, a worker or a document the tab has
+        // already left must not be able to speak for them.
+        const SETTINGS_PREFIX: &str = "__stillwater_settings__";
+        const PASSWORDS_PREFIX: &str = "__stillwater_pw__";
+        let for_settings = message.starts_with(SETTINGS_PREFIX);
+        if for_settings || message.starts_with(PASSWORDS_PREFIX) {
+            let trusted = global.downcast::<crate::dom::window::Window>().is_some_and(|window| {
+                let url = global.get_url();
+                window.is_top_level() &&
+                    window.Document().is_fully_active() &&
+                    (!for_settings || (url.scheme() == "servo" && url.path() == "settings"))
+            });
+            if !trusted {
+                return;
+            }
+        }
         global.send_to_embedder(EmbedderMsg::ShowConsoleApiMessage(
             global.webview_id(),
             level,

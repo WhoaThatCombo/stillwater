@@ -15,7 +15,7 @@ use std::pin::Pin;
 use flate2::read::GzDecoder;
 use headers::{ContentType, HeaderMapExt};
 use servo::protocol_handler::{
-    DoneChannel, FILE_CHUNK_SIZE, FetchContext, NetworkError, ProtocolHandler, RelativePos,
+    Destination, DoneChannel, FILE_CHUNK_SIZE, FetchContext, NetworkError, ProtocolHandler, RelativePos,
     Request, ResourceFetchTiming, Response, ResponseBody,
 };
 use tokio::sync::mpsc::unbounded_channel;
@@ -103,6 +103,17 @@ impl ResourceProtocolHandler {
     }
 }
 
+impl ResourceProtocolHandler {
+    /// Whether `request` loads an internal page into a frame, or arrived by a redirect.
+    pub(crate) fn is_framed_or_redirected(request: &Request) -> bool {
+        request.url_list.len() > 1 ||
+            matches!(
+                request.destination,
+                Destination::IFrame | Destination::Frame | Destination::Object | Destination::Embed
+            )
+    }
+}
+
 impl ProtocolHandler for ResourceProtocolHandler {
     fn load(
         &self,
@@ -111,6 +122,13 @@ impl ProtocolHandler for ResourceProtocolHandler {
         context: &FetchContext,
     ) -> Pin<Box<dyn Future<Output = Response> + Send>> {
         let url = request.current_url();
+        // The browser's own pages can't be framed by, or reached through a redirect from,
+        // web pages.
+        if ResourceProtocolHandler::is_framed_or_redirected(request) {
+            return Box::pin(std::future::ready(Response::network_error(
+                NetworkError::ResourceLoadError("Not available to web pages".to_owned()),
+            )));
+        }
 
         // TODO: Check referrer.
         //       We unexpectedly get `NoReferrer` for all requests from the newtab page.

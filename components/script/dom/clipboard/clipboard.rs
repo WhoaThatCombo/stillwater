@@ -78,6 +78,9 @@ impl Callback for RepresentationDataPromiseRejectionHandler {
     }
 }
 
+/// Whether `navigator.clipboard.read()` and `readText()` hand pages the system clipboard.
+const PAGES_MAY_READ_CLIPBOARD: bool = false;
+
 #[dom_struct]
 pub(crate) struct Clipboard {
     event_target: EventTarget,
@@ -111,6 +114,13 @@ impl ClipboardMethods<crate::DomTypeHolder> for Clipboard {
         // Step 3.2.1 Queue a global task on the permission task source, given realm’s global object,
         // to reject p with "NotAllowedError" DOMException in realm.
         // Step 3.2.2 Abort these steps.
+
+        // Stillwater has no clipboard permission prompt yet, so pages can't read the clipboard
+        // (pasting with Ctrl+V and writing to the clipboard still work).
+        if !PAGES_MAY_READ_CLIPBOARD {
+            p.reject_error(realm, Error::NotAllowed(None));
+            return p;
+        }
 
         // Step 3.3 Let data be a copy of the system clipboard data.
         let window = global.as_window();

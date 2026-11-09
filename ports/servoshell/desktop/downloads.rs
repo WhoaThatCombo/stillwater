@@ -797,7 +797,7 @@ fn mark_as_downloaded(path: &Path, url: &str) {
 
 fn open_file(path: &Path) {
     #[cfg(windows)]
-    let result = std::process::Command::new("explorer.exe").arg(path).spawn();
+    let result = std::process::Command::new(crate::desktop::updater::system_program("explorer.exe")).arg(path).spawn();
     #[cfg(not(windows))]
     let result = std::process::Command::new("xdg-open").arg(path).spawn();
     if let Err(error) = result {
@@ -810,11 +810,11 @@ fn show_in_folder(path: &Path) {
     let result = {
         use std::os::windows::process::CommandExt;
         if path.exists() {
-            std::process::Command::new("explorer.exe")
+            std::process::Command::new(crate::desktop::updater::system_program("explorer.exe"))
                 .raw_arg(format!("/select,\"{}\"", path.display()))
                 .spawn()
         } else {
-            std::process::Command::new("explorer.exe")
+            std::process::Command::new(crate::desktop::updater::system_program("explorer.exe"))
                 .arg(path.parent().unwrap_or(path))
                 .spawn()
         }
