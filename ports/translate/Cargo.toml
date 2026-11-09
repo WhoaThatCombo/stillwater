@@ -1,0 +1,23 @@
+[package]
+name = "stillwater-translate"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+publish = false
+rust-version.workspace = true
+repository.workspace = true
+description = "Stillwater's on-device page translation: runs Firefox Translations' models in Rust."
+
+[lib]
+name = "stillwater_translate"
+path = "lib.rs"
+
+[[bin]]
+name = "sw-translate"
+path = "main.rs"
+
+[dependencies]
+icu_normalizer = "2.1"
+log = { workspace = true }
+rayon = { workspace = true }
