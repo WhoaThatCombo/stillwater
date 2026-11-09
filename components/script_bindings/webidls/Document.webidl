@@ -241,6 +241,6 @@ typedef (WindowProxy or Element or HTMLCollection) NamedPropertyValue;
 
 // https://wicg.github.io/sanitizer-api/#sanitizer-api
 partial interface Document {
-  [Throws]
+  [Throws, Pref="dom_sanitizer_enabled"]
   static Document parseHTML(DOMString html, optional SetHTMLOptions options = {});
 };

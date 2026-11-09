@@ -174,7 +174,7 @@ partial interface Element {
 
 // https://wicg.github.io/sanitizer-api/#sanitizer-api
 partial interface Element {
-  [CEReactions, Throws] undefined setHTML(DOMString html, optional SetHTMLOptions options = {});
+  [CEReactions, Throws, Pref="dom_sanitizer_enabled"] undefined setHTML(DOMString html, optional SetHTMLOptions options = {});
 };
 
 // https://drafts.csswg.org/web-animations-1/#extensions-to-the-element-interface

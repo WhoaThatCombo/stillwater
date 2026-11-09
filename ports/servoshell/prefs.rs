@@ -67,6 +67,23 @@ pub(crate) static STILLWATER_EXTRA_PREFS: &[&str] = &[
     "dom_web_animations_enabled",
 ];
 
+/// Stillwater: entries of [`EXPERIMENTAL_PREFS`] that are *not* turned on at startup, because
+/// browsing doesn't need them and they only add attack surface. They stay in
+/// [`EXPERIMENTAL_PREFS`] (so `servo:experimental-preferences` and
+/// `--enable-experimental-web-platform-features` still cover them) and can be turned on
+/// explicitly with `--pref=<name>=true` or prefs.json.
+pub(crate) static STILLWATER_DEFAULT_OFF_PREFS: &[&str] = &[
+    // registerProtocolHandler(): the embedder never answers the request, so it only lets a
+    // page queue up scheme registrations nothing shows the user.
+    "dom_navigator_protocol_handlers_enabled",
+    // Notification API: servoshell implements no show_notification and the only permission
+    // prompt is the generic debug-style dialog, so it can never work, only nag.
+    "dom_notification_enabled",
+    // Sanitizer API (Element.setHTML): unfinished; a page that trusts an incomplete
+    // sanitizer instead of its own fallback (DOMPurify etc.) could be opened to XSS.
+    "dom_sanitizer_enabled",
+];
+
 #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
 #[derive(Clone)]
 pub(crate) struct ServoShellPreferences {

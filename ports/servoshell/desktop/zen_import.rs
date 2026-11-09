@@ -443,10 +443,40 @@ fn decrypt_pbe(item: &[u8], global_salt: &[u8]) -> Option<Vec<u8>> {
     aes256_cbc_decrypt(&key, &iv, top.get(1)?.1)
 }
 
+/// A new, randomly named folder in the temp directory for copies of Zen's databases. It is
+/// removed, with everything in it, when this goes away, also when an import fails part-way.
+struct TempCopyDir(PathBuf);
+
+impl TempCopyDir {
+    fn new() -> Result<Self, &'static str> {
+        use std::hash::{BuildHasher, Hasher};
+        for _ in 0..4 {
+            // `RandomState` is seeded from the system's random number source.
+            let random = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
+            let dir = std::env::temp_dir().join(format!("stillwater-zen-{random:016x}"));
+            // `create_dir` fails if the folder already exists, so we never use one made by
+            // someone else.
+            if std::fs::create_dir(&dir).is_ok() {
+                return Ok(Self(dir));
+            }
+        }
+        Err("A temporary folder for reading Zen's data couldn't be created.")
+    }
+}
+
+impl Drop for TempCopyDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// The keys in `key4.db`, by key id.
 fn read_keys(profile: &Path) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
     // Read a copy: Zen may have the database open.
-    let copy = std::env::temp_dir().join(format!("stillwater-zen-key4-{}.db", std::process::id()));
+    let temp = TempCopyDir::new()?;
+    let copy = temp.0.join("key4.db");
     std::fs::copy(profile.join("key4.db"), &copy)
         .map_err(|_| "Zen's key store (key4.db) couldn't be read.")?;
     let result = (|| {
@@ -483,7 +513,7 @@ fn read_keys(profile: &Path) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
             .filter_map(|(item, id)| Some((id, decrypt_pbe(&item, &salt)?)))
             .collect())
     })();
-    let _ = std::fs::remove_file(&copy);
+    drop(temp);
     result.map_err(str::to_owned)
 }
 
@@ -566,10 +596,9 @@ fn read_places(profile: &Path) -> Result<ZenPlaces, String> {
     }
     // Copy the database and its write-ahead log (recent changes while Zen runs) and read the
     // copy: Zen keeps the original open and locked.
-    let copy = std::env::temp_dir().join(format!("stillwater-zen-places-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&copy);
+    let temp = TempCopyDir::new()?;
+    let copy = &temp.0;
     let result = (|| {
-        std::fs::create_dir_all(&copy).map_err(|_| "Zen's history couldn't be copied.")?;
         std::fs::copy(&source, copy.join("places.sqlite"))
             .map_err(|_| "Zen's bookmarks and history (places.sqlite) couldn't be read.")?;
         let wal = profile.join("places.sqlite-wal");
@@ -580,7 +609,7 @@ fn read_places(profile: &Path) -> Result<ZenPlaces, String> {
             .map_err(|_| "Zen's bookmarks and history couldn't be opened.")?;
         read_places_from(&connection).map_err(|_| "Zen's bookmarks and history couldn't be read.")
     })();
-    let _ = std::fs::remove_dir_all(&copy);
+    drop(temp);
     result.map_err(str::to_owned)
 }
 

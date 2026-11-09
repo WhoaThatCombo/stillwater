@@ -34,6 +34,7 @@ use servo::{
     JSValue, RequestDecision, UserContentManager, UserScript, WebResourceRequest, WebView,
     WebViewId,
 };
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::desktop::diagnostics;
@@ -56,7 +57,15 @@ const LISTS: &[(&str, &str, bool)] = &[
 ];
 
 /// uBlock Origin's scriptlets converted for adblock-rust (tools/adblock/build-scriptlets.mjs).
+/// They're GPLv3, so they're downloaded rather than built in.
 const SCRIPTLETS_URL: &str = "https://whoathatcombo.github.io/stillwater/adblock/scriptlets.json";
+
+/// SHA-256 of the one scriptlets.json this build accepts. Its contents are JavaScript injected
+/// into every page, so any other file (from the site, a cache or a test override) is refused.
+/// To update the scriptlets for a release: rebuild with
+/// `node tools/adblock/build-scriptlets.mjs <uBlock Origin checkout> <gh-pages>/adblock/scriptlets.json`,
+/// publish it to gh-pages, then put the new file's SHA-256 here.
+const SCRIPTLETS_SHA256: &str = "6c7ed3cbb05437525c870ae8e07368fbb6cf61b99b9d206eab21b9cb599d6e94";
 
 /// How often to download fresh lists.
 const REFRESH_AFTER: Duration = Duration::from_secs(4 * 24 * 60 * 60);
@@ -487,14 +496,28 @@ fn load_engine() {
     let cache = dir.join(format!("engine-{}.dat", ENGINE_FORMAT));
     let scriptlets = dir.join("scriptlets.json");
 
+    // Whether a copy of the pinned scriptlets is on disk. Pinned scriptlets never go stale, so
+    // they're only downloaded when there's no good copy.
+    let mut have_scriptlets = false;
     let started = std::time::Instant::now();
     if let Ok(bytes) = std::fs::read(&cache) {
         let mut engine = Engine::default();
         match engine.deserialize(&bytes) {
             Ok(()) => {
-                use_scriptlets(&mut engine, &scriptlets);
+                have_scriptlets = use_scriptlets(&mut engine, &scriptlets);
                 publish(engine);
                 diagnostics::log(format!("adblock: cached engine loaded in {:?}", started.elapsed()));
+                // No good scriptlets yet: block with the engine now, add them once fetched.
+                if !have_scriptlets {
+                    fetch_scriptlets(&scriptlets);
+                    let mut engine = Engine::default();
+                    if engine.deserialize(&bytes).is_ok() &&
+                        use_scriptlets(&mut engine, &scriptlets)
+                    {
+                        have_scriptlets = true;
+                        publish(engine);
+                    }
+                }
             },
             Err(error) => diagnostics::log(format!("adblock: cached engine unusable: {error:?}")),
         }
@@ -528,15 +551,8 @@ fn load_engine() {
         filter_set.add_filter_list(text, options);
         loaded += 1;
     }
-    // STILLWATER_ADBLOCK_SCRIPTLETS: use a local scriptlets.json (testing a new conversion).
-    let fetched = match std::env::var_os("STILLWATER_ADBLOCK_SCRIPTLETS") {
-        Some(local) => std::fs::copy(local, &scriptlets)
-            .map(|_| ())
-            .map_err(|error| error.to_string()),
-        None => download(SCRIPTLETS_URL, &scriptlets),
-    };
-    if let Err(error) = fetched {
-        diagnostics::log(format!("adblock: couldn't download scriptlets: {error}"));
+    if !have_scriptlets {
+        fetch_scriptlets(&scriptlets);
     }
     if loaded == 0 {
         diagnostics::log("adblock: no filter lists available");
@@ -557,13 +573,49 @@ fn load_engine() {
 /// Bump when the cached engine format changes (it's tied to the adblock crate version).
 const ENGINE_FORMAT: &str = "0.13";
 
-fn use_scriptlets(engine: &mut Engine, path: &std::path::Path) {
-    let resources = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Vec<Resource>>(&text).ok());
-    match resources {
-        Some(resources) => engine.use_resources(resources),
-        None => diagnostics::log("adblock: no scriptlets yet"),
+/// Download the scriptlets (or copy `STILLWATER_ADBLOCK_SCRIPTLETS`, a local file for tests).
+/// Either way `use_scriptlets` checks them against the pinned hash before they're used.
+fn fetch_scriptlets(path: &std::path::Path) {
+    let fetched = match std::env::var_os("STILLWATER_ADBLOCK_SCRIPTLETS") {
+        Some(local) => std::fs::copy(local, path)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        None => download(SCRIPTLETS_URL, path),
+    };
+    if let Err(error) = fetched {
+        diagnostics::log(format!("adblock: couldn't download scriptlets: {error}"));
+    }
+}
+
+/// Give the engine the scriptlets at `path` if they're exactly the pinned file. Any other file
+/// is deleted and blocking runs without scriptlets. Returns whether they were used.
+fn use_scriptlets(engine: &mut Engine, path: &std::path::Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        diagnostics::log("adblock: no scriptlets yet");
+        return false;
+    };
+    let hash: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    if hash != SCRIPTLETS_SHA256 {
+        let _ = std::fs::remove_file(path);
+        diagnostics::log(format!(
+            "adblock: scriptlets.json has SHA-256 {hash}, expected {SCRIPTLETS_SHA256}; \
+             deleted it, running without scriptlets"
+        ));
+        return false;
+    }
+    match serde_json::from_slice::<Vec<Resource>>(&bytes) {
+        Ok(resources) => {
+            diagnostics::log(format!("adblock: using {} pinned scriptlets", resources.len()));
+            engine.use_resources(resources);
+            true
+        },
+        Err(error) => {
+            diagnostics::log(format!("adblock: scriptlets unusable: {error}"));
+            false
+        },
     }
 }
 
@@ -584,6 +636,13 @@ fn download(url: &str, path: &std::path::Path) -> Result<(), String> {
         "--location",
         "--max-time",
         "120",
+        // HTTPS only, redirects included, and no list is anywhere near 64 MB.
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--max-filesize",
+        "67108864",
         "--user-agent",
         "Stillwater-Adblock",
         "--output",

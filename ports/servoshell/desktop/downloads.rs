@@ -57,6 +57,27 @@ const EXECUTABLE_EXTENSIONS: &[&str] = &[
     "vbs",
     "wsf",
     "wsh",
+    "pif",
+    "scf",
+    "url",
+    "msc",
+    "wsc",
+    "sct",
+    "chm",
+    "application",
+    "appref-ms",
+    "settingcontent-ms",
+    "library-ms",
+    "search-ms",
+    "diagcab",
+    "inf",
+    "iso",
+    "img",
+    "vhd",
+    "vhdx",
+    "xll",
+    "py",
+    "gadget",
 ];
 
 pub(crate) type SharedDownloads = Rc<RefCell<Downloads>>;
@@ -541,7 +562,9 @@ impl Downloads {
         servo: &Servo,
         webview: Option<WebViewId>,
     ) {
-        let key: u64 = argument.parse().unwrap_or(0);
+        // `<key>` or, for `dl-open` after the panel's warning, `<key>\tconfirmed`.
+        let (key, flag) = argument.split_once('\t').unwrap_or((argument, ""));
+        let key: u64 = key.parse().unwrap_or(0);
         match command {
             "dl-cancel" => {
                 if let Some(handle) = self.handles.get(&key) {
@@ -577,8 +600,13 @@ impl Downloads {
                 if let Some(item) = self.items.iter().find(|item| item.key == key) &&
                     item.state == State::Done
                 {
-                    // Only on the user's explicit request (the panel asks first for programs).
-                    open_file(&item.path);
+                    // Only on the user's explicit request. Files that can run programs open only
+                    // once the user has said yes to the panel's warning.
+                    if is_executable(&item.path) && flag != "confirmed" {
+                        warn!("Not opening {} without confirmation", item.path.display());
+                    } else {
+                        open_file(&item.path);
+                    }
                 }
             },
             "dl-show" => {
@@ -681,6 +709,14 @@ fn sanitize_file_name(name: &str, mime_type: Option<&str>) -> String {
             '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
             c if c.is_control() => '_',
             c => c,
+        })
+        // Drop the invisible text-direction marks, which can make `photo\u{202E}gpj.exe`
+        // look like `photoexe.jpg`.
+        .filter(|&c| {
+            !matches!(
+                c,
+                '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}'
+            )
         })
         .collect();
     name = name.trim().trim_end_matches(['.', ' ']).to_owned();

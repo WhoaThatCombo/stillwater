@@ -123,6 +123,42 @@ fn host_of(origin: &str) -> String {
         .unwrap_or_else(|| origin.to_owned())
 }
 
+/// A site's name for the save offer, with enough detail to tell look-alike sites apart: the
+/// full host (no `www.` stripping), the port when it isn't the usual one, and `http://` in
+/// front of sites that aren't secure.
+fn offer_host_of(origin: &str) -> String {
+    let Ok(url) = Url::parse(origin) else {
+        return origin.to_owned();
+    };
+    let host = url.host_str().unwrap_or(origin);
+    let host = match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    };
+    if url.scheme() == "https" {
+        host
+    } else {
+        format!("http://{host} (not secure)")
+    }
+}
+
+/// Whether saved logins may be filled in as soon as the page shows a form. Only secure pages
+/// qualify: on plain `http:` a network attacker could add a form to the page and collect the
+/// filled-in password. Pages on this computer (`localhost` and loopback addresses) count as
+/// secure. Other `http:` pages are filled only when the user picks a login in the sidebar.
+fn fills_on_load(url: &Url) -> bool {
+    match url.scheme() {
+        "https" => true,
+        "http" => match url.host() {
+            Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
 impl Passwords {
     pub(crate) fn new(user_content_manager: &UserContentManager) -> Self {
         let script = Rc::new(UserScript::new(
@@ -220,13 +256,17 @@ impl Passwords {
 
     /// A message from the page script (`MESSAGE_PREFIX` already removed).
     pub(crate) fn on_page_message(&mut self, webview: &WebView, payload: &str) {
-        let Some(origin) = webview.url().as_ref().and_then(origin_of) else {
+        let Some(url) = webview.url() else {
+            return;
+        };
+        let Some(origin) = origin_of(&url) else {
             return;
         };
         let (kind, data) = payload.split_once('\t').unwrap_or((payload, ""));
         match kind {
-            // The page shows a sign-in form: fill it if there's exactly one saved login.
-            "form" if self.autofill => {
+            // The page shows a sign-in form: fill it if there's exactly one saved login (on
+            // secure pages only, see `fills_on_load`).
+            "form" if self.autofill && fills_on_load(&url) => {
                 let mut logins = self.logins_for(&origin);
                 if let (Some(login), None) = (logins.next(), logins.next()) {
                     fill(webview, login, false);
@@ -416,7 +456,7 @@ impl Passwords {
             "autofill": self.autofill,
             "problem": self.problem,
             "offer": self.offer.as_ref().map(|offer| json!({
-                "host": host_of(&offer.origin),
+                "host": offer_host_of(&offer.origin),
                 "username": offer.username,
                 "update": offer.replaces.is_some(),
             })),

@@ -713,9 +713,50 @@ function render() {
   $("forward").disabled = !state.canGoForward;
   $("compact").textContent = state.compact ? "" : "";
   document.body.classList.toggle("compact", state.compact);
-  if (document.activeElement !== url) {
-    url.value = state.url === "servo:newtab" ? "" : state.url;
+  if (document.activeElement !== url) showUrlHost();
+  syncPlaceholder();
+}
+
+// The address to edit: the page's full URL (empty on the new tab page).
+function fullUrl() {
+  return state.url === "servo:newtab" ? "" : state.url;
+}
+
+// What the address bar shows while it isn't being edited: only the site's host, so that a
+// long `https://bank.com.evil.io/…` or `https://bank.com@evil.io/` can't pass for the real
+// site in the narrow sidebar. `https:` is left out, plain `http://` is always shown, and the
+// user name/password part of a URL never is. Internal pages show as before.
+function hostForDisplay(text) {
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch (_) {
+    return text;
   }
+  if (!parsed.host) return text;
+  if (parsed.protocol === "https:") return parsed.host;
+  if (parsed.protocol === "http:") return `http://${parsed.host}`;
+  return text;
+}
+
+// Whether the field shows `hostForDisplay` rather than text to edit.
+let urlShowsHost = false;
+
+function showUrlHost() {
+  const host = hostForDisplay(fullUrl());
+  urlShowsHost = host !== fullUrl();
+  // The left-to-right marks keep `[::1]`-style hosts in order in the right-to-left field.
+  url.value = urlShowsHost ? `\u200E${host}\u200E` : host;
+  urlbar.classList.toggle("shows-host", urlShowsHost);
+  syncPlaceholder();
+}
+
+// Editing starts from the full URL.
+function showUrlForEditing() {
+  if (!urlShowsHost) return;
+  urlShowsHost = false;
+  urlbar.classList.remove("shows-host");
+  url.value = fullUrl();
   syncPlaceholder();
 }
 
@@ -747,8 +788,21 @@ function syncPlaceholder() {
   url.parentElement.classList.toggle("has-value", url.value.length > 0);
 }
 url.addEventListener("input", syncPlaceholder);
-url.addEventListener("focus", () => urlbar.classList.add("focused"));
-url.addEventListener("blur", () => urlbar.classList.remove("focused"));
+url.addEventListener("focus", () => {
+  urlbar.classList.add("focused");
+  if (urlShowsHost) {
+    showUrlForEditing();
+    if (url.value) url.select();
+  }
+});
+url.addEventListener("blur", () => {
+  urlbar.classList.remove("focused");
+  // Checked once the focus has moved. Still the focused element means only the window lost
+  // focus, so keep what the user typed.
+  setTimeout(() => {
+    if (document.activeElement !== url) showUrlHost();
+  }, 0);
+});
 url.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && url.value.trim()) {
     send("go", url.value.trim());

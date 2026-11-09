@@ -211,6 +211,13 @@ button {
   font: inherit;
 }
 
+/* Showing just the host: when it's too long, cut it on the left so the end of the host (the
+   site's own domain, e.g. `evil.io` in `bank.com.evil.io`) stays visible. */
+#urlbar.shows-host #url {
+  direction: rtl;
+  text-align: left;
+}
+
 /* ---- Current workspace header (zen-current-workspace-indicator) ---- */
 #workspace-header {
   display: flex;

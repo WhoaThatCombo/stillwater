@@ -5,8 +5,9 @@
 //! Stillwater's auto-updater. On launch it asks GitHub for the newest release of
 //! WhoaThatCombo/stillwater (pre-releases included). If it's newer than this build, the
 //! sidebar offers an update. Installing downloads `Stillwater-Setup*.exe`, checks it against
-//! the release's `.sha256` file, quits Stillwater, runs the setup with `/passive` and starts
-//! the updated browser again.
+//! the release's `.sha256` file and its `.exe.sig` signature (made with the Stillwater release
+//! key, see `tools/release/sign.py`), quits Stillwater, runs the setup with `/passive` and
+//! starts the updated browser again.
 //!
 //! Downloads use Windows' built-in `curl.exe` (Windows 10 1803 and later).
 
@@ -43,6 +44,17 @@ pub(crate) const CURRENT_VERSION: &str = "0.8.2";
 const RELEASES_API: &str =
     "https://api.github.com/repos/WhoaThatCombo/stillwater/releases?per_page=10";
 
+/// Setups and signatures are only downloaded from Stillwater's own GitHub releases.
+const DOWNLOAD_PREFIX: &str = "https://github.com/WhoaThatCombo/stillwater/releases/download/";
+
+/// The public half of the Stillwater release signing key (Ed25519). A setup is only run if
+/// the release also has a `.exe.sig` file: the raw 64-byte signature of the setup made with
+/// the private half. `tools/release/sign.py` makes those and reads this key from here.
+const UPDATE_PUBLIC_KEY: [u8; 32] = [
+    0xbc, 0x57, 0x44, 0x61, 0xbe, 0x3a, 0xfa, 0x0d, 0xb1, 0x1f, 0xf8, 0xc4, 0x57, 0x13, 0x63, 0x8c,
+    0x9c, 0x42, 0xbb, 0x78, 0x99, 0x04, 0x6f, 0x0f, 0x2f, 0xe1, 0x63, 0xb0, 0xbd, 0xe9, 0xfe, 0x1c,
+];
+
 #[derive(Clone, Debug)]
 pub(crate) struct UpdateInfo {
     pub(crate) version: String,
@@ -50,6 +62,7 @@ pub(crate) struct UpdateInfo {
     pub(crate) page_url: String,
     pub(crate) setup_url: Option<String>,
     pub(crate) checksum_url: Option<String>,
+    pub(crate) signature_url: Option<String>,
     /// Whether this copy was installed by the Stillwater setup (and so can update itself).
     pub(crate) installable: bool,
 }
@@ -78,6 +91,11 @@ fn curl() -> Command {
         "--show-error",
         "--fail",
         "--location",
+        // Only HTTPS, also when GitHub redirects us to its download servers.
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
         "--max-time",
         "300",
         "--user-agent",
@@ -143,12 +161,16 @@ fn find_update(releases: &Value) -> Option<UpdateInfo> {
     let setup_url = asset_url(&|name| name.starts_with("Stillwater-Setup") && name.ends_with(".exe"));
     let checksum_url =
         asset_url(&|name| name.starts_with("Stillwater-Setup") && name.ends_with(".exe.sha256"));
+    // Not required to offer the update: a missing signature is reported when installing.
+    let signature_url =
+        asset_url(&|name| name.starts_with("Stillwater-Setup") && name.ends_with(".exe.sig"));
     Some(UpdateInfo {
         version: format!("{}.{}.{}", version.0, version.1, version.2),
         page_url: release["html_url"].as_str()?.to_owned(),
         installable: is_installed_copy() && setup_url.is_some() && checksum_url.is_some(),
         setup_url,
         checksum_url,
+        signature_url,
     })
 }
 
@@ -225,12 +247,58 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Fail unless `url` is a download from Stillwater's own GitHub releases.
+fn release_download(url: &str) -> Result<&str, String> {
+    if url.starts_with(DOWNLOAD_PREFIX) {
+        Ok(url)
+    } else {
+        Err(format!(
+            "refusing to download {url}: not a Stillwater release file"
+        ))
+    }
+}
+
+/// Check that `signature` (64 raw bytes) is the Stillwater release key's Ed25519 signature
+/// of `setup`.
+fn verify_signature(setup: &[u8], signature: &[u8]) -> Result<(), String> {
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&UPDATE_PUBLIC_KEY)
+        .map_err(|_| "the built-in update key is broken")?;
+    let signature = ed25519_dalek::Signature::from_slice(signature)
+        .map_err(|_| "the signature file isn't a 64-byte Ed25519 signature")?;
+    key.verify_strict(setup, &signature).map_err(|_| {
+        "the setup's signature is wrong (not signed with the Stillwater release key)".into()
+    })
+}
+
+/// Make a new, empty folder with a random name in the temp folder, so nothing can be waiting
+/// where the setup gets saved.
+fn new_temp_dir() -> Result<PathBuf, String> {
+    use std::hash::{BuildHasher, RandomState};
+    for _ in 0..10 {
+        // Each RandomState gets fresh keys from the operating system's random generator.
+        let random = RandomState::new().hash_one(std::time::SystemTime::now());
+        let dir = std::env::temp_dir().join(format!("stillwater-update-{random:016x}"));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("couldn't make a folder for the setup: {error}")),
+        }
+    }
+    Err("couldn't make a folder for the setup".into())
+}
+
 fn download_and_verify(update: &UpdateInfo) -> Result<PathBuf, String> {
     let setup_url = update.setup_url.as_deref().ok_or("the release has no setup")?;
     let checksum_url = update
         .checksum_url
         .as_deref()
         .ok_or("the release has no checksum")?;
+    let signature_url = update
+        .signature_url
+        .as_deref()
+        .ok_or("the release isn't signed (it has no Stillwater-Setup .exe.sig file)")?;
+    let setup_url = release_download(setup_url)?;
+    let signature_url = release_download(signature_url)?;
 
     let expected = String::from_utf8_lossy(&fetch(checksum_url)?)
         .split_whitespace()
@@ -241,8 +309,11 @@ fn download_and_verify(update: &UpdateInfo) -> Result<PathBuf, String> {
     if sha256_hex(&setup) != expected {
         return Err("the download didn't match its checksum".into());
     }
+    // The checksum only catches broken downloads; the signature proves the setup is ours.
+    let signature = fetch(signature_url)?;
+    verify_signature(&setup, &signature)?;
 
-    let path = std::env::temp_dir().join(format!("Stillwater-Setup-{}.exe", update.version));
+    let path = new_temp_dir()?.join(format!("Stillwater-Setup-{}.exe", update.version));
     std::fs::write(&path, setup).map_err(|error| format!("couldn't save the setup: {error}"))?;
     Ok(path)
 }
@@ -347,5 +418,32 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn only_release_key_signatures_pass() {
+        // Made with `tools/release/sign.py` over the message below.
+        let message = b"Stillwater update signature test";
+        let signature: [u8; 64] = [
+            0xac, 0x90, 0xb4, 0x6b, 0xfd, 0xcd, 0xca, 0x95, 0x0f, 0xef, 0x52, 0xdc, 0x44, 0xe4,
+            0x15, 0xdc, 0xc8, 0x23, 0x85, 0x77, 0xdd, 0x4c, 0x1d, 0xc8, 0xbd, 0xa6, 0x6f, 0x36,
+            0xab, 0xac, 0x43, 0xfa, 0x52, 0x4d, 0x29, 0x7f, 0xc8, 0xfa, 0xa2, 0x53, 0x98, 0xa1,
+            0xf6, 0x8d, 0xb7, 0xc2, 0xda, 0x06, 0x04, 0xfd, 0x90, 0x60, 0xf3, 0x26, 0x76, 0xd6,
+            0x8d, 0xbd, 0xfc, 0x5e, 0xef, 0x0a, 0x51, 0x09,
+        ];
+        assert!(verify_signature(message, &signature).is_ok());
+        assert!(verify_signature(b"Stillwater update signature tesT", &signature).is_err());
+        assert!(verify_signature(message, &signature[..63]).is_err());
+        assert!(verify_signature(message, &[0; 64]).is_err());
+    }
+
+    #[test]
+    fn downloads_only_from_stillwater_releases() {
+        let good = "https://github.com/WhoaThatCombo/stillwater/releases/download/v1.0.0/a.exe";
+        assert!(release_download(good).is_ok());
+        let other = "https://github.com/someone/else/releases/download/v1.0.0/a.exe";
+        assert!(release_download(other).is_err());
+        let plain = "http://github.com/WhoaThatCombo/stillwater/releases/download/v1.0.0/a.exe";
+        assert!(release_download(plain).is_err());
     }
 }

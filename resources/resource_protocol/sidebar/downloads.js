@@ -116,7 +116,7 @@
       warning.textContent = "This file can run programs on your computer. Open it only if you trust where it came from.";
       actions.append(
         warning,
-        smallButton("Open", () => { confirmOpen = null; send("dl-open", item.key); render(); }, "danger"),
+        smallButton("Open", () => { confirmOpen = null; send("dl-open", `${item.key}\tconfirmed`); render(); }, "danger"),
         smallButton("Cancel", () => { confirmOpen = null; render(); }),
       );
     } else if (item.state === "downloading") {

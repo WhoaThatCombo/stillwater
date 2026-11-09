@@ -33,5 +33,5 @@ partial interface ShadowRoot {
 
 // https://wicg.github.io/sanitizer-api/#sanitizer-api
 partial interface ShadowRoot {
-  [CEReactions, Throws] undefined setHTML(DOMString html, optional SetHTMLOptions options = {});
+  [CEReactions, Throws, Pref="dom_sanitizer_enabled"] undefined setHTML(DOMString html, optional SetHTMLOptions options = {});
 };
