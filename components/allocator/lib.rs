@@ -7,9 +7,20 @@
 
 use std::os::raw::c_void;
 
-#[cfg(not(feature = "allocation-tracking"))]
+#[cfg(not(any(
+    feature = "allocation-tracking",
+    all(windows, feature = "alloc-profile")
+)))]
 #[global_allocator]
 static ALLOC: Allocator = Allocator;
+
+// Sampling allocation profiler, active only when STILLWATER_ALLOC_PROFILE is set.
+#[cfg(all(windows, feature = "alloc-profile", not(feature = "allocation-tracking")))]
+mod alloc_profile;
+
+#[cfg(all(windows, feature = "alloc-profile", not(feature = "allocation-tracking")))]
+#[global_allocator]
+static ALLOC: alloc_profile::Profiled<Allocator> = alloc_profile::Profiled(Allocator);
 
 #[cfg(feature = "allocation-tracking")]
 #[global_allocator]

@@ -49,6 +49,9 @@ default_base = [
 ]
 # Enable jemalloc on platforms that support it (not OHOS and not Windows).
 jemalloc = ["servo-allocator/use-jemalloc"]
+# Sampling allocation profiler (Windows): STILLWATER_ALLOC_PROFILE=<dir>, see
+# components/allocator/alloc_profile.rs.
+alloc-profile = ["servo-allocator/alloc-profile"]
 # Default web features should be kept in sync with the list in servo/Cargo.toml.
 # We also need to enable our own features, since we also have `cfg` gated code here.
 default_web_features = ["servo/default_web_features", "gamepad", "webgpu", "webgl", "webxr"]

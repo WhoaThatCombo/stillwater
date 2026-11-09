@@ -15,6 +15,8 @@ path = "lib.rs"
 
 [features]
 allocation-tracking = ["backtrace", "dep:rustc-hash", "log"]
+# Sampling allocation profiler (Windows), see alloc_profile.rs.
+alloc-profile = []
 use-jemalloc = ["dep:tikv-jemalloc-sys", "dep:tikv-jemallocator"]
 
 [dependencies]
