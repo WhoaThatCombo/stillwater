@@ -52,6 +52,10 @@ pub struct App {
     /// Keep the event loop ticking until this time, e.g. after another launch handed us a URL:
     /// on Windows the window otherwise may not repaint until it receives its next message.
     tick_until: Option<Instant>,
+    /// When the last repaint request was handled, and when a held-back repaint is due (see
+    /// `user_event`).
+    last_repaint_request: Option<Instant>,
+    repaint_at: Option<Instant>,
     /// When to next look for tabs to unload (inactive ones, or any when memory is low).
     next_memory_check: Instant,
     /// When Servo was last told that memory is low (it drops caches, so not too often).
@@ -96,6 +100,8 @@ impl App {
             t,
             state: AppState::Initializing,
             tick_until: None,
+            last_repaint_request: None,
+            repaint_at: None,
             next_memory_check: t + MEMORY_CHECK_INTERVAL,
             last_memory_pressure: None,
         }
@@ -250,6 +256,14 @@ impl App {
     }
 
     fn control_flow(&self) -> ControlFlow {
+        let flow = self.control_flow_without_repaint();
+        match (flow, self.repaint_at) {
+            (ControlFlow::WaitUntil(at), Some(repaint)) => ControlFlow::WaitUntil(at.min(repaint)),
+            (flow, _) => flow,
+        }
+    }
+
+    fn control_flow_without_repaint(&self) -> ControlFlow {
         if self.busy() {
             // ~60 Hz while busy; sleep when idle so an idle browser costs almost no CPU, waking
             // only to check for tabs to unload.
@@ -339,6 +353,11 @@ impl ApplicationHandler<AppEvent> for App {
         }
         diagnostics::count("tick");
         diagnostics::maybe_summarize(|| self.busy_reason());
+        if self.repaint_at.is_some_and(|at| Instant::now() >= at) {
+            // A held-back repaint: this turn paints it (windows were marked by its request).
+            self.repaint_at = None;
+            self.last_repaint_request = Some(Instant::now());
+        }
         if Instant::now() >= self.next_memory_check {
             self.check_memory();
         }
@@ -405,11 +424,42 @@ impl ApplicationHandler<AppEvent> for App {
             return;
         };
 
-        diagnostics::count("app_event");
+        diagnostics::count(match &app_event {
+            AppEvent::Waker => "app_event:waker",
+            AppEvent::RequestRepaint(..) => "app_event:repaint",
+            AppEvent::Translate(..) => "app_event:translate",
+            _ => "app_event:other",
+        });
+        // A flood of events would otherwise never show in the summary (it's written on ticks
+        // and window events).
+        diagnostics::maybe_summarize(|| self.busy_reason());
         if !matches!(app_event, AppEvent::Waker | AppEvent::RequestRepaint(..)) {
             diagnostics::log(format!("app event: {app_event:?}"));
         }
         let opened_url = matches!(app_event, AppEvent::OpenUrl(_));
+        // Repaint requests coming faster than the monitor shows frames mean something is asking
+        // to repaint after every repaint. Holding the repaint until the next frame of the window's
+        // monitor (60, 144, 240 Hz...) paces it like vsync, so nothing real gets slower, and
+        // leaves the thread time for its mouse and keyboard input, which Windows only delivers
+        // when no posted events are waiting: a runaway repaint loop must never be able to hold
+        // the mouse and lock up the desktop.
+        let mut defer_repaint = false;
+        if let AppEvent::RequestRepaint(window_id, _) = &app_event {
+            let now = Instant::now();
+            let frame = state
+                .window(*window_id)
+                .and_then(|window| window.platform_window().as_headed_window().map(|headed| headed.frame_interval()))
+                .unwrap_or(std::time::Duration::from_micros(16_667));
+            if let Some(last) = self.last_repaint_request &&
+                now.duration_since(last) < frame
+            {
+                defer_repaint = true;
+                let due = last + frame;
+                self.repaint_at = Some(self.repaint_at.map_or(due, |at| at.min(due)));
+            } else {
+                self.last_repaint_request = Some(now);
+            }
+        }
         match app_event {
             // Cleared before pumping Servo, so a wake during the pump queues a new one.
             AppEvent::Waker => {
@@ -517,6 +567,11 @@ impl ApplicationHandler<AppEvent> for App {
 
         if opened_url {
             self.keep_awake_for(std::time::Duration::from_secs(3));
+        }
+        if defer_repaint {
+            // The loop wakes at `repaint_at` (see `control_flow`) and paints then.
+            event_loop.set_control_flow(self.control_flow());
+            return;
         }
         if !self.pump_servo_event_loop(event_loop.into()) {
             event_loop.exit();

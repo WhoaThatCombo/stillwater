@@ -312,6 +312,18 @@ impl HeadedWindow {
         self.winit_window.request_redraw();
     }
 
+    /// How long a frame lasts on the monitor the window is on (its refresh rate: 60 Hz, 144 Hz,
+    /// 240 Hz...), so repaints can be paced like vsync. Unknown rates count as 60 Hz.
+    pub(crate) fn frame_interval(&self) -> std::time::Duration {
+        let millihertz = self
+            .winit_window
+            .current_monitor()
+            .and_then(|monitor| monitor.refresh_rate_millihertz())
+            .filter(|rate| (24_000..=1_000_000).contains(rate))
+            .unwrap_or(60_000);
+        std::time::Duration::from_micros(1_000_000_000 / u64::from(millihertz))
+    }
+
     pub(crate) fn event_loop_proxy(&self) -> EventLoopProxy<AppEvent> {
         self.event_loop_proxy.clone()
     }

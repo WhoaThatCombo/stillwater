@@ -655,7 +655,13 @@ impl Gui {
                 },
                 WindowAction::Close => window.schedule_close(),
                 WindowAction::Drag => {
-                    let _ = winit_window.drag_window();
+                    // The sidebar asks for this after its page saw the mouse press. If the button
+                    // is already up by now (a quick click), Windows would start a drag that waits
+                    // for a release that already happened, holding the mouse until something
+                    // takes it back.
+                    if left_button_held() {
+                        let _ = winit_window.drag_window();
+                    }
                 },
                 WindowAction::ReportSite(tab) => {
                     let webview = tab
@@ -1470,4 +1476,20 @@ fn pane_controls(
             }
         });
     clicked
+}
+
+/// Whether the (primary) mouse button is physically held down right now.
+fn left_button_held() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
+        // Safety: plain Win32 queries with no pointers.
+        unsafe {
+            let primary = if GetSystemMetrics(SM_SWAPBUTTON) != 0 { VK_RBUTTON } else { VK_LBUTTON };
+            return (GetAsyncKeyState(primary as i32) as u16 & 0x8000) != 0;
+        }
+    }
+    #[allow(unreachable_code)]
+    true
 }

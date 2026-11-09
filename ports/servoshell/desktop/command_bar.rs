@@ -55,6 +55,8 @@ struct BarDelegate {
     inbox: Rc<RefCell<Vec<String>>>,
     cursor: Rc<Cell<Cursor>>,
     waker: Waker,
+    /// Whether the bar is open (see `CommandBar::shown`).
+    shown: Rc<Cell<bool>>,
 }
 
 impl WebViewDelegate for BarDelegate {
@@ -66,7 +68,13 @@ impl WebViewDelegate for BarDelegate {
     }
 
     fn notify_new_frame_ready(&self, _: WebView) {
-        self.waker.wake_by_ref();
+        // A closed bar isn't painted. Its hidden page still makes frames (one per repaint of the
+        // window), and waking the window for each made a loop that repainted as fast as it
+        // could: on a real screen tens of thousands of times a second, starving the window of
+        // its mouse input (and, while it held the mouse, the whole desktop).
+        if self.shown.get() {
+            self.waker.wake_by_ref();
+        }
     }
 
     fn notify_cursor_changed(&self, _: WebView, cursor: Cursor) {
@@ -91,6 +99,8 @@ pub(crate) struct CommandBar {
     /// The page has loaded and can be shown.
     ready: bool,
     open: bool,
+    /// `open`, shared with the page's delegate: frames only ask for a repaint while it's shown.
+    shown: Rc<Cell<bool>>,
     /// Open or close it on the next update (New Tab, Ctrl+T, a click outside).
     toggle: Cell<bool>,
     close: Cell<bool>,
@@ -165,6 +175,7 @@ impl CommandBar {
             inbox: self.inbox.clone(),
             cursor: self.cursor.clone(),
             waker: Waker::from(Arc::new(waker)),
+            shown: self.shown.clone(),
         });
         let webview = WebViewBuilder::new(state.servo(), rendering_context.clone())
             .url(Url::parse(PAGE_URL).expect("valid command bar URL"))
@@ -188,6 +199,7 @@ impl CommandBar {
 
     fn open(&mut self, window: &ServoShellWindow, sidebar: &mut Sidebar) {
         self.open = true;
+        self.shown.set(true);
         self.opened_over = Self::active(window);
         let text = self
             .last_text
@@ -222,6 +234,7 @@ impl CommandBar {
             return;
         }
         self.open = false;
+        self.shown.set(false);
         self.rect.set(None);
         let text = std::mem::take(&mut self.text);
         self.last_text = (!picked && !text.trim().is_empty()).then(|| (text, Instant::now()));
