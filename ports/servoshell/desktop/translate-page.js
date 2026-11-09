@@ -133,7 +133,22 @@
     return box.bottom > -200 && box.top < innerHeight + 400 && box.width > 0 && box.height > 0;
   }
 
-  function collect(newRound) {
+  // Blocks found by the last scan of the page and not handed out yet (visible ones first), and
+  // whether the attributes still need a pass.
+  let queue = [];
+  let attributesDone = false;
+
+  function scan() {
+    const found = [...gather()];
+    // What's on screen first, then the rest in page order.
+    queue = [...found.filter(([block]) => inView(block)), ...found.filter(([block]) => !inView(block))];
+    attributesDone = false;
+    dirty = false;
+  }
+
+  // Hands out up to `budget` characters of text not translated yet. The page is scanned again
+  // only when it changed; otherwise this carries on through the last scan's queue.
+  function collect(newRound, budget = BATCH_CHARACTERS) {
     if (newRound !== undefined && newRound !== round) {
       if (round !== null) {
         for (const block of pending.values()) {
@@ -168,19 +183,11 @@
       lastShape = shape;
       dirty = true;
     }
-    if (!dirty) {
-      return JSON.stringify(out);
+    if (dirty) {
+      scan();
     }
-    const found = [...gather()];
-    // What's on screen first, then the rest in page order.
-    const visible = found.filter(([block]) => inView(block));
-    const rest = found.filter(([block]) => !inView(block));
-    let complete = true;
-    for (const [block, seed] of [...visible, ...rest]) {
-      if (characters > BATCH_CHARACTERS) {
-        complete = false;
-        break;
-      }
+    while (queue.length && characters < budget) {
+      const [block, seed] = queue.shift();
       const nodes = runsOf(block, seed);
       const runs = nodes.map((node) => node.data);
       for (const node of nodes) {
@@ -211,14 +218,11 @@
       characters += runs.reduce((total, run) => total + run.length, 0);
     }
     // Attributes people read: tooltips, image descriptions, placeholders, labels, button text.
-    if (complete && document.body) {
+    if (!queue.length && !attributesDone && characters < budget && document.body) {
+      attributesDone = true;
       const selector = ATTRIBUTES.map((name) => `[${name}]`).join(",") +
         ',input[type="submit"][value],input[type="button"][value],input[type="reset"][value]';
       for (const element of document.body.querySelectorAll(selector)) {
-        if (characters > BATCH_CHARACTERS) {
-          complete = false;
-          break;
-        }
         if (skipped(element.parentElement || element)) {
           continue;
         }
@@ -240,9 +244,6 @@
           characters += value.length;
         }
       }
-    }
-    if (complete) {
-      dirty = false;
     }
     if (!observer.active && document.body) {
       observer.observe(document.body, { childList: true, subtree: true, characterData: true });

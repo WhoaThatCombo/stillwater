@@ -37,6 +37,10 @@ use crate::desktop::settings::config_dir;
 const PAGE_JS: &str = include_str!("translate-page.js");
 const CATALOG_URL: &str = "https://firefox.settings.services.mozilla.com/v1/buckets/main/collections/translations-models/records";
 const CDN: &str = "https://firefox-settings-attachments.cdn.mozilla.net/";
+/// Characters of text per batch: a small first one (what's on screen comes first and shows up
+/// fast), then big ones (fewer round trips through the page).
+const FIRST_BATCH: usize = 4000;
+const BATCH: usize = 12000;
 /// How often a translated page is checked for new text.
 const POLL: Duration = Duration::from_millis(1500);
 /// Language pairs kept loaded at once.
@@ -533,10 +537,17 @@ struct Page {
     host: String,
     from: Option<String>,
     status: Status,
-    /// A batch is out (being collected, translated or applied).
-    busy: bool,
+    /// The page is being asked for its next batch of text.
+    collecting: bool,
+    /// Batches being translated (or applied). Up to two at a time: the next batch is collected
+    /// while the last one translates.
+    translating: u8,
+    /// Batches collected so far: the first is small, so what's on screen is translated first.
+    rounds: u32,
     /// Language checks so far (a page may have no text yet when it finishes loading).
     tries: u8,
+    /// Checks in a row that found no new text: the next one waits longer (see `Collected`).
+    quiet: u8,
 }
 
 struct Prefs {
@@ -559,6 +570,8 @@ pub(crate) struct Translations {
     engines: Engines,
     proxy: Option<EventLoopProxy<AppEvent>>,
     next_generation: u64,
+    /// The tab last shown in the address bar.
+    focused: Option<WebViewId>,
 }
 
 impl Translations {
@@ -598,6 +611,7 @@ impl Translations {
             engines: Arc::new(Mutex::new(Vec::new())),
             proxy: None,
             next_generation: 1,
+            focused: None,
         }
     }
 
@@ -658,6 +672,30 @@ impl Translations {
         });
     }
 
+    /// The tab in the address bar: switching to a translated tab checks it for new text now,
+    /// rather than whenever its slowed-down check comes round.
+    pub(crate) fn focused(&mut self, webview: Option<WebViewId>) {
+        if webview == self.focused {
+            return;
+        }
+        self.focused = webview;
+        let Some(id) = webview else {
+            return;
+        };
+        let Some(send) = self.sender() else {
+            return;
+        };
+        if let Some(page) = self.pages.get_mut(&id) {
+            if page.status == Status::Translated && page.quiet > 0 {
+                page.quiet = 0;
+                send(TranslateEvent::Poll {
+                    webview: id,
+                    generation: page.generation,
+                });
+            }
+        }
+    }
+
     /// A tab started or finished loading a page.
     pub(crate) fn on_load(&mut self, webview: &WebView, status: LoadStatus) {
         match status {
@@ -671,8 +709,11 @@ impl Translations {
                         host: String::new(),
                         from: None,
                         status: Status::Idle,
-                        busy: false,
+                        collecting: false,
+                        translating: 0,
+                        rounds: 0,
                         tries: 0,
+                        quiet: 0,
                     },
                 );
             },
@@ -700,8 +741,11 @@ impl Translations {
                         host: url.host_str().unwrap_or("").to_owned(),
                         from: None,
                         status: Status::Detecting,
-                        busy: false,
+                        collecting: false,
+                        translating: 0,
+                        rounds: 0,
                         tries: 0,
+                        quiet: 0,
                     },
                 );
                 self.detect_page(webview);
@@ -826,14 +870,16 @@ impl Translations {
         let Some(page) = self.pages.get_mut(&webview.id()) else {
             return;
         };
-        if page.busy {
+        if page.collecting || page.translating >= 2 {
             return;
         }
-        page.busy = true;
+        page.collecting = true;
+        let budget = if page.rounds == 0 { FIRST_BATCH } else { BATCH };
+        page.rounds += 1;
         let generation = page.generation;
         let id = webview.id();
         webview.evaluate_javascript(
-            format!("{PAGE_JS}\nwindow.__stillwaterTranslate.collect({generation})"),
+            format!("{PAGE_JS}\nwindow.__stillwaterTranslate.collect({generation}, {budget})"),
             move |result| {
                 let blocks = match result {
                     Ok(JSValue::String(json)) => serde_json::from_str::<Value>(&json)
@@ -950,7 +996,7 @@ impl Translations {
                     // No text yet (pages that build themselves with script): look again shortly.
                     if page.tries < 6 {
                         page.tries += 1;
-                        self.poll_later(webview, generation);
+                        self.poll_later(webview, generation, POLL);
                     } else {
                         page.status = Status::Same;
                     }
@@ -985,16 +1031,35 @@ impl Translations {
                 if !blocks.is_empty() {
                     diagnostics::log(format!("translate: {} blocks to translate", blocks.len()));
                 }
+                let page = self.pages.get_mut(&webview).unwrap();
+                page.collecting = false;
                 if blocks.is_empty() {
-                    let page = self.pages.get_mut(&webview).unwrap();
-                    page.busy = false;
-                    if matches!(page.status, Status::Translating | Status::Translated) {
+                    // Batches still translating will check again when they're applied.
+                    if page.translating == 0
+                        && matches!(page.status, Status::Translating | Status::Translated)
+                    {
                         page.status = Status::Translated;
-                        self.poll_later(webview, generation);
+                        // A page that's stopped changing is checked less and less often.
+                        let delay = POLL * (1 << page.quiet.min(3));
+                        page.quiet = page.quiet.saturating_add(1);
+                        self.poll_later(webview, generation, delay);
                     }
                     return;
                 }
+                page.quiet = 0;
+                page.translating += 1;
                 self.translate(webview, generation, blocks);
+                // Collect the next batch while this one translates, except while the first (what's
+                // on screen) translates: it gets all the cores.
+                let first = self
+                    .pages
+                    .get(&webview)
+                    .is_some_and(|page| page.rounds <= 1);
+                if !first {
+                    if let Some(view) = find(webview) {
+                        self.collect(&view);
+                    }
+                }
             },
             TranslateEvent::Translated {
                 webview,
@@ -1023,7 +1088,7 @@ impl Translations {
                     move |_| send(TranslateEvent::Poll { webview, generation }),
                 );
                 if let Some(page) = self.pages.get_mut(&webview) {
-                    page.busy = false;
+                    page.translating = page.translating.saturating_sub(1);
                 }
             },
             TranslateEvent::Poll {
@@ -1058,7 +1123,8 @@ impl Translations {
                 warn!("Translation failed: {error}");
                 diagnostics::log(format!("translate: failed: {error}"));
                 if let Some(page) = self.pages.get_mut(&webview) {
-                    page.busy = false;
+                    page.collecting = false;
+                    page.translating = 0;
                     page.status = Status::Failed(error);
                 }
             },
@@ -1119,14 +1185,14 @@ impl Translations {
         }
     }
 
-    fn poll_later(&self, webview: WebViewId, generation: u64) {
+    fn poll_later(&self, webview: WebViewId, generation: u64, delay: Duration) {
         let Some(send) = self.sender() else {
             return;
         };
         std::thread::Builder::new()
             .name("TranslatePoll".into())
             .spawn(move || {
-                std::thread::sleep(POLL);
+                std::thread::sleep(delay);
                 send(TranslateEvent::Poll {
                     webview,
                     generation,
@@ -1141,7 +1207,9 @@ impl Translations {
         if let Some(page) = self.pages.get_mut(&webview.id()) {
             // A new generation: batches still out are dropped.
             page.generation = generation;
-            page.busy = false;
+            page.collecting = false;
+            page.translating = 0;
+            page.rounds = 0;
             page.status = Status::Offer;
         }
         webview.evaluate_javascript(

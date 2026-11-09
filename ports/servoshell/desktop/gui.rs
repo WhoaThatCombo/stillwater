@@ -496,6 +496,7 @@ impl Gui {
             let mut translation = state.translation.borrow_mut();
             translation.set_proxy(&headed_window.event_loop_proxy());
             let page = self.sidebar.navigated_webview(window).map(|webview| webview.id());
+            translation.focused(page);
             self.sidebar.set_translate(translation.to_json(page));
         }
                     }
@@ -787,6 +788,7 @@ impl Gui {
             let mut translation = state.translation.borrow_mut();
             translation.set_proxy(&headed_window.event_loop_proxy());
             let page = self.sidebar.navigated_webview(window).map(|webview| webview.id());
+            translation.focused(page);
             self.sidebar.set_translate(translation.to_json(page));
         }
         {
