@@ -208,6 +208,9 @@ pub struct LayoutThread {
     // image data, or an error if the image cache failed to load/decode the image.
     resolved_images_cache: Arc<RwLock<HashMap<ServoUrl, CachedImageOrError>>>,
 
+    /// Stillwater: alpha-only copies of CSS mask images (see `ImageResolver::mask_images`).
+    mask_images: Arc<RwLock<HashMap<webrender_api::ImageKey, Option<webrender_api::ImageKey>>>>,
+
     /// The executors for paint worklets.
     registered_painters: RegisteredPaintersImpl,
 
@@ -680,7 +683,12 @@ impl Layout for LayoutThread {
         })
     }
 
-    fn exit_now(&mut self) {}
+    fn exit_now(&mut self) {
+        // Stillwater: give back the alpha-only copies of CSS mask images.
+        for mask_key in self.mask_images.write().drain().filter_map(|(_, key)| key) {
+            self.paint_api.delete_image(mask_key);
+        }
+    }
 
     fn collect_reports(&self, reports: &mut Vec<Report>, ops: &mut MallocSizeOfOps) {
         // TODO: Measure more than just display list, stylist, and font context.
@@ -926,6 +934,7 @@ impl LayoutThread {
             paint_api: config.paint_api,
             stylist: Stylist::new(device, QuirksMode::NoQuirks),
             resolved_images_cache: Default::default(),
+            mask_images: Default::default(),
             debug: opts::get().debug.clone(),
             previously_highlighted_dom_node: Cell::new(None),
             paint_timing_handler: Default::default(),
@@ -1142,6 +1151,8 @@ impl LayoutThread {
             pending_svg_elements_for_serialization: Mutex::default(),
             animating_images: reflow_request.animating_images.clone(),
             animation_timeline_value: reflow_request.animation_timeline_value,
+            mask_images: self.mask_images.clone(),
+            mask_image_uploader: Mutex::new(Some((self.paint_api.clone(), self.webview_id))),
         });
         let mut reflow_statistics = Default::default();
 

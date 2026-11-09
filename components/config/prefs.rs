@@ -72,6 +72,10 @@ pub fn set(preferences: Preferences) {
         "layout.css.writing-mode.enabled",
         preferences.layout_css_writing_mode_enabled
     );
+    stylo_static_prefs::set_pref!(
+        "layout.css.masking.enabled",
+        preferences.layout_css_masking_enabled
+    );
 
     *PREFERENCES.write().unwrap() = preferences;
 
@@ -320,6 +324,9 @@ pub struct Preferences {
     pub layout_css_backdrop_filter_enabled: bool,
     // feature: CSS Multicol | #22397 | Web/CSS/Guides/Multicol_layout
     pub layout_css_columns_enabled: bool,
+    /// `mask-image` and the other mask properties. Stillwater draws image masks on an element's
+    /// own background (icons); gradient masks and masking an element's content aren't supported.
+    pub layout_css_masking_enabled: bool,
     pub layout_css_container_queries_enabled: bool,
     pub layout_css_ellipse_corners_enabled: bool,
     // feature: Variable fonts | #38800 | Web/CSS/Guides/Fonts/Variable_fonts
@@ -586,6 +593,7 @@ impl Preferences {
             layout_animations_test_enabled: false,
             layout_css_backdrop_filter_enabled: false,
             layout_css_columns_enabled: false,
+            layout_css_masking_enabled: true,
             layout_css_container_queries_enabled: false,
             layout_css_ellipse_corners_enabled: false,
             layout_css_font_variations_enabled: false,

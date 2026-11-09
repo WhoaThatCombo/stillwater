@@ -1892,6 +1892,7 @@ impl<'a> BuilderForBoxFragment<'a> {
         state: &TraversalState,
         painter: &BackgroundPainter,
     ) {
+        let masked = self.push_background_mask(builder, state, painter);
         let b = painter.style.get_background();
         let background_color = painter.style.resolve_color(&b.background_color);
         if background_color.alpha > 0.0 {
@@ -1914,6 +1915,102 @@ impl<'a> BuilderForBoxFragment<'a> {
         }
 
         self.build_background_image(builder, state, painter);
+        if masked {
+            builder.wr().pop_stacking_context();
+        }
+    }
+
+    /// Stillwater: `mask-image` with an image (gradients aren't supported) on an element's own
+    /// background, the common way to draw an icon in the text colour (MediaWiki and Codex icons
+    /// are a box of `background-color: currentColor` masked by an SVG). Without it they show as
+    /// solid squares. The background is drawn in a stacking context clipped by a WebRender image
+    /// mask; the element's content is not masked. Returns whether that stacking context was
+    /// pushed.
+    fn push_background_mask(
+        &self,
+        builder: &mut DisplayListBuilder,
+        state: &TraversalState,
+        painter: &BackgroundPainter,
+    ) -> bool {
+        // The root element's background painted on the canvas isn't masked.
+        if painter.painting_area_override.is_some() {
+            return false;
+        }
+        let svg = painter.style.get_svg();
+        let Some(mask) = svg.mask_image.0.first() else {
+            return false;
+        };
+        if matches!(mask, style::values::computed::image::Image::None) {
+            return false;
+        }
+        let Some(node) = self.fragment.base.tag.map(|tag| tag.node) else {
+            return false;
+        };
+        let Ok(ResolvedImage::Image { image, size, .. }) =
+            builder.image_resolver.resolve_image(Some(node), mask)
+        else {
+            return false;
+        };
+
+        // `mask-origin` and `mask-clip` default to the border box.
+        let area = self.border_rect;
+        let natural = NaturalSizes::from_width_and_height(size.width, size.height);
+        let Some((bounds, tile_size, _, repeat)) = background::layout_tile(
+            area,
+            area,
+            natural,
+            background::get_cyclic(&svg.mask_size.0, 0),
+            background::get_cyclic(&svg.mask_repeat.0, 0),
+            background::get_cyclic(&svg.mask_position_x.0, 0),
+            background::get_cyclic(&svg.mask_position_y.0, 0),
+        ) else {
+            return false;
+        };
+        // A repeating mask is drawn once, which covers the usual case of a mask the size of
+        // its element.
+        let mask_rect = if repeat {
+            units::LayoutRect::from_origin_and_size(bounds.min, tile_size)
+        } else {
+            bounds
+        };
+
+        let scale = builder.device_pixel_ratio.get();
+        let device_size = Size2D::new(
+            (tile_size.width * scale).ceil().max(1.0),
+            (tile_size.height * scale).ceil().max(1.0),
+        )
+        .to_i32();
+        let Some(mask_key) = builder
+            .image_resolver
+            .mask_image_key(&image, device_size, node)
+        else {
+            return false;
+        };
+
+        let spatial_id = builder.spatial_id(state.spatial_id);
+        let clip_id = builder.wr().define_clip_image_mask(
+            spatial_id,
+            wr::ImageMask {
+                image: mask_key,
+                rect: mask_rect,
+            },
+            &[],
+            wr::FillRule::Nonzero,
+        );
+        let clip_chain_id = builder.wr().define_clip_chain(None, [clip_id]);
+        builder.wr().push_stacking_context(
+            spatial_id,
+            PrimitiveFlags::default(),
+            Some(clip_chain_id),
+            TransformStyle::Flat,
+            wr::MixBlendMode::Normal,
+            &[],
+            &[],
+            RasterSpace::Screen,
+            StackingContextFlags::empty(),
+            None,
+        );
+        true
     }
 
     fn build_backdrop_filter(&mut self, builder: &mut DisplayListBuilder, state: &TraversalState) {

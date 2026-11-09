@@ -140,6 +140,13 @@ pub(crate) struct ImageResolver {
 
     /// The current animation timeline value used to properly initialize animating images.
     pub animation_timeline_value: f64,
+
+    /// Stillwater: alpha-only copies of the images used as CSS masks (`mask-image`), by the
+    /// image's own key: WebRender's image masks read a single channel.
+    pub mask_images: Arc<RwLock<HashMap<ImageKey, Option<ImageKey>>>>,
+
+    /// Where to upload those copies: the paint API and this layout's `WebView`.
+    pub mask_image_uploader: Mutex<Option<(paint_api::CrossProcessPaintApi, servo_base::id::WebViewId)>>,
 }
 
 impl Drop for ImageResolver {
@@ -293,6 +300,70 @@ impl ImageResolver {
                     .and_then(|rasterized_image| rasterized_image.id)
             }),
         }
+    }
+
+    /// Stillwater: a WebRender key for an alpha-only (R8) copy of `image` rasterized at `size`,
+    /// for a CSS mask. `None` while the image is still loading or rasterizing.
+    pub(crate) fn mask_image_key(
+        &self,
+        image: &CachedImage,
+        size: DeviceIntSize,
+        node: OpaqueNode,
+    ) -> Option<ImageKey> {
+        let rasterized;
+        let raster: &RasterImage = match image {
+            CachedImage::Raster(raster_image) => raster_image,
+            CachedImage::Vector(vector_image) => {
+                rasterized = self.rasterize_vector_image(
+                    vector_image.id,
+                    size,
+                    node,
+                    vector_image.svg_id,
+                )?;
+                &rasterized
+            },
+        };
+        let source_key = raster.id?;
+        if let Some(mask_key) = self.mask_images.read().get(&source_key) {
+            return *mask_key;
+        }
+
+        let frame = raster.first_frame();
+        let pixels = &frame.image_bytes[frame.byte_range.clone()];
+        let alpha: Vec<u8> = match raster.format {
+            pixels::PixelFormat::RGBA8 | pixels::PixelFormat::BGRA8 => {
+                pixels.chunks_exact(4).map(|pixel| pixel[3]).collect()
+            },
+            pixels::PixelFormat::KA8 => pixels.chunks_exact(2).map(|pixel| pixel[1]).collect(),
+            // No alpha channel: the whole image shows.
+            pixels::PixelFormat::RGB8 | pixels::PixelFormat::K8 => {
+                vec![255; frame.width as usize * frame.height as usize]
+            },
+        };
+        let mask_key = self
+            .mask_image_uploader
+            .lock()
+            .as_ref()
+            .and_then(|(paint_api, webview_id)| {
+                let key = paint_api.generate_image_key_blocking(*webview_id)?;
+                let descriptor = webrender_api::ImageDescriptor::new(
+                    frame.width as i32,
+                    frame.height as i32,
+                    webrender_api::ImageFormat::R8,
+                    webrender_api::ImageDescriptorFlags::empty(),
+                );
+                paint_api.add_image(
+                    key,
+                    descriptor,
+                    paint_api::SerializableImageData::Raw(
+                        servo_base::generic_channel::GenericSharedMemory::from_vec(alpha),
+                    ),
+                    false,
+                );
+                Some(key)
+            });
+        self.mask_images.write().insert(source_key, mask_key);
+        mask_key
     }
 
     pub(crate) fn queue_svg_element_for_serialization(&self, element: ServoLayoutNode<'_>) {
