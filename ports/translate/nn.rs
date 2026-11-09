@@ -12,6 +12,50 @@ use std::io::Result;
 
 use crate::model::{Item, config, invalid};
 
+/// Time spent per stage, when `STILLWATER_TRANSLATE_PROFILE` is set (for tuning).
+pub mod profile {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+
+    pub const NAMES: [&str; 7] = [
+        "encoder",
+        "decoder rnn",
+        "decoder attention",
+        "decoder ffn",
+        "output",
+        "(quantize)",
+        "(matmul)",
+    ];
+    pub static NANOS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+
+    pub fn enabled() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("STILLWATER_TRANSLATE_PROFILE").is_some())
+    }
+
+    pub fn start() -> Option<Instant> {
+        enabled().then(Instant::now)
+    }
+
+    pub fn stop(stage: usize, started: Option<Instant>) {
+        if let Some(started) = started {
+            NANOS[stage].fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub fn report() -> String {
+        NAMES
+            .iter()
+            .zip(&NANOS)
+            .map(|(name, nanos)| {
+                format!("{name}: {:.2}s", nanos.load(Ordering::Relaxed) as f64 / 1e9)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// `y = x·W + b` with int8 `W` stored transposed (one row per output).
 pub(crate) struct Linear {
     weights: Vec<i8>,
@@ -77,23 +121,21 @@ impl Linear {
         })
     }
 
-    fn quantize(&self, row: &[f32], out: &mut [i8]) -> f32 {
+    /// Quantizes one input row to int8 values (held as i16, ready for the multiply-add kernel).
+    fn quantize(&self, row: &[f32], out: &mut [i16]) -> f32 {
         let multiplier = if self.input_multiplier > 0.0 {
             self.input_multiplier
         } else {
             let largest = row.iter().fold(0f32, |max, value| max.max(value.abs()));
             if largest > 0.0 { 127.0 / largest } else { 1.0 }
         };
-        for (slot, &value) in out.iter_mut().zip(row) {
-            *slot = (value * multiplier).round_ties_even().clamp(-127.0, 127.0) as i8;
-        }
+        quantize_into(row, multiplier, out);
         multiplier
     }
 
     /// `rows` inputs, one after another, to `rows` outputs.
     pub(crate) fn forward(&self, input: &[f32], rows: usize) -> Vec<f32> {
-        let all: Vec<u32> = Vec::new();
-        self.forward_columns(input, rows, &all)
+        self.forward_columns(input, rows, &[])
     }
 
     /// Like `forward`, computing only the given outputs (all of them when `columns` is empty).
@@ -103,24 +145,42 @@ impl Linear {
         } else {
             columns.len()
         };
-        let mut out = vec![0f32; rows * width];
-        let mut quantized = vec![0i8; self.inputs];
+        let inputs = self.inputs;
+        let started = profile::start();
+        let mut quantized = vec![0i16; rows * inputs];
+        let mut multipliers = Vec::with_capacity(rows);
         for row in 0..rows {
-            let input_multiplier = self.quantize(
-                &input[row * self.inputs..(row + 1) * self.inputs],
-                &mut quantized,
-            );
-            let scale = 1.0 / (input_multiplier * self.weight_multiplier);
+            multipliers.push(self.quantize(
+                &input[row * inputs..(row + 1) * inputs],
+                &mut quantized[row * inputs..(row + 1) * inputs],
+            ));
+        }
+        profile::stop(5, started);
+        let started = profile::start();
+        let mut sums = vec![0i32; rows * width];
+        matmul(
+            &quantized,
+            rows,
+            inputs,
+            &self.weights,
+            columns,
+            width,
+            &mut sums,
+        );
+        profile::stop(6, started);
+        let mut out = vec![0f32; rows * width];
+        for row in 0..rows {
+            let scale = 1.0 / (multipliers[row] * self.weight_multiplier);
+            let sums = &sums[row * width..(row + 1) * width];
             let out_row = &mut out[row * width..(row + 1) * width];
-            products(&quantized, &self.weights, self.inputs, columns, out_row);
-            for (index, value) in out_row.iter_mut().enumerate() {
-                let column = if columns.is_empty() {
-                    index
-                } else {
-                    columns[index] as usize
-                };
-                *value *= scale;
+            for (index, (value, &sum)) in out_row.iter_mut().zip(sums).enumerate() {
+                *value = sum as f32 * scale;
                 if let Some(bias) = &self.bias {
+                    let column = if columns.is_empty() {
+                        index
+                    } else {
+                        columns[index] as usize
+                    };
                     *value += bias[column];
                 }
             }
@@ -137,57 +197,188 @@ impl Linear {
     }
 }
 
-#[inline(always)]
-fn dot(a: &[i8], b: &[i8]) -> i32 {
-    let mut lanes = [0i32; 32];
-    let mut a_chunks = a.chunks_exact(32);
-    let mut b_chunks = b.chunks_exact(32);
-    for (x, y) in (&mut a_chunks).zip(&mut b_chunks) {
-        for lane in 0..32 {
-            lanes[lane] += i32::from(x[lane]) * i32::from(y[lane]);
-        }
-    }
-    let mut total: i32 = lanes.iter().sum();
-    for (&x, &y) in a_chunks.remainder().iter().zip(b_chunks.remainder()) {
-        total += i32::from(x) * i32::from(y);
-    }
-    total
-}
-
-#[inline(always)]
-fn products_generic(input: &[i8], weights: &[i8], inputs: usize, columns: &[u32], out: &mut [f32]) {
-    if columns.is_empty() {
-        for (column, value) in out.iter_mut().enumerate() {
-            *value = dot(input, &weights[column * inputs..(column + 1) * inputs]) as f32;
-        }
-    } else {
-        for (value, &column) in out.iter_mut().zip(columns) {
-            let column = column as usize;
-            *value = dot(input, &weights[column * inputs..(column + 1) * inputs]) as f32;
-        }
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn products_avx2(
-    input: &[i8],
-    weights: &[i8],
-    inputs: usize,
-    columns: &[u32],
-    out: &mut [f32],
-) {
-    products_generic(input, weights, inputs, columns, out)
-}
-
-fn products(input: &[i8], weights: &[i8], inputs: usize, columns: &[u32], out: &mut [f32]) {
+/// `out = clamp(round_ties_even(row · multiplier), −127, 127)`.
+fn quantize_into(row: &[f32], multiplier: f32, out: &mut [i16]) {
     #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        // Safety: the CPU supports AVX2, checked just above.
-        unsafe { products_avx2(input, weights, inputs, columns, out) };
+    if std::arch::is_x86_feature_detected!("avx2") && out.len() >= row.len() {
+        // Safety: the CPU supports AVX2 (checked) and `out` is as long as `row` (checked).
+        unsafe { quantize_avx2(row, multiplier, out) };
         return;
     }
-    products_generic(input, weights, inputs, columns, out)
+    for (slot, &value) in out.iter_mut().zip(row) {
+        *slot = (value * multiplier).round_ties_even().clamp(-127.0, 127.0) as i16;
+    }
+}
+
+/// `quantize_into` sixteen values at a time; the same results as the scalar version.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn quantize_avx2(row: &[f32], multiplier: f32, out: &mut [i16]) {
+    use std::arch::x86_64::*;
+    unsafe {
+        let scale = _mm256_set1_ps(multiplier);
+        let low = _mm256_set1_ps(-127.0);
+        let high = _mm256_set1_ps(127.0);
+        let convert = |at: usize| {
+            let scaled = _mm256_mul_ps(_mm256_loadu_ps(row.as_ptr().add(at)), scale);
+            let rounded =
+                _mm256_round_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(scaled);
+            _mm256_cvtps_epi32(_mm256_min_ps(_mm256_max_ps(rounded, low), high))
+        };
+        let mut i = 0;
+        while i + 16 <= row.len() {
+            // packs works within 128-bit lanes; the permute puts the halves back in order.
+            let packed = _mm256_packs_epi32(convert(i), convert(i + 8));
+            let ordered = _mm256_permute4x64_epi64::<0b11_01_10_00>(packed);
+            _mm256_storeu_si256(out.as_mut_ptr().add(i) as *mut __m256i, ordered);
+            i += 16;
+        }
+        for (slot, &value) in out[i..row.len()].iter_mut().zip(&row[i..]) {
+            *slot = (value * multiplier).round_ties_even().clamp(-127.0, 127.0) as i16;
+        }
+    }
+}
+
+/// `out[r][j] = Σₖ a[r][k] · b[column j][k]`, exactly, in i32. `a` is `rows × k` int8 values
+/// held as i16; `b` holds one row of `k` int8 values per output (the weights, stored transposed);
+/// `columns` picks which outputs (all `width` of them, in order, when empty).
+fn matmul(
+    a: &[i16],
+    rows: usize,
+    k: usize,
+    b: &[i8],
+    columns: &[u32],
+    width: usize,
+    out: &mut [i32],
+) {
+    #[cfg(target_arch = "x86_64")]
+    if k % 16 == 0 && std::arch::is_x86_feature_detected!("avx2") {
+        // Safety: the CPU supports AVX2 (checked), `k` is a multiple of 16, and every row and
+        // column read is in bounds (checked by the slices' lengths below).
+        assert!(a.len() >= rows * k && out.len() >= rows * width);
+        assert!(
+            columns
+                .iter()
+                .all(|&column| (column as usize + 1) * k <= b.len())
+        );
+        assert!(!columns.is_empty() || width * k <= b.len());
+        unsafe { matmul_avx2(a, rows, k, b, columns, width, out) };
+        return;
+    }
+    for row in 0..rows {
+        let a_row = &a[row * k..(row + 1) * k];
+        for j in 0..width {
+            let column = if columns.is_empty() {
+                j
+            } else {
+                columns[j] as usize
+            };
+            let b_row = &b[column * k..(column + 1) * k];
+            out[row * width + j] = a_row
+                .iter()
+                .zip(b_row)
+                .map(|(&x, &y)| i32::from(x) * i32::from(y))
+                .sum();
+        }
+    }
+}
+
+/// The AVX2 kernel: two input rows by four outputs at a time, 16 values per step, with
+/// `vpmaddwd` (exact: int8 × int8 products and their sums fit easily in i32).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn matmul_avx2(
+    a: &[i16],
+    rows: usize,
+    k: usize,
+    b: &[i8],
+    columns: &[u32],
+    width: usize,
+    out: &mut [i32],
+) {
+    use std::arch::x86_64::*;
+    let column = |j: usize| -> usize {
+        if columns.is_empty() {
+            j
+        } else {
+            columns[j] as usize
+        }
+    };
+    // Sums the eight lanes of each of four accumulators: [Σs0, Σs1, Σs2, Σs3].
+    #[inline(always)]
+    unsafe fn reduce(s0: __m256i, s1: __m256i, s2: __m256i, s3: __m256i) -> [i32; 4] {
+        unsafe {
+            let t = _mm256_hadd_epi32(_mm256_hadd_epi32(s0, s1), _mm256_hadd_epi32(s2, s3));
+            let sum = _mm_add_epi32(_mm256_castsi256_si128(t), _mm256_extracti128_si256(t, 1));
+            let mut lanes = [0i32; 4];
+            _mm_storeu_si128(lanes.as_mut_ptr() as *mut __m128i, sum);
+            lanes
+        }
+    }
+    unsafe {
+        let mut row = 0;
+        while row < rows {
+            let two = rows - row >= 2;
+            let a0 = a.as_ptr().add(row * k);
+            let a1 = if two {
+                a.as_ptr().add((row + 1) * k)
+            } else {
+                a0
+            };
+            let mut j = 0;
+            while j < width {
+                let count = (width - j).min(4);
+                // Fewer than four outputs left: repeat the last one and drop its duplicates.
+                let w = |t: usize| b.as_ptr().add(column(j + t.min(count - 1)) * k);
+                let (w0, w1, w2, w3) = (w(0), w(1), w(2), w(3));
+                let zero = _mm256_setzero_si256();
+                let (mut s00, mut s01, mut s02, mut s03) = (zero, zero, zero, zero);
+                let (mut s10, mut s11, mut s12, mut s13) = (zero, zero, zero, zero);
+                let mut i = 0;
+                if !two {
+                    // One row (decoding a word): don't compute it twice.
+                    while i < k {
+                        let x0 = _mm256_loadu_si256(a0.add(i) as *const __m256i);
+                        let y0 = _mm256_cvtepi8_epi16(_mm_loadu_si128(w0.add(i) as *const __m128i));
+                        let y1 = _mm256_cvtepi8_epi16(_mm_loadu_si128(w1.add(i) as *const __m128i));
+                        let y2 = _mm256_cvtepi8_epi16(_mm_loadu_si128(w2.add(i) as *const __m128i));
+                        let y3 = _mm256_cvtepi8_epi16(_mm_loadu_si128(w3.add(i) as *const __m128i));
+                        s00 = _mm256_add_epi32(s00, _mm256_madd_epi16(x0, y0));
+                        s01 = _mm256_add_epi32(s01, _mm256_madd_epi16(x0, y1));
+                        s02 = _mm256_add_epi32(s02, _mm256_madd_epi16(x0, y2));
+                        s03 = _mm256_add_epi32(s03, _mm256_madd_epi16(x0, y3));
+                        i += 16;
+                    }
+                }
+                while i < k {
+                    let x0 = _mm256_loadu_si256(a0.add(i) as *const __m256i);
+                    let x1 = _mm256_loadu_si256(a1.add(i) as *const __m256i);
+                    let y0 = _mm256_cvtepi8_epi16(_mm_loadu_si128(w0.add(i) as *const __m128i));
+                    s00 = _mm256_add_epi32(s00, _mm256_madd_epi16(x0, y0));
+                    s10 = _mm256_add_epi32(s10, _mm256_madd_epi16(x1, y0));
+                    let y1 = _mm256_cvtepi8_epi16(_mm_loadu_si128(w1.add(i) as *const __m128i));
+                    s01 = _mm256_add_epi32(s01, _mm256_madd_epi16(x0, y1));
+                    s11 = _mm256_add_epi32(s11, _mm256_madd_epi16(x1, y1));
+                    let y2 = _mm256_cvtepi8_epi16(_mm_loadu_si128(w2.add(i) as *const __m128i));
+                    s02 = _mm256_add_epi32(s02, _mm256_madd_epi16(x0, y2));
+                    s12 = _mm256_add_epi32(s12, _mm256_madd_epi16(x1, y2));
+                    let y3 = _mm256_cvtepi8_epi16(_mm_loadu_si128(w3.add(i) as *const __m128i));
+                    s03 = _mm256_add_epi32(s03, _mm256_madd_epi16(x0, y3));
+                    s13 = _mm256_add_epi32(s13, _mm256_madd_epi16(x1, y3));
+                    i += 16;
+                }
+                let first = reduce(s00, s01, s02, s03);
+                out[row * width + j..row * width + j + count].copy_from_slice(&first[..count]);
+                if two {
+                    let second = reduce(s10, s11, s12, s13);
+                    out[(row + 1) * width + j..(row + 1) * width + j + count]
+                        .copy_from_slice(&second[..count]);
+                }
+                j += 4;
+            }
+            row += 2;
+        }
+    }
 }
 
 struct LayerNorm {
@@ -370,6 +561,9 @@ fn attend(
     out
 }
 
+/// Rows the encoder processes at once (see `translate_batch`).
+const ENCODE_ROWS: usize = 128;
+
 fn add_positions(x: &mut [f32], dim: usize, start: usize) {
     let timescales = dim / 2;
     for (offset, row) in x.chunks_exact_mut(dim).enumerate() {
@@ -490,21 +684,43 @@ impl Network {
         }
     }
 
-    fn encode(&self, source: &[u32]) -> Vec<f32> {
+    /// Encodes several sentences at once: the layers' weights are applied to all their rows
+    /// together (each weight read once for the batch), attention stays within each sentence.
+    /// `starts` holds each sentence's first row, plus the total at the end.
+    fn encode_batch(&self, sources: &[&[u32]], starts: &[usize]) -> Vec<f32> {
         let dim = self.dim;
-        let rows = source.len();
+        let rows = *starts.last().unwrap_or(&0);
         let mut x = vec![0f32; rows * dim];
         let table = self.source_embeddings.as_ref().unwrap_or(&self.embeddings);
-        for (row, &word) in source.iter().enumerate() {
-            self.embed(table, word, &mut x[row * dim..(row + 1) * dim]);
+        for (sentence, source) in sources.iter().enumerate() {
+            for (offset, &word) in source.iter().enumerate() {
+                let row = starts[sentence] + offset;
+                self.embed(table, word, &mut x[row * dim..(row + 1) * dim]);
+            }
+            add_positions(
+                &mut x[starts[sentence] * dim..starts[sentence + 1] * dim],
+                dim,
+                0,
+            );
         }
-        add_positions(&mut x, dim, 0);
         for layer in &self.encoder {
             let attention = &layer.attention;
             let queries = attention.query.forward(&x, rows);
             let keys = attention.key.forward(&x, rows);
             let values = attention.value.forward(&x, rows);
-            let attended = attend(&queries, &keys, &values, dim, self.heads, None);
+            let mut attended = vec![0f32; rows * dim];
+            for sentence in 0..sources.len() {
+                let span = starts[sentence] * dim..starts[sentence + 1] * dim;
+                let result = attend(
+                    &queries[span.clone()],
+                    &keys[span.clone()],
+                    &values[span.clone()],
+                    dim,
+                    self.heads,
+                    None,
+                );
+                attended[span].copy_from_slice(&result);
+            }
             let mut out = attention.output.forward(&attended, rows);
             attention.norm.add_and_norm(&mut out, &x);
             x = out;
@@ -513,19 +729,45 @@ impl Network {
         x
     }
 
-    /// Greedy decoding: the most likely next piece each step, until end of sentence. Each piece
-    /// comes with the index of the source piece it's aligned to.
-    pub(crate) fn translate(
+    /// Greedy decoding of a batch of sentences together: each step, the next piece of every
+    /// unfinished sentence, until end of sentence (or its `max_length`). Each piece comes with
+    /// the index of the source piece it's aligned to. Every sentence gets exactly the result
+    /// it would get on its own; batching only shares the reading of the weights.
+    pub(crate) fn translate_batch(
         &self,
-        source: &[u32],
-        candidates: &[u32],
+        sources: &[&[u32]],
+        candidates: &[&[u32]],
         eos: u32,
         unknown: u32,
-        max_length: usize,
-    ) -> Vec<(u32, usize)> {
+        max_lengths: &[usize],
+    ) -> Vec<Vec<(u32, usize)>> {
         let dim = self.dim;
-        let context = self.encode(source);
-        let rows = source.len();
+        let count = sources.len();
+        let mut starts = Vec::with_capacity(count + 1);
+        starts.push(0);
+        for source in sources {
+            starts.push(starts.last().unwrap() + source.len());
+        }
+        // The encoder works on groups of up to ENCODE_ROWS rows: big enough to share the weights,
+        // small enough to stay in the CPU's cache.
+        let started = profile::start();
+        let mut context = Vec::with_capacity(starts[count] * dim);
+        let mut group = 0;
+        while group < count {
+            let mut end = group + 1;
+            while end < count && starts[end + 1] - starts[group] <= ENCODE_ROWS {
+                end += 1;
+            }
+            let local: Vec<usize> = starts[group..=end]
+                .iter()
+                .map(|start| start - starts[group])
+                .collect();
+            context.extend(self.encode_batch(&sources[group..end], &local));
+            group = end;
+        }
+        profile::stop(0, started);
+        let rows = *starts.last().unwrap();
+        // Keys and values of the source, per decoder layer (all sentences, sliced by `starts`).
         let projected: Vec<(Vec<f32>, Vec<f32>)> = self
             .decoder
             .iter()
@@ -536,75 +778,114 @@ impl Network {
                 )
             })
             .collect();
-        let mut cells = vec![vec![0f32; dim]; self.decoder.len()];
-        let mut output = Vec::new();
-        let mut previous: Option<u32> = None;
-        let mut x = vec![0f32; dim];
-        let mut alignment = Vec::with_capacity(rows);
+
+        let mut outputs: Vec<Vec<(u32, usize)>> = vec![Vec::new(); count];
+        // The sentences still being decoded, and their state (rows in the same order).
+        let mut active: Vec<usize> = (0..count).filter(|&s| max_lengths[s] > 0).collect();
+        let mut previous: Vec<Option<u32>> = vec![None; count];
+        let mut cells: Vec<Vec<f32>> = vec![vec![0f32; count * dim]; self.decoder.len()];
+        let mut alignments: Vec<Vec<f32>> = vec![Vec::new(); count];
         let last_layer = self.decoder.len().saturating_sub(1);
-        for step in 0..max_length {
-            match previous {
-                Some(word) => self.embed(&self.embeddings, word, &mut x),
-                None => x.fill(0.0),
+        let mut step = 0;
+        while !active.is_empty() {
+            let batch = active.len();
+            let mut x = vec![0f32; batch * dim];
+            for (row, &sentence) in active.iter().enumerate() {
+                let slot = &mut x[row * dim..(row + 1) * dim];
+                if let Some(word) = previous[sentence] {
+                    self.embed(&self.embeddings, word, slot);
+                }
+                add_positions(slot, dim, step);
             }
-            add_positions(&mut x, dim, step);
-            for (index, ((layer, cell), (keys, values))) in self
-                .decoder
-                .iter()
-                .zip(&mut cells)
-                .zip(&projected)
-                .enumerate()
+            for (index, (layer, (keys, values))) in self.decoder.iter().zip(&projected).enumerate()
             {
                 // SSRU: c = σ(f)·c + (1 − σ(f))·xW, output relu(c), then x = norm(output + x).
-                let input = layer.rnn_input.forward(&x, 1);
-                let forget = layer.rnn_forget.forward(&x, 1);
-                let mut out = vec![0f32; dim];
-                for i in 0..dim {
-                    let gate = 1.0 / (1.0 + (-forget[i]).exp());
-                    cell[i] = gate * cell[i] + (1.0 - gate) * input[i];
-                    out[i] = cell[i].max(0.0);
+                let started = profile::start();
+                let input = layer.rnn_input.forward(&x, batch);
+                let forget = layer.rnn_forget.forward(&x, batch);
+                let mut out = vec![0f32; batch * dim];
+                for (row, &sentence) in active.iter().enumerate() {
+                    let cell = &mut cells[index][sentence * dim..(sentence + 1) * dim];
+                    for i in 0..dim {
+                        let at = row * dim + i;
+                        let gate = 1.0 / (1.0 + (-forget[at]).exp());
+                        cell[i] = gate * cell[i] + (1.0 - gate) * input[at];
+                        out[at] = cell[i].max(0.0);
+                    }
                 }
                 layer.rnn_norm.add_and_norm(&mut out, &x);
                 x = out;
+                profile::stop(1, started);
 
-                let queries = layer.context.query.forward(&x, 1);
-                let capture = (index == last_layer).then_some(&mut alignment);
-                let attended = attend(&queries, keys, values, dim, self.heads, capture);
-                let mut out = layer.context.output.forward(&attended, 1);
+                let started = profile::start();
+                let queries = layer.context.query.forward(&x, batch);
+                let mut attended = vec![0f32; batch * dim];
+                for (row, &sentence) in active.iter().enumerate() {
+                    let span = starts[sentence] * dim..starts[sentence + 1] * dim;
+                    let capture = (index == last_layer).then_some(&mut alignments[sentence]);
+                    let result = attend(
+                        &queries[row * dim..(row + 1) * dim],
+                        &keys[span.clone()],
+                        &values[span],
+                        dim,
+                        self.heads,
+                        capture,
+                    );
+                    attended[row * dim..(row + 1) * dim].copy_from_slice(&result);
+                }
+                let mut out = layer.context.output.forward(&attended, batch);
                 layer.context.norm.add_and_norm(&mut out, &x);
                 x = out;
+                profile::stop(2, started);
 
-                layer.feed_forward.apply(&mut x, 1);
+                let started = profile::start();
+                layer.feed_forward.apply(&mut x, batch);
+                profile::stop(3, started);
             }
-            let scores = self.embeddings.forward_columns(&x, 1, candidates);
-            let mut best = (f32::NEG_INFINITY, eos);
-            for (index, &score) in scores.iter().enumerate() {
-                let word = if candidates.is_empty() {
-                    index as u32
-                } else {
-                    candidates[index]
-                };
-                if word != unknown && score > best.0 {
-                    best = (score, word);
+            // Each sentence scores its own candidates (its shortlist).
+            let started = profile::start();
+            let mut finished = Vec::new();
+            for (row, &sentence) in active.iter().enumerate() {
+                let words = candidates[sentence];
+                let scores =
+                    self.embeddings
+                        .forward_columns(&x[row * dim..(row + 1) * dim], 1, words);
+                let mut best = (f32::NEG_INFINITY, eos);
+                for (index, &score) in scores.iter().enumerate() {
+                    let word = if words.is_empty() {
+                        index as u32
+                    } else {
+                        words[index]
+                    };
+                    if word != unknown && score > best.0 {
+                        best = (score, word);
+                    }
+                }
+                if best.1 == eos {
+                    finished.push(sentence);
+                    continue;
+                }
+                let aligned = alignments[sentence]
+                    .iter()
+                    .enumerate()
+                    .fold((0, f32::NEG_INFINITY), |best, (index, &weight)| {
+                        if weight > best.1 {
+                            (index, weight)
+                        } else {
+                            best
+                        }
+                    })
+                    .0;
+                outputs[sentence].push((best.1, aligned));
+                previous[sentence] = Some(best.1);
+                if outputs[sentence].len() >= max_lengths[sentence] {
+                    finished.push(sentence);
                 }
             }
-            if best.1 == eos {
-                break;
-            }
-            let aligned = alignment
-                .iter()
-                .enumerate()
-                .fold((0, f32::NEG_INFINITY), |best, (index, &weight)| {
-                    if weight > best.1 {
-                        (index, weight)
-                    } else {
-                        best
-                    }
-                })
-                .0;
-            output.push((best.1, aligned));
-            previous = Some(best.1);
+            profile::stop(4, started);
+            active.retain(|sentence| !finished.contains(sentence));
+            step += 1;
         }
-        output
+        outputs
     }
 }

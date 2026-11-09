@@ -25,11 +25,16 @@ use std::sync::Mutex;
 use rayon::prelude::*;
 
 use crate::nn::Network;
+pub use crate::nn::profile::report as profile_report;
 use crate::shortlist::Shortlist;
 use crate::vocab::Vocab;
 
 /// Longest piece of text, in source pieces, translated in one go; longer runs are split.
 const MAX_SOURCE_PIECES: usize = 128;
+/// Sentences decoded together at most, and source pieces per batch: decoding a batch reads the
+/// model's weights once per step for all of them, instead of once per sentence.
+const BATCH_SENTENCES: usize = 32;
+const BATCH_PIECES: usize = 512;
 /// Blocks remembered, so text a page shows again (or re-renders) isn't translated twice.
 const CACHE_SIZE: usize = 20_000;
 
@@ -146,10 +151,7 @@ impl Translator {
                 Segment::Gap { .. } => None,
             })
             .collect();
-        let translated: Vec<Translated> = sentences
-            .par_iter()
-            .map(|sentence| self.translate_sentence(sentence))
-            .collect();
+        let translated = self.translate_sentences(&sentences);
         let mut translated = translated.into_iter();
         for (block, layout) in layouts.iter().enumerate() {
             if results[block].is_some() {
@@ -249,34 +251,109 @@ impl Translator {
 
     /// Translates one sentence: its source pieces (with byte offsets) and the target pieces, each
     /// with the index of the source piece it's aligned to.
-    fn translate_sentence(&self, text: &str) -> Translated {
-        let source = self.source_vocab.encode_with_offsets(text);
-        let mut words = Vec::new();
-        for (chunk_index, chunk) in source.chunks(MAX_SOURCE_PIECES).enumerate() {
-            let first = chunk_index * MAX_SOURCE_PIECES;
-            let mut ids: Vec<u32> = chunk.iter().map(|&(id, _)| id).collect();
-            ids.push(self.source_vocab.eos);
-            let candidates = match &self.shortlist {
-                Some(shortlist) => shortlist.candidates(&ids, self.network.vocab_size()),
-                None => Vec::new(),
-            };
-            let max_length = ids.len() * 2 + 4;
-            let mut previous = first;
-            for (word, aligned) in
-                self.network
-                    .translate(&ids, &candidates, self.vocab.eos, 1, max_length)
-            {
+    fn translate_sentences(&self, sentences: &[&str]) -> Vec<Translated> {
+        /// A sentence, or a chunk of a long one, to translate.
+        struct Item {
+            sentence: usize,
+            /// Index of the chunk's first piece in the sentence.
+            first: usize,
+            ids: Vec<u32>,
+        }
+        let sources: Vec<Vec<(u32, usize)>> = sentences
+            .par_iter()
+            .map(|text| self.source_vocab.encode_with_offsets(text))
+            .collect();
+        let mut items = Vec::new();
+        for (sentence, source) in sources.iter().enumerate() {
+            for (chunk_index, chunk) in source.chunks(MAX_SOURCE_PIECES).enumerate() {
+                let mut ids: Vec<u32> = chunk.iter().map(|&(id, _)| id).collect();
+                ids.push(self.source_vocab.eos);
+                items.push(Item {
+                    sentence,
+                    first: chunk_index * MAX_SOURCE_PIECES,
+                    ids,
+                });
+            }
+        }
+        // Batches of similar length (they finish decoding about together), small enough that
+        // every core gets work.
+        let mut order: Vec<usize> = (0..items.len()).collect();
+        order.sort_by_key(|&index| items[index].ids.len());
+        // About four batches per core, so cores that finish early pick up more.
+        let per_batch = items
+            .len()
+            .div_ceil(4 * rayon::current_num_threads().max(1))
+            .clamp(1, BATCH_SENTENCES);
+        let mut batches: Vec<Vec<usize>> = Vec::new();
+        let mut pieces = 0;
+        for index in order {
+            let length = items[index].ids.len();
+            match batches.last_mut() {
+                Some(batch) if batch.len() < per_batch && pieces + length <= BATCH_PIECES => {
+                    batch.push(index);
+                    pieces += length;
+                },
+                _ => {
+                    batches.push(vec![index]);
+                    pieces = length;
+                },
+            }
+        }
+        let results: Vec<(usize, Vec<(u32, usize)>)> = batches
+            .par_iter()
+            .flat_map_iter(|batch| {
+                let candidates: Vec<Vec<u32>> = batch
+                    .iter()
+                    .map(|&index| match &self.shortlist {
+                        Some(shortlist) => {
+                            shortlist.candidates(&items[index].ids, self.network.vocab_size())
+                        },
+                        None => Vec::new(),
+                    })
+                    .collect();
+                let sources: Vec<&[u32]> = batch
+                    .iter()
+                    .map(|&index| items[index].ids.as_slice())
+                    .collect();
+                let candidates: Vec<&[u32]> = candidates.iter().map(Vec::as_slice).collect();
+                let max_lengths: Vec<usize> = sources.iter().map(|ids| ids.len() * 2 + 4).collect();
+                let words = self.network.translate_batch(
+                    &sources,
+                    &candidates,
+                    self.vocab.eos,
+                    1,
+                    &max_lengths,
+                );
+                batch.clone().into_iter().zip(words)
+            })
+            .collect();
+        let mut item_words: Vec<Vec<(u32, usize)>> = vec![Vec::new(); items.len()];
+        for (index, words) in results {
+            item_words[index] = words;
+        }
+        let mut translated: Vec<Translated> = sources
+            .into_iter()
+            .map(|source| Translated {
+                source,
+                words: Vec::new(),
+            })
+            .collect();
+        // Items are in sentence order, chunks in order within each.
+        for (item, words) in items.iter().zip(item_words) {
+            let chunk_length = item.ids.len() - 1;
+            let mut previous = item.first;
+            for (word, aligned) in words {
                 // A word aligned to the end-of-sentence marker goes with the one before it.
-                let aligned = if aligned < chunk.len() {
-                    first + aligned
+                let aligned = if aligned < chunk_length {
+                    item.first + aligned
                 } else {
                     previous
                 };
-                words.push((word, aligned));
+                translated[item.sentence].words.push((word, aligned));
                 previous = aligned;
             }
         }
-        Translated { source, words }
+        translated
     }
 
     /// Which run each target piece goes in, so that reading the runs in order reads the whole

@@ -42,4 +42,7 @@ fn main() {
         let _ = writeln!(out, "{}", runs.join(&TAB.to_string()));
     }
     eprintln!("translated {} lines in {seconds:.2}s", blocks.len());
+    if std::env::var_os("STILLWATER_TRANSLATE_PROFILE").is_some() {
+        eprintln!("{}", stillwater_translate::profile_report());
+    }
 }
