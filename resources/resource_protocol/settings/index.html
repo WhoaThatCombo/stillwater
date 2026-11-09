@@ -25,6 +25,7 @@
     <button class="category" data-pane="search"><span class="icon">&#xE721;</span>Search</button>
     <button class="category" data-pane="tabs"><span class="icon">&#xE737;</span>Tabs and memory</button>
     <button class="category" data-pane="privacy"><span class="icon">&#xE72E;</span>Privacy and ad blocking</button>
+    <button class="category" data-pane="translation"><span class="icon">&#xF2B7;</span>Translation</button>
     <button class="category" data-pane="passwords"><span class="icon">&#xE8D7;</span>Passwords</button>
     <button class="category" data-pane="downloads"><span class="icon">&#xE896;</span>Downloads</button>
     <button class="category" data-pane="import"><span class="icon">&#xE8B5;</span>Import from Zen</button>
@@ -112,6 +113,29 @@
           <button class="secondary" id="show-bookmarks">Show bookmarks</button>
         </div>
         <p class="hint">They open in the sidebar. Ctrl+H shows history, Ctrl+D bookmarks the page.</p>
+      </div>
+    </section>
+
+    <section class="pane" data-pane="translation">
+      <h1>Translation</h1>
+      <div class="group" data-words="translate translation language automatic auto foreign">
+        <button class="toggle" id="tr-auto"><span>Translate pages automatically<span>Pages in other languages are translated as they open. The translate button in the address bar shows the original.</span></span><span class="switch" aria-hidden="true"></span></button>
+        <p class="hint">Pages are translated on this computer, with the same models as Firefox and Zen. What you read isn't sent anywhere. Each language is a one-time download of about 20 to 40 MB.</p>
+      </div>
+      <div class="group" data-words="translate into target language english">
+        <h2>Translate pages into</h2>
+        <select id="tr-target" class="select" aria-label="Translate pages into"></select>
+        <p class="status error" id="tr-catalog-error" hidden></p>
+      </div>
+      <div class="group" data-words="always never translate languages sites exceptions">
+        <h2>Exceptions</h2>
+        <div class="logins" id="tr-lists"></div>
+        <p class="empty" id="tr-lists-empty">None. The translate button in the address bar can always or never translate a language, or never translate a site.</p>
+      </div>
+      <div class="group" data-words="downloaded languages models delete storage disk">
+        <h2>Downloaded languages</h2>
+        <div class="logins" id="tr-models"></div>
+        <p class="empty" id="tr-models-empty">None yet. A language is downloaded the first time a page in it is translated.</p>
       </div>
     </section>
 

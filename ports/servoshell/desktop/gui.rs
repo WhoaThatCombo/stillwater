@@ -491,6 +491,13 @@ impl Gui {
                 "blocked": page.map(|webview| adblock.blocked_count(webview.id())).unwrap_or(0),
             }));
         }
+        {
+            // The translate button shows the page in the URL bar.
+            let mut translation = state.translation.borrow_mut();
+            translation.set_proxy(&headed_window.event_loop_proxy());
+            let page = self.sidebar.navigated_webview(window).map(|webview| webview.id());
+            self.sidebar.set_translate(translation.to_json(page));
+        }
                     }
                 },
             }
@@ -730,6 +737,13 @@ impl Gui {
                         );
                     }
                 },
+                WindowAction::Translate(command, argument) => {
+                    let page = self.sidebar.navigated_webview(window);
+                    state
+                        .translation
+                        .borrow_mut()
+                        .command(&command, &argument, page);
+                },
                 WindowAction::CheckForUpdates => {
                     updater::check_now(headed_window.event_loop_proxy());
                 },
@@ -767,6 +781,13 @@ impl Gui {
                 "site": url.as_ref().is_some_and(|url| adblock.enabled_for(url)),
                 "blocked": page.map(|webview| adblock.blocked_count(webview.id())).unwrap_or(0),
             }));
+        }
+        {
+            // The translate button shows the page in the URL bar.
+            let mut translation = state.translation.borrow_mut();
+            translation.set_proxy(&headed_window.event_loop_proxy());
+            let page = self.sidebar.navigated_webview(window).map(|webview| webview.id());
+            self.sidebar.set_translate(translation.to_json(page));
         }
         {
             let page = self.sidebar.navigated_webview(window);

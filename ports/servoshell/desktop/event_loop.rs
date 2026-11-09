@@ -4,6 +4,7 @@
 
 //! An event loop implementation that works in headless mode.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::Wake;
 use std::time;
@@ -23,7 +24,9 @@ pub enum AppEvent {
     /// Another process or thread has kicked the OS event loop with EventLoopWaker.
     Waker,
     Accessibility(egui_winit::accesskit_winit::Event),
-    RequestRepaint(ServoShellWindowId),
+    /// A window should repaint. The flag is the waker's "already queued" mark, cleared when the
+    /// event is handled (see `RepaintEventLoopWaker`).
+    RequestRepaint(ServoShellWindowId, Arc<AtomicBool>),
     /// A later launch of Stillwater asked this instance to open a URL (or just come forward).
     OpenUrl(String),
     /// The updater found a newer Stillwater release.
@@ -36,6 +39,8 @@ pub enum AppEvent {
     UpdateCheckDone(String),
     /// Progress or the result of Compare with Edge.
     Compare(crate::desktop::compare::CompareEvent),
+    /// Page translation: page scripts, models and translations coming back.
+    Translate(crate::desktop::translate::TranslateEvent),
     #[cfg(feature = "gamepad")]
     Gamepad(Event, String, GamepadIndex),
 }
@@ -114,10 +119,20 @@ impl HeadedEventLoopWaker {
     }
 }
 
+/// Whether a `Waker` event is already queued. Servo wakes the loop many times between turns;
+/// one queued `Waker` is enough, since handling it processes everything Servo has. Without this
+/// the queue backs up (winit hands over one queued event per turn), and other events, like page
+/// translation's, wait behind seconds of redundant wake-ups.
+pub(crate) static WAKER_QUEUED: AtomicBool = AtomicBool::new(false);
+
 impl EventLoopWaker for HeadedEventLoopWaker {
     fn wake(&self) {
+        if WAKER_QUEUED.swap(true, Ordering::AcqRel) {
+            return;
+        }
         // Kick the OS event loop awake.
         if let Err(err) = self.proxy.lock().unwrap().send_event(AppEvent::Waker) {
+            WAKER_QUEUED.store(false, Ordering::Release);
             warn!("Failed to wake up event loop ({}).", err);
         }
     }
@@ -186,18 +201,27 @@ impl EventLoopWaker for HeadlessEventLoopWaker {
 pub(crate) struct RepaintEventLoopWaker {
     proxy: EventLoopProxy<AppEvent>,
     window_id: ServoShellWindowId,
+    /// A repaint request is already queued (one is enough; see `WAKER_QUEUED`).
+    queued: Arc<AtomicBool>,
 }
 
 impl RepaintEventLoopWaker {
     pub(crate) fn new(proxy: EventLoopProxy<AppEvent>, window_id: ServoShellWindowId) -> Self {
-        Self { proxy, window_id }
+        Self { proxy, window_id, queued: Arc::new(AtomicBool::new(false)) }
     }
 }
 
 impl Wake for RepaintEventLoopWaker {
     fn wake(self: Arc<Self>) {
-        let _ = self
+        if self.queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if self
             .proxy
-            .send_event(AppEvent::RequestRepaint(self.window_id));
+            .send_event(AppEvent::RequestRepaint(self.window_id, self.queued.clone()))
+            .is_err()
+        {
+            self.queued.store(false, Ordering::Release);
+        }
     }
 }

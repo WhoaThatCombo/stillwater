@@ -238,6 +238,9 @@ pub(crate) struct RunningAppState {
     /// Downloads and the Downloads panel's list.
     #[cfg(not(any(target_os = "android", target_env = "ohos")))]
     pub(crate) downloads: crate::desktop::downloads::SharedDownloads,
+    /// Page translation.
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    pub(crate) translation: RefCell<crate::desktop::translate::Translations>,
     /// The colour scheme last sent as a client hint ("light" or "dark").
     color_scheme_hint: Cell<Option<&'static str>>,
     /// Tabs with audio or video playing, which the tab unloader leaves alone.
@@ -337,6 +340,8 @@ impl RunningAppState {
             #[cfg(not(any(target_os = "android", target_env = "ohos")))]
             history: RefCell::new(crate::desktop::history::History::new()),
             downloads,
+            #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+            translation: RefCell::new(crate::desktop::translate::Translations::new()),
             user_content_manager,
             recent_console_errors: Default::default(),
             playing_media: Default::default(),
@@ -1081,6 +1086,8 @@ impl WebViewDelegate for RunningAppState {
         if status == LoadStatus::Started {
             self.playing_media.borrow_mut().remove(&webview.id());
         }
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        self.translation.borrow_mut().on_load(&webview, status);
         if status == LoadStatus::Complete {
             self.schedule_idle_gc();
             #[cfg(not(any(target_os = "android", target_env = "ohos")))]

@@ -506,3 +506,15 @@ kbd {
     padding: 20px;
   }
 }
+
+/* The "Translate pages into" language picker. */
+.select {
+  min-width: 240px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.35));
+  border-radius: 8px;
+  background: var(--field, transparent);
+  color: inherit;
+  font: inherit;
+}

@@ -10,6 +10,7 @@ pub(crate) mod app;
 mod bookmarks;
 pub(crate) mod cli;
 pub(crate) mod compare;
+pub(crate) mod translate;
 mod command_bar;
 pub(crate) mod dialog;
 pub(crate) mod downloads;

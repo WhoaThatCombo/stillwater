@@ -59,7 +59,8 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "ready", "set-theme", "set-search", "set-tab-unload", "set-unload-low-memory", "set-newtab",
     "toggle-compact", "session-startup", "adblock-enabled", "pw-autofill", "pw-delete", "pw-reveal",
     "pw-copy", "pw-copy-user", "pw-forget-never", "zen-scan", "zen-import", "check-updates",
-    "hist-clear", "hist-show", "dl-ask", "dl-panel",
+    "hist-clear", "hist-show", "dl-ask", "dl-panel", "tr-auto", "tr-target", "tr-unlist",
+    "tr-delete-model", "tr-models",
 ];
 
 /// Whether `url` is the settings page (whatever category it shows).
@@ -110,6 +111,8 @@ pub(crate) enum WindowAction {
     CommandBar,
     /// A command from the Downloads panel (`dl-*`) and its argument.
     Download(String, String),
+    /// A page translation command (`tr-*`) and its argument.
+    Translate(String, String),
     /// Drive the find bar (`find-*` commands).
     Find(FindCommand),
 }
@@ -183,6 +186,8 @@ pub(crate) struct Sidebar {
     panes: (Option<(String, String)>, Option<(String, String)>),
     /// Ad blocking state for the shield and settings.
     adblock: serde_json::Value,
+    /// Page translation state for the translate button and settings.
+    translate: serde_json::Value,
     /// Tabs playing audio or video, for the speaker icon.
     playing_media: HashSet<WebViewId>,
     /// Saved passwords (without the passwords) and the save offer.
@@ -239,6 +244,7 @@ impl Sidebar {
             pane_focus: None,
             panes: (None, None),
             adblock: serde_json::Value::Null,
+            translate: serde_json::Value::Null,
             playing_media: HashSet::new(),
             passwords: serde_json::Value::Null,
             zen: serde_json::Value::Null,
@@ -319,6 +325,10 @@ impl Sidebar {
 
     pub(crate) fn set_playing_media(&mut self, playing_media: HashSet<WebViewId>) {
         self.playing_media = playing_media;
+    }
+
+    pub(crate) fn set_translate(&mut self, translate: serde_json::Value) {
+        self.translate = translate;
     }
 
     pub(crate) fn set_adblock(&mut self, adblock: serde_json::Value) {
@@ -1025,6 +1035,9 @@ impl Sidebar {
                 command if command.starts_with("dl-") => self
                     .window_actions
                     .push(WindowAction::Download(command.to_owned(), argument.to_owned())),
+                command if command.starts_with("tr-") => self
+                    .window_actions
+                    .push(WindowAction::Translate(command.to_owned(), argument.to_owned())),
                 "set-unload-low-memory" => self
                     .settings
                     .borrow_mut()
@@ -1107,6 +1120,7 @@ impl Sidebar {
             "glance": glance,
             "paneFocused": self.pane_focus.is_some(),
             "adblock": self.adblock,
+            "translate": self.translate,
             "passwords": self.passwords,
             "zen": self.zen,
             "compare": self.compare,

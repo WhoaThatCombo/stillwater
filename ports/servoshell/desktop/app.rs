@@ -406,12 +406,15 @@ impl ApplicationHandler<AppEvent> for App {
         };
 
         diagnostics::count("app_event");
-        if !matches!(app_event, AppEvent::Waker | AppEvent::RequestRepaint(_)) {
+        if !matches!(app_event, AppEvent::Waker | AppEvent::RequestRepaint(..)) {
             diagnostics::log(format!("app event: {app_event:?}"));
         }
         let opened_url = matches!(app_event, AppEvent::OpenUrl(_));
         match app_event {
-            AppEvent::Waker => (),
+            // Cleared before pumping Servo, so a wake during the pump queues a new one.
+            AppEvent::Waker => {
+                crate::desktop::event_loop::WAKER_QUEUED.store(false, std::sync::atomic::Ordering::Release)
+            },
             AppEvent::Accessibility(ref event) => {
                 if let Some(window) =
                     state.window(ServoShellWindowId::from(u64::from(event.window_id))) &&
@@ -420,7 +423,8 @@ impl ApplicationHandler<AppEvent> for App {
                     headed_window.handle_winit_app_event(state.clone(), app_event);
                 }
             },
-            AppEvent::RequestRepaint(window_id) => {
+            AppEvent::RequestRepaint(window_id, queued) => {
+                queued.store(false, std::sync::atomic::Ordering::Release);
                 if let Some(window) = state.window(window_id) {
                     window.set_needs_repaint();
                 }
@@ -485,6 +489,15 @@ impl ApplicationHandler<AppEvent> for App {
                             TopLevelWebViewCreationRequest::WithUrl(url),
                         );
                     }
+                    window.set_needs_update();
+                }
+            },
+            AppEvent::Translate(event) => {
+                state
+                    .translation
+                    .borrow_mut()
+                    .handle(event, |id| state.webview_by_id(id));
+                for window in state.windows().iter() {
                     window.set_needs_update();
                 }
             },

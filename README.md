@@ -99,12 +99,21 @@ first install.
   Matches highlight as you type (the active one in orange), with a "3 of 17" counter, Match case,
   and wrap-around next/previous. The engine searches the rendered text and paints the highlights
   itself, so the page's DOM is never touched.
+- **Translation, on this computer**: pages in another language are translated as they open, like Firefox
+  and Zen, and nothing you read is sent anywhere. Stillwater runs Firefox Translations' models (the same
+  ones Firefox and Zen use) with its own engine written in Rust ([`ports/translate`](ports/translate)).
+  Each language is downloaded once from Mozilla (20 to 40 MB, checked against Mozilla's checksums). 59 languages
+  translate into English and 57 out of it; other pairs go through English. Links, bold text and buttons
+  stay in place, text the page adds later is translated too, and right-to-left pages switch direction.
+  The translate button in the address bar shows the original and can always or never translate a
+  language or site; Settings → **Translation** picks the language to translate into and manages
+  downloaded languages.
 - **Audio indicator**: tabs playing audio or video show a speaker icon.
 - **App menu** (the ≡ button at the top of the sidebar, like Zen's): new tab, history, bookmarks, downloads,
   passwords, Compare with Edge, settings, updates and quit, with their shortcuts.
 - **Settings page** (`servo:settings`, from the menu or <kbd>Ctrl</kbd>+<kbd>,</kbd>): opens in a tab, laid out
   like Zen's, with a category list and "Find in settings": appearance, startup, the new-tab bar, compact mode,
-  search engine, tab unloading, ad blocking, clearing browsing data, saved passwords, downloads, import from
+  search engine, tab unloading, ad blocking, clearing browsing data, translation, saved passwords, downloads, import from
   Zen, a keyboard shortcut reference and updates. Only a tab that really shows `servo:settings` can change
   settings; a web page sending the same messages is ignored.
 - **Downloads button** in the bottom-left corner, with a progress ring while files download.
@@ -219,7 +228,12 @@ cd stillwater
   styling are adapted from Zen's MPL-2.0 stylesheets (credited in
   [`zen-sidebar.css`](resources/resource_protocol/sidebar/zen-sidebar.css)).
 
-Stillwater is not affiliated with or endorsed by the Servo project or Zen Browser.
+- **[Firefox Translations](https://github.com/mozilla/firefox-translations-models)** /
+  [Project Bergamot](https://browser.mt/): the translation models, downloaded from Mozilla when a
+  language is first needed, and the model, vocabulary and shortlist formats Stillwater's engine reads
+  (from [Marian](https://github.com/marian-nmt/marian-dev)). The engine itself is Stillwater's own Rust.
+
+Stillwater is not affiliated with or endorsed by the Servo project, Zen Browser or Mozilla.
 
 ## License
 

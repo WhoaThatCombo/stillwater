@@ -360,6 +360,57 @@ $("check-updates").addEventListener("click", () => {
   send("check-updates");
 });
 
+// ---- Translation ----
+
+const translation = () => state.translate || {};
+$("tr-auto").addEventListener("click", () => send("tr-auto", translation().auto ? "false" : "true"));
+$("tr-target").addEventListener("change", () => send("tr-target", $("tr-target").value));
+function listRow(text, action, onClick) {
+  const row = document.createElement("div");
+  row.className = "login never";
+  const name = document.createElement("span");
+  name.className = "login-host";
+  name.textContent = text;
+  const button = document.createElement("button");
+  button.className = "secondary";
+  button.textContent = action;
+  button.addEventListener("click", onClick);
+  row.append(name, button);
+  return row;
+}
+function renderTranslation() {
+  const data = translation();
+  pressed($("tr-auto"), data.auto);
+  const select = $("tr-target");
+  const targets = data.targets || [];
+  const key = JSON.stringify(targets);
+  if (select.dataset.key !== key) {
+    select.dataset.key = key;
+    select.replaceChildren(...targets.map((target) => {
+      const option = document.createElement("option");
+      option.value = target.code;
+      option.textContent = target.name;
+      return option;
+    }));
+  }
+  if (document.activeElement !== select) select.value = data.to || "en";
+  $("tr-catalog-error").hidden = !data.catalogError;
+  $("tr-catalog-error").textContent = data.catalogError || "";
+  const rows = [
+    ...(data.always || []).map((language) => listRow(`Always translate ${language.name}`, "Remove", () => send("tr-unlist", `always:${language.code}`))),
+    ...(data.neverLanguages || []).map((language) => listRow(`Never translate ${language.name}`, "Remove", () => send("tr-unlist", `never-language:${language.code}`))),
+    ...(data.neverSites || []).map((site) => listRow(`Never translate ${site}`, "Remove", () => send("tr-unlist", `never-site:${site}`))),
+  ];
+  $("tr-lists").replaceChildren(...rows);
+  $("tr-lists-empty").hidden = rows.length > 0;
+  const models = data.models || [];
+  $("tr-models").replaceChildren(...models.map((model) =>
+    listRow(`${model.name} · ${Math.max(1, Math.round(model.size / 1e6))} MB`, "Delete", () => send("tr-delete-model", model.pair))));
+  $("tr-models-empty").hidden = models.length > 0;
+}
+// The list of languages to translate into comes from Mozilla's model list.
+send("tr-models");
+
 // ---- Calls from Stillwater ----
 
 window.stillwaterSettings = {
@@ -368,6 +419,7 @@ window.stillwaterSettings = {
     renderGeneral();
     renderLogins();
     renderDownloads();
+    renderTranslation();
     renderZen();
   },
   // A saved password the user asked to see (sent only on request, never in the state).

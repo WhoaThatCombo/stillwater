@@ -102,6 +102,12 @@ function openMenu(items, x, y) {
       line.className = "menu-separator";
       return line;
     }
+    if (item.note) {
+      const note = document.createElement("div");
+      note.className = "menu-note";
+      note.textContent = item.note;
+      return note;
+    }
     if (item.header) {
       const header = document.createElement("div");
       header.className = "menu-header";
@@ -423,6 +429,63 @@ function shieldMenu() {
   ];
 }
 
+// The translate button: pages in another language are translated on this computer (Firefox
+// Translations' models, run by Stillwater's own engine), automatically unless turned off.
+function renderTranslate() {
+  const translate = state.translate || {};
+  const button = $("translate");
+  const status = translate.status || "idle";
+  button.hidden = status === "idle" || status === "same";
+  button.classList.toggle("translated", status === "translated");
+  button.classList.toggle("busy", status === "downloading" || status === "translating");
+  button.classList.toggle("problem", status === "failed" || status === "unsupported");
+  const from = translate.fromName || "another language";
+  const to = translate.toName || "your language";
+  button.title = {
+    offer: `Translate from ${from} to ${to}`,
+    downloading: `Downloading ${from} for translation…`,
+    translating: `Translating from ${from}…`,
+    translated: `Translated from ${from}. Click to show the original`,
+    unsupported: `${from} can't be translated to ${to} yet`,
+    failed: translate.message || "Translation failed",
+  }[status] || "Translate this page";
+}
+
+function translateMenu() {
+  const translate = state.translate || {};
+  const status = translate.status;
+  const from = translate.fromName || "this language";
+  const to = translate.toName || "your language";
+  const items = [];
+  if (status === "offer") {
+    items.push({ note: `This page is in ${from}.` });
+    items.push({ label: `Translate to ${to}`, glyph: "\uF2B7", run: () => send("tr-translate") });
+  } else if (status === "downloading") {
+    items.push({ note: `Downloading the ${from} translation model (about 30 MB, once)…` });
+  } else if (status === "translating" || status === "translated") {
+    items.push({ note: status === "translating" ? `Translating from ${from} to ${to}…` : `Translated from ${from} to ${to}, on this computer.` });
+    items.push({ label: "Show original", glyph: "\uE7A7", run: () => send("tr-original") });
+  } else if (status === "unsupported") {
+    items.push({ note: `There's no translation model from ${from} to ${to} yet.` });
+  } else if (status === "failed") {
+    items.push({ note: translate.message || "Translation failed." });
+    items.push({ label: "Try again", glyph: "\uE72C", run: () => send("tr-translate") });
+  }
+  if (translate.from) {
+    items.push("-");
+    if (!translate.auto) {
+      items.push({ label: `${translate.alwaysThis ? "✓ " : ""}Always translate ${from}`, run: () => send("tr-always") });
+    }
+    items.push({ label: `${translate.neverThis ? "✓ " : ""}Never translate ${from}`, run: () => send("tr-never-language") });
+    if (translate.host) {
+      items.push({ label: `${translate.neverSite ? "✓ " : ""}Never translate ${translate.host}`, run: () => send("tr-never-site") });
+    }
+  }
+  items.push("-");
+  items.push({ label: "Translation settings", run: () => send("open-settings", "translation") });
+  return items;
+}
+
 // The app menu (the ≡ button), like Zen's: everything Stillwater can open, with shortcuts.
 function appMenu() {
   const version = (state.settings && state.settings.version) || "";
@@ -632,6 +695,7 @@ function render() {
   renderKey();
   if (!passwordsPanel.hidden) renderPasswordList();
   renderShield();
+  renderTranslate();
   renderUpdate();
   if (state.workspaces) renderWorkspaces();
   // Don't rebuild the lists while the user is renaming something in them.
@@ -708,6 +772,11 @@ $("main-menu").addEventListener("click", (event) => {
   event.stopPropagation();
   const box = $("main-menu").getBoundingClientRect();
   openMenu(appMenu(), box.left, box.bottom + 4);
+});
+$("translate").addEventListener("click", (event) => {
+  event.stopPropagation();
+  const box = $("translate").getBoundingClientRect();
+  openMenu(translateMenu(), box.left, box.bottom);
 });
 $("shield").addEventListener("click", (event) => {
   event.stopPropagation();

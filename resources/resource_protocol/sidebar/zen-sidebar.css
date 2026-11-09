@@ -859,6 +859,31 @@ button.secondary:hover {
   opacity: 0.45;
 }
 
+/* Page translation: shown for pages in another language, coloured once translated. */
+#translate[hidden] {
+  display: none;
+}
+
+#translate.translated {
+  color: var(--zen-primary-color, #6c8cff);
+}
+
+#translate.busy {
+  color: var(--zen-primary-color, #6c8cff);
+  opacity: 0.6;
+}
+
+#translate.problem {
+  color: #d8731b;
+}
+
+.menu-note {
+  padding: 6px 10px 4px;
+  font-size: 12px;
+  line-height: 1.35;
+  opacity: 0.75;
+}
+
 /* ---- Saved passwords ---- */
 button.primary {
   height: 32px;
