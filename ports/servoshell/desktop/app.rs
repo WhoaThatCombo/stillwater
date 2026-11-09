@@ -323,6 +323,17 @@ impl App {
         let create_platform_window = |url: Url| self.create_platform_window(url, active_event_loop);
         if !state.spin_event_loop(Some(&create_platform_window)) {
             self.state = AppState::ShuttingDown;
+            // Tabs, history, passwords and settings are saved as they change, so nothing is
+            // lost if the engine is slow to stop (it waits for every page's script thread, and a
+            // busy page can hold that up): after a few seconds the process just exits.
+            std::thread::Builder::new()
+                .name("ShutdownDeadline".into())
+                .spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    diagnostics::log("shutdown: the engine is still stopping after 3 s; exiting");
+                    std::process::exit(0);
+                })
+                .ok();
             return false;
         }
 

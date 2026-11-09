@@ -105,6 +105,9 @@ pub(crate) struct Settings {
     pub(crate) restore_session: bool,
     /// New tab (Ctrl+T) opens Zen's floating address bar instead of a New Tab page.
     pub(crate) new_tab_bar: bool,
+    /// Zen's spaces (several sets of tabs, switched at the bottom of the sidebar). Off by
+    /// default: one list of tabs.
+    pub(crate) spaces: bool,
     path: Option<PathBuf>,
 }
 
@@ -135,6 +138,7 @@ impl Settings {
             unload_on_low_memory: saved["unloadOnLowMemory"].as_bool().unwrap_or(true),
             restore_session: saved["startup"].as_str() != Some("newtab"),
             new_tab_bar: saved["newTabBar"].as_bool().unwrap_or(true),
+            spaces: saved["spaces"].as_bool().unwrap_or(false),
             path,
         };
         settings.publish_search_template();
@@ -153,6 +157,7 @@ impl Settings {
             "unloadOnLowMemory": self.unload_on_low_memory,
             "startup": self.startup_id(),
             "newTabBar": self.new_tab_bar,
+            "spaces": self.spaces,
         });
         let result = path
             .parent()
@@ -221,6 +226,11 @@ impl Settings {
         }
     }
 
+    pub(crate) fn set_spaces(&mut self, enabled: bool) {
+        self.spaces = enabled;
+        self.save();
+    }
+
     pub(crate) fn set_new_tab_bar(&mut self, enabled: bool) {
         self.new_tab_bar = enabled;
         self.save();
@@ -240,6 +250,7 @@ impl Settings {
             "unloadOnLowMemory": self.unload_on_low_memory,
             "startup": self.startup_id(),
             "newTabBar": self.new_tab_bar,
+            "spaces": self.spaces,
             "version": crate::desktop::updater::CURRENT_VERSION,
         })
     }

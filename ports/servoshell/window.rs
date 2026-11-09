@@ -189,6 +189,8 @@ impl ServoShellWindow {
 
     #[cfg_attr(target_os = "android", expect(dead_code))]
     pub(crate) fn schedule_close(&self) {
+        // Gone from the screen at once: shutting down can take a moment (see `App`).
+        self.platform_window.hide_for_close();
         self.close_scheduled.set(true)
     }
 
@@ -472,6 +474,8 @@ pub(crate) trait PlatformWindow {
 
     fn show_embedder_control(&self, _: WebViewId, _: EmbedderControl) {}
     fn hide_embedder_control(&self, _: WebViewId, _: EmbedderControlId) {}
+    /// The window is closing: take it off the screen now.
+    fn hide_for_close(&self) {}
     fn dismiss_embedder_controls_for_webview(&self, _: WebViewId) {}
     fn show_bluetooth_device_dialog(
         &self,

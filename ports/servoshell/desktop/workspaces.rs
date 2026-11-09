@@ -181,6 +181,8 @@ pub(crate) struct Workspaces {
     closed: Vec<UnloadedTab>,
     /// For each space not visited since launch: the restored tab that was active in it.
     session_active: HashMap<u32, u32>,
+    /// Spaces are turned on (Settings → Tabs). Off, there's one list of tabs, untinted.
+    enabled: bool,
 }
 
 impl Workspaces {
@@ -239,7 +241,47 @@ impl Workspaces {
             restored: Vec::new(),
             closed: Vec::new(),
             session_active: Default::default(),
+            enabled: true,
         }
+        .with_spaces(crate::desktop::settings::Settings::load().spaces)
+    }
+
+    fn with_spaces(mut self, enabled: bool) -> Self {
+        self.set_enabled(enabled);
+        self
+    }
+
+    /// Turn spaces on or off. Turning them off merges every space into the first, so no tab,
+    /// pinned tab or folder is lost.
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if enabled || self.list.len() <= 1 {
+            return;
+        }
+        let main = self.list[0].id;
+        let active = self.last_active.get(&self.current).copied();
+        let session_active = self.session_active.get(&self.current).copied();
+        for space in self.tab_workspace.values_mut() {
+            *space = main;
+        }
+        for pin in &mut self.pins {
+            if pin.space != ESSENTIALS {
+                pin.space = main;
+            }
+        }
+        for folder in &mut self.folders {
+            folder.space = main;
+        }
+        for tab in self.unloaded.iter_mut().chain(self.closed.iter_mut()) {
+            tab.space = main;
+        }
+        self.last_active.clear();
+        self.last_active.extend(active.map(|tab| (main, tab)));
+        self.session_active.clear();
+        self.session_active.extend(session_active.map(|tab| (main, tab)));
+        self.list.truncate(1);
+        self.current = main;
+        self.save();
     }
 
     fn save(&self) {
@@ -543,6 +585,7 @@ impl Workspaces {
         };
         let Some(accent) = self
             .current_workspace()
+            .filter(|_| self.enabled)
             .and_then(|workspace| COLORS[workspace.color])
         else {
             return base;
@@ -562,11 +605,12 @@ impl Workspaces {
                     "name": workspace.name,
                     "icon": ICONS[workspace.icon],
                     "color": COLORS[workspace.color]
+                        .filter(|_| self.enabled)
                         .map(|[r, g, b]| format!("rgb({r}, {g}, {b})")),
                 })
             })
             .collect();
-        json!({ "list": list, "current": self.current })
+        json!({ "list": list, "current": self.current, "enabled": self.enabled })
     }
 }
 

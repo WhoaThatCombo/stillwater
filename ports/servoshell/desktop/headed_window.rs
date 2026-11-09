@@ -1467,6 +1467,10 @@ impl HeadedWindow {
 }
 
 impl PlatformWindow for HeadedWindow {
+    fn hide_for_close(&self) {
+        self.winit_window.set_visible(false);
+    }
+
     fn platform_manages_focus(&self) -> bool {
         true
     }

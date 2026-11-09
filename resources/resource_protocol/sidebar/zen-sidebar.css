@@ -1165,3 +1165,13 @@ button.secondary.armed {
   font-size: 11.5px;
   opacity: 0.55;
 }
+
+/* Spaces turned off (Settings → Tabs and memory): no switcher, no space name, icon or colour. */
+body.no-spaces #workspaces,
+body.no-spaces #ws-icon,
+body.no-spaces #ws-name,
+body.no-spaces #ws-name-input,
+body.no-spaces #ws-color,
+body.no-spaces #ws-delete {
+  display: none;
+}

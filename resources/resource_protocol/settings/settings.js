@@ -92,6 +92,7 @@ wireChoices($("startup"), (value) => send("session-startup", value));
 wireChoices($("newtab"), (value) => send("set-newtab", value));
 $("compact").addEventListener("click", () => send("toggle-compact"));
 $("lowmem").addEventListener("click", () => send("set-unload-low-memory", state.settings && state.settings.unloadOnLowMemory ? "0" : "1"));
+$("spaces").addEventListener("click", () => send("set-spaces", state.settings && state.settings.spaces ? "0" : "1"));
 $("adblock").addEventListener("click", () => send("adblock-enabled", state.adblock && state.adblock.enabled ? "0" : "1"));
 
 function renderGeneral() {
@@ -107,6 +108,7 @@ function renderGeneral() {
     label: value === 0 ? "Never" : value < 60 ? `${value} min` : `${value / 60} h`, value,
   })), settings.tabUnloadMinutes, (value) => send("set-tab-unload", value));
   pressed($("lowmem"), settings.unloadOnLowMemory);
+  pressed($("spaces"), settings.spaces);
   const adblock = state.adblock || {};
   pressed($("adblock"), adblock.enabled);
   $("adblock-hint").textContent = adblock.enabled && !adblock.ready

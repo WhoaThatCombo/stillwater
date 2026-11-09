@@ -366,6 +366,9 @@ function renderWorkspaces() {
   $("ws-icon").textContent = workspace.icon;
   $("ws-name").textContent = workspace.name;
   $("ws-delete").disabled = state.workspaces.list.length < 2;
+  // Spaces off (the default): one list of tabs, no switcher and no space controls.
+  const spaces = state.workspaces.enabled !== false;
+  document.body.classList.toggle("no-spaces", !spaces);
 
   const strip = state.workspaces.list.map((space, index) => {
     const button = document.createElement("button");

@@ -59,7 +59,7 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "ready", "set-theme", "set-search", "set-tab-unload", "set-unload-low-memory", "set-newtab",
     "toggle-compact", "session-startup", "adblock-enabled", "pw-autofill", "pw-delete", "pw-reveal",
     "pw-copy", "pw-copy-user", "pw-forget-never", "zen-scan", "zen-import", "check-updates",
-    "hist-clear", "hist-show", "dl-ask", "dl-panel", "tr-auto", "tr-target", "tr-unlist",
+    "hist-clear", "hist-show", "dl-ask", "dl-panel", "set-spaces", "tr-auto", "tr-target", "tr-unlist",
     "tr-delete-model", "tr-models",
 ];
 
@@ -857,6 +857,12 @@ impl Sidebar {
                     self.window_actions.push(WindowAction::CommandBar)
                 },
                 "set-newtab" => self.settings.borrow_mut().set_new_tab_bar(argument == "1"),
+                "set-spaces" => {
+                    let enabled = argument == "1";
+                    self.settings.borrow_mut().set_spaces(enabled);
+                    self.workspaces.set_enabled(enabled);
+                    layout_changed = true;
+                },
                 "new-tab" => {
                     self.workspaces.open_tab(window);
                     self.focus_url(window);

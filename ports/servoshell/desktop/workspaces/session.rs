@@ -140,13 +140,11 @@ impl Workspaces {
         }
         let mut first_tab = None;
         for space in data["spaces"].as_array().into_iter().flatten() {
-            let Some(id) = space["id"]
-                .as_u64()
-                .map(|id| id as u32)
-                .filter(|id| self.space_exists(*id))
-            else {
+            // Tabs of a space that's gone (spaces were merged) come back in the current one.
+            let Some(id) = space["id"].as_u64().map(|id| id as u32) else {
                 continue;
             };
+            let id = if self.space_exists(id) { id } else { self.current };
             let active = space["active"].as_u64().map(|index| index as usize);
             for (index, tab) in space["tabs"].as_array().into_iter().flatten().enumerate() {
                 let Some(url) = tab["url"]
@@ -166,7 +164,8 @@ impl Workspaces {
                     space: id,
                     order: self.next_order,
                 });
-                if active == Some(index) {
+                // With spaces merged, the first space's active tab wins.
+                if active == Some(index) && !self.session_active.contains_key(&id) {
                     self.session_active.insert(id, key);
                     if id == self.current {
                         first_tab = Some(key);
