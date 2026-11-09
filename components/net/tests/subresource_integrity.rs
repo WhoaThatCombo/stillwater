@@ -88,3 +88,26 @@ fn test_response_integrity_invalid() {
     *response.body.lock() = ResponseBody::Done(response_body);
     assert!(!is_response_integrity_valid(integrity_metadata, &response));
 }
+
+#[test]
+fn test_response_integrity_of_unfinished_bodies() {
+    let url: ServoUrl = ServoUrl::parse("http://servo.org").unwrap();
+    let response: Response = Response::new(
+        url,
+        ResourceFetchTiming::new(ResourceTimingType::Navigation),
+    );
+    let empty_sha256 = "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=";
+    let script_sha384 =
+        "sha384-H8BRh8j48O9oYatfu5AZzq6A9RINhZO5H16dQZngK7T62em8MUt1FLm52t+eX6xO";
+
+    // A null body is checked as zero bytes.
+    *response.body.lock() = ResponseBody::Empty;
+    assert!(is_response_integrity_valid(empty_sha256, &response));
+    assert!(!is_response_integrity_valid(script_sha384, &response));
+
+    // A body that never finished matches nothing, and doesn't panic.
+    *response.body.lock() =
+        ResponseBody::Receiving("alert('Hello, world.');".to_owned().into_bytes());
+    assert!(!is_response_integrity_valid(script_sha384, &response));
+    assert!(!is_response_integrity_valid(empty_sha256, &response));
+}

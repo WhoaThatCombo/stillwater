@@ -140,16 +140,23 @@ pub fn get_strongest_metadata<'a>(integrity_metadata_list: Vec<SriEntry<'a>>) ->
 }
 
 /// <https://w3c.github.io/webappsec-subresource-integrity/#apply-algorithm-to-response>
+///
+/// Returns `None` for a body that never finished arriving, which matches no metadata.
 fn apply_algorithm_to_response(
     body: MutexGuard<ResponseBody>,
     algorithm: &'static digest::Algorithm,
-) -> String {
-    if let ResponseBody::Done(ref vec) = *body {
-        let response_digest = digest::digest(algorithm, vec);
-        base64::engine::general_purpose::STANDARD.encode(response_digest)
-    } else {
-        unreachable!("Tried to calculate digest of incomplete response body")
-    }
+) -> Option<String> {
+    let bytes: &[u8] = match *body {
+        ResponseBody::Done(ref vec) => vec,
+        // A null body is an empty byte sequence. This is also what requests waiting on a cached
+        // response get when the network fetch filling the cache fails.
+        ResponseBody::Empty => &[],
+        // An unfinished body (its fetch was cancelled) can't be shown to match: fail the check
+        // instead of taking the network thread down.
+        ResponseBody::Receiving(_) => return None,
+    };
+    let response_digest = digest::digest(algorithm, bytes);
+    Some(base64::engine::general_purpose::STANDARD.encode(response_digest))
 }
 
 /// <https://w3c.github.io/webappsec-subresource-integrity/#is-response-eligible>
@@ -186,7 +193,7 @@ pub fn is_response_integrity_valid(integrity_metadata: &str, response: &Response
             Algorithm::Sha512 => apply_algorithm_to_response(body, &digest::SHA512),
         };
 
-        if hashed == digest {
+        if hashed.as_deref() == Some(digest) {
             return true;
         }
     }

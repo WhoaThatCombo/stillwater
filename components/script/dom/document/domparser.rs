@@ -94,7 +94,9 @@ impl DOMParserMethods<crate::DomTypeHolder> for DOMParser {
                     &self.window,
                     HasBrowsingContext::No,
                     Some(url.clone()),
-                    None,
+                    // Sharing the URL means sharing its base: a document parsed inside an
+                    // about:srcdoc frame resolves links like the frame does.
+                    doc.about_base_url(),
                     doc.origin().clone(),
                     IsHTMLDocument::HTMLDocument,
                     Some(content_type),
@@ -131,7 +133,9 @@ impl DOMParserMethods<crate::DomTypeHolder> for DOMParser {
                     &self.window,
                     HasBrowsingContext::No,
                     Some(url.clone()),
-                    None,
+                    // Sharing the URL means sharing its base: a document parsed inside an
+                    // about:srcdoc frame resolves links like the frame does.
+                    doc.about_base_url(),
                     doc.origin().clone(),
                     IsHTMLDocument::NonHTMLDocument,
                     Some(content_type),

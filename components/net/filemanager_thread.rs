@@ -319,6 +319,9 @@ impl FileManager {
                 bytes.extend_from_slice(buf.bytes.index(range));
 
                 let _ = done_sender.send(Data::Payload(Bytes::copy_from_slice(&bytes)));
+                // The whole blob is here: finish the response body too, as reading a file does.
+                // Integrity checks (`<script src="blob:..." integrity>`) read it from there.
+                *response.body.lock() = ResponseBody::Done(bytes);
                 let _ = done_sender.send(Data::Done);
 
                 Ok(())

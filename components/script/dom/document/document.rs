@@ -1315,9 +1315,12 @@ impl Document {
         if document_url.as_str() == "about:srcdoc" {
             // Step 1.1: Assert: document's about base URL is non-null.
             // Step 1.2: Return document's about base URL.
-            return self
-                .about_base_url()
-                .expect("about:srcdoc page should always have an about base URL");
+            // Documents made by script can carry the URL without one; fall back to the URL
+            // (step 3) instead of taking the page down.
+            if let Some(about_base_url) = self.about_base_url() {
+                return about_base_url;
+            }
+            warn!("about:srcdoc document without an about base URL");
         }
 
         // Step 2: If document's URL matches about:blank and document's about base URL is
