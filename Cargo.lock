@@ -9895,6 +9895,7 @@ dependencies = [
  "servo-webxr-api",
  "surfman",
  "webrender_api",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

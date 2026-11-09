@@ -248,6 +248,8 @@ pub(crate) struct RunningAppState {
     /// When to run an idle garbage collection: a few seconds after pages finish loading or
     /// close, once things have settled.
     gc_due: Cell<Option<std::time::Instant>>,
+    /// Whether a page was replaced or a tab closed since the renderer's caches were last dropped.
+    render_caches_stale: Cell<bool>,
 
     /// Whether or not program exit has been triggered. This means that all windows
     /// will be destroyed and shutdown will start at the end of the current event loop.
@@ -347,6 +349,7 @@ impl RunningAppState {
             playing_media: Default::default(),
             color_scheme_hint: Cell::new(None),
             gc_due: Default::default(),
+            render_caches_stale: Default::default(),
             experimental_preferences_enabled,
             accessibility_active: Cell::new(false),
         }
@@ -888,7 +891,15 @@ impl RunningAppState {
             self.gc_due.set(None);
             #[cfg(not(any(target_os = "android", target_env = "ohos")))]
             crate::desktop::diagnostics::log("idle garbage collection");
-            self.servo.collect_garbage();
+            // When a page was replaced or a tab closed, also drop the renderer's caches: its
+            // textures for the old pages are only evicted as new frames are drawn, so an idle
+            // window otherwise keeps hundreds of megabytes of them. The next frame redraws its
+            // glyphs and images, once.
+            if self.render_caches_stale.replace(false) {
+                self.servo.notify_memory_pressure();
+            } else {
+                self.servo.collect_garbage();
+            }
         }
     }
 }
@@ -1051,6 +1062,7 @@ impl WebViewDelegate for RunningAppState {
     fn notify_closed(&self, webview: WebView) {
         let webview_id = webview.id();
         self.playing_media.borrow_mut().remove(&webview_id);
+        self.render_caches_stale.set(true);
         self.schedule_idle_gc();
         self.pending_webdriver_events
             .borrow_mut()
@@ -1085,6 +1097,7 @@ impl WebViewDelegate for RunningAppState {
         // A new page has no media playing yet.
         if status == LoadStatus::Started {
             self.playing_media.borrow_mut().remove(&webview.id());
+            self.render_caches_stale.set(true);
         }
         #[cfg(not(any(target_os = "android", target_env = "ohos")))]
         self.translation.borrow_mut().on_load(&webview, status);

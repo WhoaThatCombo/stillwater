@@ -867,6 +867,18 @@ where
             .map(ConstellationWebView::browsing_context_group)
     }
 
+    /// Whether no other WebView (a popup or its opener) shares this one's browsing context group.
+    fn webview_is_alone_in_its_group(&self, webview_id: WebViewId) -> bool {
+        let Some(group) = self.browsing_context_group_for_webview_id(&webview_id) else {
+            return false;
+        };
+        self.webviews
+            .values()
+            .filter(|webview| Rc::ptr_eq(&webview.browsing_context_group(), &group))
+            .count() <=
+            1
+    }
+
     fn get_event_loop(
         &self,
         host: &Host,
@@ -940,6 +952,16 @@ where
         let Some(registered_domain_name) = registered_domain_name else {
             return None;
         };
+
+        // Stillwater: a page a tab navigates to gets a fresh event loop (script thread), even on
+        // the same site. Pages left behind in a reused event loop were never freed: every page
+        // read on a site stayed in memory (tens of megabytes each) until the tab left the site.
+        // A fresh one lets the old event loop exit once its last page is gone. Only for a tab
+        // that shares its browsing context group with no other tab (no popups or openers), whose
+        // same-site pages may need to reach each other synchronously.
+        if parent_pipeline_id.is_none() && self.webview_is_alone_in_its_group(webview_id) {
+            return None;
+        }
 
         self.get_event_loop(registered_domain_name, &webview_id)
             .ok()?

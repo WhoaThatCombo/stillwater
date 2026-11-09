@@ -207,8 +207,14 @@ mod platform {
             let heap = GetProcessHeap();
 
             if HeapValidate(heap, 0, ptr) == FALSE {
-                // Over-aligned allocations store the real heap block just before `ptr`.
-                ptr = *(ptr as *const *const c_void).offset(-1);
+                // Over-aligned allocations (aligned to more than 16 bytes) store the real heap
+                // block just before `ptr`. Anything else may sit at the start of unreadable
+                // memory, so only look there when it could be one and the word is readable.
+                let header = (ptr as *const *const c_void).wrapping_offset(-1);
+                if (ptr as usize) % 32 != 0 || !readable(header.cast()) {
+                    return 0;
+                }
+                ptr = *header;
                 // Anything else (static data, memory from another allocator) can't be
                 // measured: HeapSize on a pointer that isn't a heap block is undefined.
                 if HeapValidate(heap, 0, ptr) == FALSE {
@@ -224,6 +230,22 @@ mod platform {
             crate::ALLOC.note_allocation(ptr, size);
             size
         }
+    }
+
+    /// Whether the pointer-sized word at `address` is committed, readable memory.
+    unsafe fn readable(address: *const c_void) -> bool {
+        use windows_sys::Win32::System::Memory::{
+            MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
+        };
+        let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<MEMORY_BASIC_INFORMATION>();
+        if unsafe { VirtualQuery(address, &mut info, size) } != size {
+            return false;
+        }
+        let end = info.BaseAddress as usize + info.RegionSize;
+        info.State == MEM_COMMIT &&
+            info.Protect & (PAGE_NOACCESS | PAGE_GUARD) == 0 &&
+            address as usize + std::mem::size_of::<usize>() <= end
     }
 
     pub fn heap_reports() -> Vec<crate::HeapReport> {

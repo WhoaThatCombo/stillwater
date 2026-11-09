@@ -63,6 +63,81 @@ use crate::webxr::{WebXRBridge, WebXRBridgeInit};
 
 type GLint = i32;
 
+/// Stillwater: drops a WebGL GPU device that nothing else uses. On Windows, ANGLE wraps the
+/// Direct3D device in an EGL device holding its own reference, which surfman never releases;
+/// without this, the device (tens of megabytes and dozens of driver threads) outlives every page
+/// that used WebGL.
+fn release_device(device: Rc<Device>) {
+    let Ok(device) = Rc::try_unwrap(device) else {
+        return;
+    };
+    #[cfg(windows)]
+    let egl_device = angle_device::egl_device(&device);
+    drop(device);
+    #[cfg(windows)]
+    angle_device::release(egl_device);
+}
+
+#[cfg(windows)]
+mod angle_device {
+    use std::ffi::{CStr, c_void};
+
+    use surfman::Device;
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+
+    const EGL_DEVICE_EXT: i32 = 0x322C;
+
+    type QueryDisplayAttrib = unsafe extern "system" fn(*mut c_void, i32, *mut isize) -> u32;
+    type ReleaseDevice = unsafe extern "system" fn(*mut c_void) -> u32;
+
+    fn egl_function(name: &CStr) -> Option<*const c_void> {
+        type GetProcAddress = unsafe extern "system" fn(*const u8) -> *const c_void;
+        unsafe {
+            let module = GetModuleHandleA(c"libEGL.dll".as_ptr().cast());
+            if module.is_null() {
+                return None;
+            }
+            let get_proc_address: GetProcAddress =
+                std::mem::transmute(GetProcAddress(module, c"eglGetProcAddress".as_ptr().cast())?);
+            let function = get_proc_address(name.as_ptr().cast());
+            (!function.is_null()).then_some(function)
+        }
+    }
+
+    /// The EGL device ANGLE created for this device's display, if any.
+    pub(super) fn egl_device(device: &Device) -> Option<*mut c_void> {
+        let native = device.native_device();
+        unsafe {
+            // `native_device` adds a reference to the Direct3D device; give it back.
+            let d3d11_device = native.d3d11_device as *mut *const unsafe extern "system" fn(*mut c_void) -> u32;
+            ((*(*d3d11_device).add(2)))(d3d11_device.cast());
+
+            let query: QueryDisplayAttrib =
+                std::mem::transmute(egl_function(c"eglQueryDisplayAttribEXT")?);
+            let mut egl_device = 0isize;
+            if query(native.egl_display as *mut c_void, EGL_DEVICE_EXT, &mut egl_device) == 0 ||
+                egl_device == 0
+            {
+                return None;
+            }
+            Some(egl_device as *mut c_void)
+        }
+    }
+
+    /// Releases an EGL device once its display is terminated.
+    pub(super) fn release(egl_device: Option<*mut c_void>) {
+        let Some(egl_device) = egl_device else {
+            return;
+        };
+        unsafe {
+            if let Some(function) = egl_function(c"eglReleaseDeviceANGLE") {
+                let release: ReleaseDevice = std::mem::transmute(function);
+                release(egl_device);
+            }
+        }
+    }
+}
+
 fn native_uniform_location(location: i32) -> Option<NativeUniformLocation> {
     location.try_into().ok().map(NativeUniformLocation)
 }
@@ -407,7 +482,9 @@ impl WebGLThread {
                 self.handle_finished_rendering_to_context(context_id);
             },
             WebGLMsg::ClearPainterResources(painter_id, sender) => {
-                self.device_map.remove(&painter_id);
+                if let Some(device) = self.device_map.remove(&painter_id) {
+                    release_device(device);
+                }
                 if let Err(error) = sender.send(()) {
                     warn!("Failed to send response to WebGLMsg::ClearPainterResources ({error})");
                 }
@@ -836,9 +913,25 @@ impl WebGLThread {
 
         // Destroy the context
         data.device.destroy_context(&mut data.ctx).unwrap();
+        drop(data);
 
         // Removing a GLContext may make the current bound context_id dirty.
         self.bound_context_id = None;
+
+        // Stillwater: a GPU device costs tens of megabytes and dozens of driver threads, and many
+        // pages create a WebGL context only to look at the GPU. Keep a painter's device only while
+        // one of its contexts uses it; the next context opens a new one.
+        let unused: Vec<PainterId> = self
+            .device_map
+            .iter()
+            .filter(|(_, device)| Rc::strong_count(device) == 1)
+            .map(|(painter_id, _)| *painter_id)
+            .collect();
+        for painter_id in unused {
+            if let Some(device) = self.device_map.remove(&painter_id) {
+                release_device(device);
+            }
+        }
     }
 
     fn handle_swap_buffers(

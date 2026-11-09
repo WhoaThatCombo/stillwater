@@ -33,9 +33,9 @@ use crate::CorsStatus;
 pub const DISCARDABLE_IMAGE_ID_BIT: u64 = 1 << 62;
 
 /// How much decoded pixel data the store keeps before dropping some.
-const DECODED_BUDGET: usize = 256 * 1024 * 1024;
+const DECODED_BUDGET: usize = 96 * 1024 * 1024;
 /// When over budget, drop down to this.
-const DECODED_TARGET: usize = 192 * 1024 * 1024;
+const DECODED_TARGET: usize = 64 * 1024 * 1024;
 /// Pixels used more recently than this are never dropped (they're likely being uploaded or
 /// drawn right now).
 const MIN_IDLE: Duration = Duration::from_secs(3);

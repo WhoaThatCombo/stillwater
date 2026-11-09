@@ -608,7 +608,10 @@ impl Preferences {
             network_http_proxy_uri: String::new(),
             network_https_proxy_uri: String::new(),
             network_http_no_proxy: String::new(),
-            network_http_cache_size: 5000,
+            // Stillwater: entries count the same whatever their size, so 5000 kept hundreds of
+            // megabytes of old pages' scripts and images in memory. Older entries move to the
+            // disk cache, which revisits still read quickly.
+            network_http_cache_size: 128,
             network_local_directory_listing_enabled: true,
             network_use_webpki_roots: false,
             network_max_content_length: 5 * 1024 * 1024,
@@ -620,12 +623,12 @@ impl Preferences {
             shell_background_color_rgba: [1.0, 1.0, 1.0, 1.0],
             log_filter: String::new(),
             thread_pool_workers_max: 4,
-            thread_pool_async_runtime_workers_max: 6,
+            thread_pool_async_runtime_workers_max: 2,
             thread_pool_fallback_workers: 3,
             // <https://github.com/linebender/vello/blob/c95b228e1cf73bf96338e8c8ae0d145553f8f99c/sparse_strips/vello_cpu/examples/basic.rs#L51>
             // According to this example 2-4 give the best results.
-            thread_pool_canvas_workers: 3,
-            thread_pool_webrender_workers_max: 4,
+            thread_pool_canvas_workers: 1,
+            thread_pool_webrender_workers_max: 2,
             webgl_testing_context_creation_error: false,
             user_agent: String::new(),
             viewport_meta_enabled: false,
