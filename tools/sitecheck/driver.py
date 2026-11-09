@@ -55,12 +55,16 @@ class Stillwater:
         environment["STILLWATER_BACKGROUND_WINDOW"] = "1"
         # Files a page downloads stay in the test profile, never the user's Downloads folder.
         environment.setdefault("STILLWATER_DOWNLOAD_DIR", str(Path(profile) / "downloads"))
-        if log_file:
-            environment["STILLWATER_LOG_FILE"] = str(log_file)
+        # Tests never write to the real Stillwater folders: the log and the HTTP cache go in the
+        # test profile unless the caller says otherwise.
+        environment["STILLWATER_LOG_FILE"] = str(log_file or Path(profile) / "stillwater.log")
         if slow_script_seconds is not None:
             # When to stop a page script that runs without a break (Stillwater's default is
             # 60 s; 0 never stops them).
             environment["STILLWATER_SLOW_SCRIPT_SECONDS"] = str(slow_script_seconds)
+        args = list(args)
+        if not any(arg.startswith("--pref=network_http_disk_cache") for arg in args):
+            args.append(f"--pref=network_http_disk_cache={Path(profile) / 'cache'}")
         command = [str(exe), f"--webdriver={self.port}", f"--window-size={window_size}", *args]
         if headless:
             command.insert(1, "--headless")
