@@ -264,12 +264,28 @@ pub(crate) struct CachedResponse {
 }
 
 pub(crate) type CacheEntry = std::sync::Arc<TokioRwLock<Vec<CachedResource>>>;
-type QuickCache =
-    Cache<CacheKey, CacheEntry, MemoryCacheWeighter, DefaultHashBuilder, MemoryCacheLifecycle>;
+
+/// A memory cache value: the entry, and its weight when it was stored. The cache counts an
+/// entry's weight when it goes in and again when it comes out, so the weight must not change
+/// while it is stored (a body arriving later must not change it): a value with the new weight
+/// replaces it once the response is complete (see `HttpCache::update_awaiting_consumers`).
+#[derive(Clone, Debug)]
+pub struct MemoryCacheValue {
+    entry: CacheEntry,
+    weight: u64,
+}
+
+type QuickCache = Cache<
+    CacheKey,
+    MemoryCacheValue,
+    MemoryCacheWeighter,
+    DefaultHashBuilder,
+    MemoryCacheLifecycle,
+>;
 type QuickCachePlaceholderGuard<'a> = PlaceholderGuard<
     'a,
     CacheKey,
-    CacheEntry,
+    MemoryCacheValue,
     MemoryCacheWeighter,
     DefaultHashBuilder,
     MemoryCacheLifecycle,
@@ -305,7 +321,7 @@ impl MallocSizeOf for HttpCache {
     fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
         self.entries
             .iter()
-            .map(|(_key, entry)| entry.blocking_read().size_of(ops))
+            .map(|(_key, value)| value.entry.blocking_read().size_of(ops))
             .sum::<usize>() +
             self.disk_cache
                 .as_ref()
@@ -333,9 +349,7 @@ impl HttpCache {
             .expect("valid memory cache options");
         let memory_cache = Cache::with_options(
             options,
-            MemoryCacheWeighter {
-                min_weight: MEMORY_CACHE_BYTES / size as u64,
-            },
+            MemoryCacheWeighter,
             DefaultHashBuilder::default(),
             lifecycle,
         );
@@ -366,13 +380,14 @@ impl MemoryCacheLifecycle {
     }
 }
 
-impl Lifecycle<CacheKey, CacheEntry> for MemoryCacheLifecycle {
+impl Lifecycle<CacheKey, MemoryCacheValue> for MemoryCacheLifecycle {
     type RequestState = ();
 
     // Cached Resources that are not complete could get evicted which means they cannot fill their body.
     // We allow unfinished resources to stay in the cache.
-    fn is_pinned(&self, key: &CacheKey, val: &CacheEntry) -> bool {
+    fn is_pinned(&self, key: &CacheKey, val: &MemoryCacheValue) -> bool {
         let pinned = val
+            .entry
             .try_read()
             .map(|cached_resources| cached_resources.iter().any(|resource| !resource.is_done()))
             .unwrap_or(true);
@@ -380,12 +395,12 @@ impl Lifecycle<CacheKey, CacheEntry> for MemoryCacheLifecycle {
         pinned
     }
 
-    fn on_evict(&self, _state: &mut Self::RequestState, key: CacheKey, value: CacheEntry) {
+    fn on_evict(&self, _state: &mut Self::RequestState, key: CacheKey, value: MemoryCacheValue) {
         info!("Evicting {key:?} from memory cache");
         // Complete entries are normally on disk already (see `update_awaiting_consumers`);
         // the disk cache only writes this one if it differs from what it has.
         if let Some(disk_cache) = &self.disk_cache {
-            disk_cache.store(&key, value);
+            disk_cache.store(&key, value.entry, false);
         }
     }
 }
@@ -436,22 +451,32 @@ const MEMORY_CACHE_MAX_ENTRY_BYTES: u64 = 2 * 1024 * 1024;
 /// What a cached response costs besides its body (headers, URLs, bookkeeping).
 const MEMORY_CACHE_ENTRY_OVERHEAD: u64 = 2048;
 
-/// Weighs memory cache entries by the bytes they hold. Every entry weighs at least
-/// `MEMORY_CACHE_BYTES / network_http_cache_size`, so the cache also keeps at most that many
-/// entries, as before it was weighted by bytes. An entry over the per-entry limit outweighs any
+/// Weighs memory cache entries by the bytes they held when stored (see `MemoryCacheValue`).
+/// Every entry weighs at least `MEMORY_CACHE_BYTES / network_http_cache_size`, so the cache
+/// also keeps at most that many entries. An entry over the per-entry limit outweighs any
 /// shard, so the cache evicts it at once (to the disk cache, if there is one).
 #[derive(Clone)]
-pub struct MemoryCacheWeighter {
-    min_weight: u64,
+pub struct MemoryCacheWeighter;
+
+impl quick_cache::Weighter<CacheKey, MemoryCacheValue> for MemoryCacheWeighter {
+    fn weight(&self, _key: &CacheKey, value: &MemoryCacheValue) -> u64 {
+        value.weight
+    }
 }
 
-impl quick_cache::Weighter<CacheKey, CacheEntry> for MemoryCacheWeighter {
-    fn weight(&self, _key: &CacheKey, entry: &CacheEntry) -> u64 {
-        // Entries are weighed when inserted, before their body arrives, and again when a
-        // response is complete (see `HttpCache::update_awaiting_consumers`).
-        let Ok(resources) = entry.try_read() else {
-            return self.min_weight;
-        };
+impl MemoryCacheValue {
+    /// A memory cache value for `entry`, which holds `resources`, weighed by what they hold
+    /// now. Entries are weighed when inserted, before their body arrives, and again when a
+    /// response is complete (see `HttpCache::update_awaiting_consumers`).
+    fn new(entry: CacheEntry, resources: &[CachedResource]) -> Self {
+        let min_weight = MEMORY_CACHE_BYTES / pref!(network_http_cache_size).max(1);
+        Self {
+            weight: Self::weigh(resources, min_weight),
+            entry,
+        }
+    }
+
+    fn weigh(resources: &[CachedResource], min_weight: u64) -> u64 {
         let bytes: u64 = resources
             .iter()
             .map(|resource| {
@@ -468,7 +493,7 @@ impl quick_cache::Weighter<CacheKey, CacheEntry> for MemoryCacheWeighter {
         }) {
             return MEMORY_CACHE_BYTES * 2;
         }
-        bytes.max(self.min_weight)
+        bytes.max(min_weight)
     }
 }
 
@@ -1117,7 +1142,7 @@ impl HttpCache {
 
         let cached_resources = match self.entries.get(&entry_key) {
             None => return,
-            Some(resources) => resources,
+            Some(value) => value.entry,
         };
 
         let actual_response = response.actual_response();
@@ -1127,13 +1152,15 @@ impl HttpCache {
         if !actual_response.is_network_error() &&
             matches!(*actual_response.body.lock(), ResponseBody::Done(_))
         {
-            let _ = self
-                .entries
-                .replace(entry_key.clone(), cached_resources.clone(), true);
+            let value = {
+                let resources = cached_resources.read().await;
+                MemoryCacheValue::new(cached_resources.clone(), &resources)
+            };
+            let _ = self.entries.replace(entry_key.clone(), value, true);
             // Keep the disk copy up to date (it survives restarts); nothing is written if the
             // disk already has this version, as after a cache hit.
             if let Some(disk_cache) = &self.disk_cache {
-                disk_cache.store(&entry_key, cached_resources.clone());
+                disk_cache.store(&entry_key, cached_resources.clone(), true);
             }
         }
 
@@ -1200,7 +1227,7 @@ impl HttpCache {
         request: &Request,
         done_chan: &mut DoneChannel,
     ) -> Option<Response> {
-        let entry = self.entries.get(&CacheKey::new(request))?;
+        let entry = self.entries.get(&CacheKey::new(request))?.entry;
         let cached_resources = entry.read().await;
         construct_response(request, done_chan, cached_resources.as_slice())
             .map(|cached| cached.response)
@@ -1214,7 +1241,7 @@ impl HttpCache {
         request: &Request,
         done_chan: &mut DoneChannel,
     ) -> Option<ValidationStatus> {
-        let entry = self.entries.get(&CacheKey::new(request))?;
+        let entry = self.entries.get(&CacheKey::new(request))?.entry;
         let cached_resources = entry.read().await;
         construct_response(request, done_chan, cached_resources.as_slice())
             .map(|cached| cached.validation_status)
@@ -1239,12 +1266,12 @@ impl HttpCache {
     }
 
     async fn invalidate_entry(&self, key: &CacheKey) {
-        if let Some(entry) = self.entries.get(key) {
+        if let Some(MemoryCacheValue { entry, .. }) = self.entries.get(key) {
             let mut guarded_resources = entry.write().await;
             invalidate_cached_resources(guarded_resources.as_mut_slice());
             drop(guarded_resources);
             if let Some(disk_cache) = &self.disk_cache {
-                disk_cache.store(key, entry);
+                disk_cache.store(key, entry, true);
             }
         } else if let Some(disk_cache) = &self.disk_cache {
             disk_cache.remove(key);
@@ -1258,7 +1285,7 @@ impl HttpCache {
         let start = std::time::Instant::now();
         let guard_or_value = self.entries.get_value_or_guard_async(&entry_key).await;
         if let Ok(value) = guard_or_value {
-            let value = value.write_owned().await;
+            let value = value.entry.write_owned().await;
             info!(
                 target: "cache_timing",
                 "memory {}us {}",
@@ -1281,7 +1308,12 @@ impl HttpCache {
                 entry_key.as_ref()
             );
             if let Some(response) = from_disk {
-                if guard.insert(response.clone()).is_err() {
+                // Nothing else has this entry yet.
+                let value = match response.try_read() {
+                    Ok(resources) => MemoryCacheValue::new(response.clone(), &resources),
+                    Err(_) => MemoryCacheValue::new(response.clone(), &[]),
+                };
+                if guard.insert(value).is_err() {
                     error!(
                         "Cache guard is invalid. This should not happen. Cache will be in inconsistent state."
                     );
@@ -1376,9 +1408,13 @@ impl<'a> CachedResourcesOrGuard<'a> {
                 cached_resources.push(entry_resource);
             },
             CachedResourcesOrGuard::Guard(placeholder_guard) => {
-                if placeholder_guard
-                    .insert(std::sync::Arc::new(TokioRwLock::new(vec![entry_resource])))
-                    .is_err()
+                let resources = vec![entry_resource];
+                let weight = MemoryCacheValue::new(Default::default(), &resources).weight;
+                let value = MemoryCacheValue {
+                    entry: std::sync::Arc::new(TokioRwLock::new(resources)),
+                    weight,
+                };
+                if placeholder_guard.insert(value).is_err()
                 {
                     error!("Could not insert into cache");
                 }

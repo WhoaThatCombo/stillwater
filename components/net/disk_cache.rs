@@ -18,6 +18,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -56,6 +57,9 @@ const CREATE_META_TABLE: &str = "CREATE TABLE IF NOT EXISTS disk_cache_meta (
 const ENTRIES_PER_TRANSACTION: usize = 16;
 const BYTES_PER_TRANSACTION: usize = 2 * 1024 * 1024;
 
+/// A queued entry: key, entry, when it was queued and when it was last used.
+type Queued = (String, CacheEntry, u64, u64);
+
 /// What a round of writing left to do.
 #[derive(Default)]
 struct WriteProgress {
@@ -64,6 +68,10 @@ struct WriteProgress {
     /// Some entries are locked by a fetch: retry soon.
     busy: bool,
 }
+/// A checkpoint waits until there has been no read for this long...
+const CHECKPOINT_QUIET: Duration = Duration::from_millis(500);
+/// ...or until it has waited this long.
+const CHECKPOINT_MAX_WAIT: Duration = Duration::from_secs(10);
 /// Truncate the WAL once it is fully copied into the file and bigger than this many pages
 /// (4 KB each).
 const TRUNCATE_WAL_PAGES: i64 = 1024;
@@ -86,9 +94,10 @@ struct State {
     /// The sum of the sizes in `index`.
     total: u64,
     next_seq: u64,
-    /// Entries waiting for the writer, with the sequence number they were queued at (their
-    /// age once written).
-    pending: HashMap<String, (CacheEntry, u64)>,
+    /// Entries waiting for the writer: the entry, the sequence number it was last queued at
+    /// (to tell whether it was queued again while being written) and the one it was last used
+    /// at (its age once written).
+    pending: HashMap<String, (CacheEntry, u64, u64)>,
 }
 
 impl State {
@@ -163,6 +172,9 @@ struct Shared {
     readers: Mutex<Readers>,
     /// Signalled when a read connection is returned to `readers`.
     reader_returned: Condvar,
+    /// When the cache opened, and when (in ms since then) a read last ran.
+    opened: Instant,
+    last_read: AtomicU64,
 }
 
 /// Read connections, opened once and reused: opening one reads the file's header and
@@ -246,12 +258,22 @@ fn open_writer(path: &Path) -> rusqlite::Result<Connection> {
 }
 
 /// Copy written pages from the WAL into the database file whenever the writer has written
-/// something, without blocking it or the readers.
-fn run_checkpointer(path: PathBuf, written: Receiver<()>) {
-    let Ok(connection) = open_reader(&path) else {
+/// something, without blocking it or the readers. Checkpoints write all over the file and
+/// sync it, which on a slow disk delays reads, so they wait for a pause in reading (but not
+/// for more than `CHECKPOINT_MAX_WAIT`).
+fn run_checkpointer(shared: Arc<Shared>, written: Receiver<()>) {
+    let Ok(connection) = open_reader(&shared.path) else {
         return;
     };
     while written.recv().is_ok() {
+        let waiting_since = Instant::now();
+        loop {
+            let quiet = shared.since_last_read();
+            if quiet >= CHECKPOINT_QUIET || waiting_since.elapsed() >= CHECKPOINT_MAX_WAIT {
+                break;
+            }
+            std::thread::sleep((CHECKPOINT_QUIET - quiet).min(Duration::from_millis(100)));
+        }
         while written.try_recv().is_ok() {}
         let start = Instant::now();
         let result = connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
@@ -375,12 +397,19 @@ impl DiskCache {
             state: Mutex::new(state),
             readers: Mutex::new(readers),
             reader_returned: Condvar::new(),
+            opened: Instant::now(),
+            last_read: AtomicU64::new(0),
         });
         let (sender, receiver) = channel();
+        let (checkpoint, written) = channel();
+        let checkpointer_shared = shared.clone();
+        let _ = std::thread::Builder::new()
+            .name("DiskCacheCheckpoint".into())
+            .spawn(move || run_checkpointer(checkpointer_shared, written));
         let writer_shared = shared.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("DiskCacheWriter".into())
-            .spawn(move || writer_shared.run_writer(connection, receiver))
+            .spawn(move || writer_shared.run_writer(connection, receiver, checkpoint))
         {
             error!("Could not start the disk cache writer: {error}");
             return (None, MemoryCacheLifecycle::empty());
@@ -412,7 +441,7 @@ impl DiskCache {
                     lock_start.elapsed().as_micros()
                 );
             }
-            if let Some((entry, _)) = state.pending.get(&key) {
+            if let Some((entry, ..)) = state.pending.get(&key) {
                 return Some(entry.clone());
             }
             if !state.index.contains_key(&key) {
@@ -427,13 +456,22 @@ impl DiskCache {
     }
 
     /// Queue `entry` to be written to disk, unless the disk already has this version of it.
-    pub(crate) fn store(&self, key: &CacheKey, entry: CacheEntry) {
+    /// `used` says whether it was just stored or used (it then counts as the newest entry),
+    /// rather than only evicted from the memory cache.
+    pub(crate) fn store(&self, key: &CacheKey, entry: CacheEntry, used: bool) {
         {
             let mut state = self.shared.state.lock();
             let generation = state.take_seq();
-            state
-                .pending
-                .insert(key.as_ref().to_owned(), (entry, generation));
+            let key = key.as_ref().to_owned();
+            let age = match (state.pending.get(&key), state.index.get(&key), used) {
+                (_, _, true) => generation,
+                (Some((_, _, age)), _, false) => *age,
+                (None, Some(stored), false) => stored.seq,
+                // Complete entries are written when stored, so an entry leaving the memory
+                // cache that is not on disk was deleted as the oldest: leave it out.
+                (None, None, false) => return,
+            };
+            state.pending.insert(key, (entry, generation, age));
         }
         let _ = self.commands.lock().send(Command::Store);
     }
@@ -516,8 +554,22 @@ impl Shared {
         }
     }
 
+    /// How long since a read last ran.
+    fn since_last_read(&self) -> Duration {
+        let last = Duration::from_millis(self.last_read.load(AtomicOrdering::Relaxed));
+        self.opened.elapsed().saturating_sub(last)
+    }
+
+    fn note_read(&self) {
+        self.last_read.store(
+            self.opened.elapsed().as_millis() as u64,
+            AtomicOrdering::Relaxed,
+        );
+    }
+
     fn read(&self, key: &str) -> Option<CacheEntry> {
         let _span = profile_traits::trace_span!("query disk cache").entered();
+        self.note_read();
         let start = Instant::now();
         let connection = self.take_reader()?;
         let got_connection = start.elapsed().as_micros();
@@ -529,6 +581,7 @@ impl Shared {
                     .optional()
             });
         self.return_reader(connection);
+        self.note_read();
         let queried = start.elapsed().as_micros();
         let bytes = match bytes {
             Ok(bytes) => bytes?,
@@ -566,15 +619,15 @@ impl Shared {
         Some(std::sync::Arc::new(TokioRwLock::new(resources)))
     }
 
-    fn run_writer(&self, mut connection: Connection, commands: Receiver<Command>) {
+    fn run_writer(
+        &self,
+        mut connection: Connection,
+        commands: Receiver<Command>,
+        checkpoint: Sender<()>,
+    ) {
         self.open_readers();
-        let (checkpoint, written) = channel();
-        let path = self.path.clone();
-        let _ = std::thread::Builder::new()
-            .name("DiskCacheCheckpoint".into())
-            .spawn(move || run_checkpointer(path, written));
         self.trim(&mut connection);
-        // Also takes in what an earlier run left in the WAL.
+        // Also takes in what an earlier run left in the WAL (once reading pauses).
         let _ = checkpoint.send(());
         let mut progress = WriteProgress::default();
         loop {
@@ -640,19 +693,21 @@ impl Shared {
     /// queued when the browser exits are lost).
     fn write_some(&self, connection: &mut Connection) -> WriteProgress {
         let start = Instant::now();
-        let queued: Vec<(String, CacheEntry, u64)> = self
+        let queued: Vec<Queued> = self
             .state
             .lock()
             .pending
             .iter()
-            .map(|(key, (entry, generation))| (key.clone(), entry.clone(), *generation))
+            .map(|(key, (entry, generation, age))| {
+                (key.clone(), entry.clone(), *generation, *age)
+            })
             .collect();
         if queued.is_empty() {
             return WriteProgress::default();
         }
         info!(target: "cache_timing", "disk writer: {} queued", queued.len());
         let mut busy = false;
-        let mut sized: Vec<(usize, (String, CacheEntry, u64))> = queued
+        let mut sized: Vec<(usize, Queued)> = queued
             .into_iter()
             .filter_map(|item| {
                 let bytes = item.1.try_read().map(|resources| entry_body_bytes(&resources));
@@ -665,7 +720,7 @@ impl Shared {
                 }
             })
             .collect();
-        sized.sort_by_key(|(bytes, (_, _, generation))| (*bytes, *generation));
+        sized.sort_by_key(|(bytes, (_, _, generation, _))| (*bytes, *generation));
         let mut bytes = 0;
         let mut chunk = vec![];
         let mut rest = sized.into_iter();
@@ -697,7 +752,7 @@ impl Shared {
     fn write_chunk(
         &self,
         connection: &mut Connection,
-        chunk: &[(String, CacheEntry, u64)],
+        chunk: &[Queued],
     ) -> (usize, bool) {
         enum Outcome {
             /// Nothing to write: the disk has this version, or nothing in it is complete.
@@ -721,7 +776,7 @@ impl Shared {
             },
         };
         let mut outcomes = Vec::with_capacity(chunk.len());
-        for (key, entry, generation) in chunk {
+        for (key, entry, _, age) in chunk {
             let Ok(resources) = entry.try_read() else {
                 outcomes.push(Outcome::Busy);
                 continue;
@@ -766,7 +821,7 @@ impl Shared {
             } else {
                 // Entries age from when they were last stored or used, not from when the
                 // writer got to them.
-                let seq = *generation;
+                let seq = *age;
                 transaction
                     .prepare_cached(
                         "INSERT INTO disk_cache (key, data, size, insertion_timestamp)
@@ -806,7 +861,7 @@ impl Shared {
         let mut busy = false;
         let evicted = {
             let mut state = self.state.lock();
-            for ((key, _, _), outcome) in chunk.iter().zip(&outcomes) {
+            for ((key, ..), outcome) in chunk.iter().zip(&outcomes) {
                 match *outcome {
                     Outcome::Stored {
                         size,
@@ -839,13 +894,13 @@ impl Shared {
         );
 
         let mut state = self.state.lock();
-        for ((key, _, generation), outcome) in chunk.iter().zip(outcomes) {
+        for ((key, _, generation, _), outcome) in chunk.iter().zip(outcomes) {
             // An entry queued again meanwhile (it may have changed) stays queued.
             if !matches!(outcome, Outcome::Busy) &&
                 state
                     .pending
                     .get(key)
-                    .is_some_and(|(_, queued)| queued == generation)
+                    .is_some_and(|(_, queued, _)| queued == generation)
             {
                 state.pending.remove(key);
             }
@@ -853,13 +908,13 @@ impl Shared {
         (written, busy)
     }
 
-    fn forget_pending(&self, chunk: &[(String, CacheEntry, u64)]) {
+    fn forget_pending(&self, chunk: &[Queued]) {
         let mut state = self.state.lock();
-        for (key, _, generation) in chunk {
+        for (key, _, generation, _) in chunk {
             if state
                 .pending
                 .get(key)
-                .is_some_and(|(_, queued)| queued == generation)
+                .is_some_and(|(_, queued, _)| queued == generation)
             {
                 state.pending.remove(key);
             }
