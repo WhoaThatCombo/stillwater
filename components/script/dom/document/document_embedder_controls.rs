@@ -33,6 +33,7 @@ use crate::dom::bindings::trace::NoTrace;
 use crate::dom::inputevent::HitTestResult;
 use crate::dom::iterators::ShadowIncluding;
 use crate::dom::links::htmlhyperlinkelementutils::HyperlinkElementTraits;
+use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::node::{Node, NodeTraits};
 use crate::dom::types::{
     Element, HTMLAnchorElement, HTMLElement, HTMLImageElement, HTMLInputElement, HTMLSelectElement,
@@ -291,6 +292,12 @@ impl DocumentEmbedderControls {
             info.link_url = anchor_element
                 .full_href_url_for_user_interface()
                 .map(ServoUrl::into_url);
+            let link_text = anchor_element
+                .upcast::<Node>()
+                .GetTextContent()
+                .map(|text| text.to_string().split_whitespace().collect::<Vec<_>>().join(" "))
+                .unwrap_or_default();
+            info.link_text = (!link_text.is_empty()).then_some(link_text);
 
             items.extend(vec![
                 ContextMenuItem::Item {
@@ -335,6 +342,23 @@ impl DocumentEmbedderControls {
         if has_selection {
             info.flags
                 .insert(ContextMenuElementInformationFlags::Selection);
+            // Stillwater: the selected text, for embedder menu items such as "Search for".
+            if editing_context.copying_enabled() {
+                info.selection_text = editing_context
+                    .selection_content(cx)
+                    .map(|text| {
+                        let mut text = text.trim().to_owned();
+                        if text.len() > 4096 {
+                            let mut end = 4096;
+                            while !text.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            text.truncate(end);
+                        }
+                        text
+                    })
+                    .filter(|text| !text.is_empty());
+            }
         }
 
         let can_cut = has_selection && editing_context.cutting_enabled();

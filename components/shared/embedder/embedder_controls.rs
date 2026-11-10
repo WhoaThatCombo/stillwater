@@ -132,6 +132,14 @@ pub struct ContextMenuElementInformation {
     pub flags: ContextMenuElementInformationFlags,
     pub link_url: Option<Url>,
     pub image_url: Option<Url>,
+    /// Stillwater: the selected text when the selection covers the element (trimmed,
+    /// at most 4 KB; not for password fields), e.g. for a "Search for" menu item.
+    #[serde(default)]
+    pub selection_text: Option<String>,
+    /// Stillwater: the text of the link this context menu was activated for, with
+    /// whitespace collapsed, e.g. for a "Copy Link Text" menu item.
+    #[serde(default)]
+    pub link_text: Option<String>,
 }
 
 /// Request to present an IME to the user when an editable element is focused. If `type` is

@@ -148,6 +148,7 @@ fn test_simple_context_menu() {
             flags: ContextMenuElementInformationFlags::empty(),
             link_url: None,
             image_url: None,
+            ..Default::default()
         },
     );
 
@@ -208,6 +209,7 @@ fn test_contextual_context_menu_items() {
             flags: ContextMenuElementInformationFlags::Link,
             link_url: Url::parse("https://servo.org").ok(),
             image_url: None,
+            ..Default::default()
         },
     );
     context_menu_on_link.dismiss();
@@ -230,6 +232,7 @@ fn test_contextual_context_menu_items() {
             flags: ContextMenuElementInformationFlags::Image,
             link_url: None,
             image_url: Url::parse(image_url).ok(),
+            ..Default::default()
         },
     );
     context_menu_on_image.dismiss();
@@ -250,6 +253,7 @@ fn test_contextual_context_menu_items() {
             flags: ContextMenuElementInformationFlags::EditableText,
             link_url: None,
             image_url: None,
+            ..Default::default()
         },
     );
     context_menu_on_input.dismiss();
@@ -270,6 +274,7 @@ fn test_contextual_context_menu_items() {
             flags: ContextMenuElementInformationFlags::empty(),
             link_url: None,
             image_url: None,
+            ..Default::default()
         },
     );
     context_menu_on_readonly_input.dismiss();
@@ -295,6 +300,7 @@ fn test_contextual_context_menu_items() {
                 ContextMenuElementInformationFlags::Image,
             link_url: Url::parse("https://nested.org").ok(),
             image_url: Url::parse("https://servo.org/nested.png").ok(),
+            ..Default::default()
         },
     );
     context_menu_on_image_link.dismiss();
@@ -320,6 +326,7 @@ fn test_contextual_context_menu_select_all_and_copy() {
             flags: ContextMenuElementInformationFlags::empty(),
             link_url: None,
             image_url: None,
+            ..Default::default()
         },
     );
     context_menu.select(ContextMenuAction::SelectAll);
@@ -351,6 +358,7 @@ fn test_contextual_context_menu_select_all_and_copy() {
             flags: ContextMenuElementInformationFlags::Selection,
             link_url: None,
             image_url: None,
+            ..Default::default()
         },
     );
     context_menu.select(ContextMenuAction::Copy);
