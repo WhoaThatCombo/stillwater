@@ -358,6 +358,15 @@ fn draw(
                 .return_key(None)
                 .desired_width(field_rect.width() - 16.0);
             let response = ui.put(field_rect.shrink2(vec2(8.0, 4.0)), edit);
+            // Right-click: Cut, Copy, Paste, Select all (like the sidebar's text fields).
+            if response.secondary_clicked() {
+                let clipboard = arboard::Clipboard::new()
+                    .ok()
+                    .and_then(|mut clipboard| clipboard.get_text().ok())
+                    .unwrap_or_default();
+                ui.data_mut(|data| data.insert_temp(input_id.with("clipboard"), clipboard));
+            }
+            response.context_menu(|ui| text_field_menu(ui, input_id, &mut state.query));
             if state.focus {
                 state.focus = false;
                 response.request_focus();
@@ -484,4 +493,84 @@ fn draw(
                 }
             }
         });
+}
+
+/// The right-click menu of an egui text field: Cut, Copy, Paste, Select all, acting on the
+/// selection (Cut and Copy on the whole text when nothing is selected). The clipboard's text is
+/// read once, when the menu opens (see the caller).
+fn text_field_menu(ui: &mut egui::Ui, input_id: Id, text: &mut String) {
+    let ctx = ui.ctx().clone();
+    let length = text.chars().count();
+    let (start, end) = TextEditState::load(&ctx, input_id)
+        .and_then(|state| state.cursor.char_range())
+        .map(|range| {
+            let (a, b) = (range.primary.index.min(length), range.secondary.index.min(length));
+            (a.min(b), a.max(b))
+        })
+        .unwrap_or((length, length));
+    let has_selection = end > start;
+    let byte = |text: &str, index: usize| {
+        text.char_indices()
+            .nth(index)
+            .map_or(text.len(), |(byte, _)| byte)
+    };
+    let (from, to) = if has_selection { (start, end) } else { (0, length) };
+    let copied = text[byte(text, from)..byte(text, to)].to_owned();
+    let pasted: String = ui
+        .data(|data| data.get_temp::<String>(input_id.with("clipboard")))
+        .unwrap_or_default()
+        .replace(['\r', '\n'], " ");
+    let set_clipboard = |value: &str| {
+        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+            let _ = clipboard.set_text(value.to_owned());
+        }
+    };
+    // Replace characters `from..to` with `with`, and put the caret after it.
+    let mut replace = |from: usize, to: usize, with: &str| {
+        let range = byte(text, from)..byte(text, to);
+        text.replace_range(range, with);
+        let caret = from + with.chars().count();
+        select(&ctx, input_id, caret, caret);
+    };
+    if ui
+        .add_enabled(!copied.is_empty(), egui::Button::new("Cut"))
+        .clicked()
+    {
+        set_clipboard(&copied);
+        replace(from, to, "");
+        ui.close();
+    }
+    if ui
+        .add_enabled(!copied.is_empty(), egui::Button::new("Copy"))
+        .clicked()
+    {
+        set_clipboard(&copied);
+        ui.close();
+    }
+    if ui
+        .add_enabled(!pasted.is_empty(), egui::Button::new("Paste"))
+        .clicked()
+    {
+        replace(start, end, &pasted);
+        ui.close();
+    }
+    ui.separator();
+    if ui
+        .add_enabled(length > 0, egui::Button::new("Select all"))
+        .clicked()
+    {
+        select(&ctx, input_id, 0, length);
+        ui.close();
+    }
+}
+
+/// Focus the text field `input_id` and select characters `start..end`.
+fn select(ctx: &egui::Context, input_id: Id, start: usize, end: usize) {
+    if let Some(mut state) = TextEditState::load(ctx, input_id) {
+        state
+            .cursor
+            .set_char_range(Some(CCursorRange::two(CCursor::new(start), CCursor::new(end))));
+        state.store(ctx, input_id);
+    }
+    ctx.memory_mut(|memory| memory.request_focus(input_id));
 }

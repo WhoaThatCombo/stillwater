@@ -53,19 +53,42 @@ pub(crate) fn init() {
 /// Write one line, prefixed with seconds since launch.
 pub(crate) fn log(message: impl AsRef<str>) {
     let mut guard = LOG.lock().unwrap_or_else(|poison| poison.into_inner());
-    let Some(log) = guard.as_mut() else {
-        return;
-    };
+    if let Some(log) = guard.as_mut() {
+        write_line(log, message.as_ref());
+    }
+}
+
+fn write_line(log: &mut Log, message: &str) {
     if log.written > MAX_BYTES {
         return;
     }
-    let line = format!(
-        "{:9.3} {}\n",
-        log.start.elapsed().as_secs_f64(),
-        message.as_ref()
-    );
+    let line = format!("{:9.3} {}\n", log.start.elapsed().as_secs_f64(), message);
     log.written += line.len() as u64;
     let _ = log.file.write_all(line.as_bytes());
+}
+
+/// Like `log`, but gives up after half a second if another thread holds the log (for the
+/// shutdown watchdog, which must not hang on a thread that is itself stuck).
+pub(crate) fn log_without_waiting(message: impl AsRef<str>) {
+    for _ in 0..50 {
+        match LOG.try_lock() {
+            Ok(mut guard) => {
+                if let Some(log) = guard.as_mut() {
+                    write_line(log, message.as_ref());
+                }
+                return;
+            },
+            Err(std::sync::TryLockError::Poisoned(poison)) => {
+                if let Some(log) = poison.into_inner().as_mut() {
+                    write_line(log, message.as_ref());
+                }
+                return;
+            },
+            Err(std::sync::TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            },
+        }
+    }
 }
 
 /// Count an occurrence of `name`; counts are written in the once-a-second summary.

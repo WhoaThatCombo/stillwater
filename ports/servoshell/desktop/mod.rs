@@ -32,8 +32,9 @@ mod protocols;
 mod report;
 pub(crate) mod session;
 mod settings;
+pub(crate) mod shutdown;
 pub(crate) mod sidebar;
-mod single_instance;
+pub(crate) mod single_instance;
 mod tracing;
 mod updater;
 #[cfg(feature = "webxr")]

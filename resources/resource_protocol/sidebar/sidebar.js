@@ -105,6 +105,7 @@ function startRename(label, current, commit) {
     finish(event.key === "Enter");
   });
   input.addEventListener("blur", () => finish(true));
+  attachTextMenu(input);
 }
 
 // ---- Context menu ----
@@ -161,6 +162,10 @@ function openMenu(items, x, y) {
       label.textContent = item.label;
       button.append(label);
     }
+    button.disabled = !!item.disabled;
+    // Pressing an entry must not take the focus (a text field the menu acts on keeps it, and
+    // its selection).
+    button.addEventListener("mousedown", (event) => event.preventDefault());
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       closeMenu();
@@ -918,6 +923,88 @@ window.sidebar = {
     showUrlHost();
   },
 };
+
+// ---- Right-click menu for text fields: Cut, Copy, Paste, Select all ----
+// The page has no clipboard of its own: "clip-copy" puts text on the system clipboard, and
+// "clip-read" asks Rust for its text, which comes back in `sidebar.clipboardText` and opens
+// the menu (so Paste is greyed out when there is nothing to paste).
+// `options.fullText()` gives the text Copy/Cut should use instead of the field's (the address
+// bar's full URL while it shows only the host); `options.pasteAndGo` adds "Paste and go".
+let rightPress = null; // the field and its selection when the right button went down
+let pendingTextMenu = null;
+function attachTextMenu(input, options = {}) {
+  input.addEventListener("mousedown", (event) => {
+    if (event.button !== 2) return;
+    // A right press must not move the caret or clear the selection.
+    event.preventDefault();
+    rightPress = { input, start: input.selectionStart, end: input.selectionEnd };
+  });
+  input.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation(); // not also the menu of the row the field sits in
+    const kept = rightPress && rightPress.input === input
+      ? rightPress
+      : { start: input.selectionStart, end: input.selectionEnd };
+    rightPress = null;
+    pendingTextMenu = {
+      input, options, x: event.clientX, y: event.clientY,
+      start: Math.min(kept.start || 0, kept.end || 0),
+      end: Math.max(kept.start || 0, kept.end || 0),
+    };
+    send("clip-read");
+  });
+}
+window.sidebar.clipboardText = (clipboard) => {
+  const menuFor = pendingTextMenu;
+  pendingTextMenu = null;
+  if (menuFor) openTextMenu(menuFor, clipboard || "");
+};
+function openTextMenu({ input, options, x, y, start, end }, clipboard) {
+  const fullText = options.fullText ? options.fullText() : null;
+  const hasSelection = end > start && fullText === null;
+  // Copy and Cut act on the selection, or on the whole field when nothing is selected.
+  const copied = fullText !== null ? fullText : hasSelection ? input.value.slice(start, end) : input.value;
+  const pasted = clipboard.replace(/[\r\n]+/g, " ");
+  // The range to replace, once the field has the focus (focusing the address bar swaps the
+  // host for the full URL, so then it's the whole field).
+  const focusRange = (whole) => {
+    const before = input.value;
+    input.focus();
+    if (whole || input.value !== before) return [0, input.value.length];
+    return [start, end];
+  };
+  const replace = ([from, to], text) => {
+    input.value = input.value.slice(0, from) + text + input.value.slice(to);
+    const caret = from + text.length;
+    input.setSelectionRange(caret, caret);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const items = [
+    { label: "Cut", disabled: input.readOnly || !copied, run: () => {
+      send("clip-copy", copied);
+      replace(focusRange(!hasSelection), "");
+    } },
+    { label: "Copy", disabled: !copied, run: () => send("clip-copy", copied) },
+    { label: "Paste", disabled: input.readOnly || !pasted, run: () => replace(focusRange(false), pasted) },
+  ];
+  if (options.pasteAndGo) {
+    items.push({ label: "Paste and go", disabled: !pasted.trim(), run: () => {
+      send("go", pasted.trim());
+      input.blur();
+    } });
+  }
+  items.push("-", { label: "Select all", disabled: !input.value, run: () => {
+    input.focus();
+    input.select();
+  } });
+  openMenu(items, x, y);
+  // Keep showing what was selected while the menu is open.
+  if (document.activeElement === input && hasSelection) input.setSelectionRange(start, end);
+}
+attachTextMenu(url, { fullText: () => (urlShowsHost ? fullUrl() : null), pasteAndGo: true });
+for (const id of ["passwords-search", "history-search", "bm-editor-name", "ws-name-input"]) {
+  if ($(id)) attachTextMenu($(id));
+}
 
 function syncPlaceholder() {
   url.parentElement.classList.toggle("has-value", url.value.length > 0);

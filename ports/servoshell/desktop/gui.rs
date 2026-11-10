@@ -766,7 +766,7 @@ impl Gui {
                         }
                     } else {
                         // Portable copies can't replace themselves: show the release page.
-                        let _ = proxy.send_event(AppEvent::OpenUrl(update.page_url));
+                        let _ = proxy.send_event(AppEvent::OpenUrl(update.page_url, None));
                     }
                 },
             }

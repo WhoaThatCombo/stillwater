@@ -395,6 +395,26 @@ impl SharedWorker {
         global.start_message_port(cx, worker.port.message_port_id());
     }
 
+    /// The engine is shutting down: ask every shared worker to stop, so its thread ends and
+    /// its JS runtime is dropped (the engine waits for every runtime before it shuts down).
+    pub(crate) fn terminate_all() {
+        let (workers, ready) = &*SHARED_WORKERS;
+        let Ok(workers) = workers.lock() else {
+            return;
+        };
+        for entry in workers.iter() {
+            let SharedWorkerRegistryState::Created(registration) = &entry.state else {
+                continue;
+            };
+            registration.closing.store(true, Ordering::SeqCst);
+            // Wakes the worker's event loop, which then sees it is closing.
+            let _ = registration
+                ._control_sender
+                .send(SharedWorkerControlMsg::Exit);
+        }
+        ready.notify_all();
+    }
+
     /// Set online status for all living shared workers.
     pub(crate) fn set_network_online_state(online: bool) {
         let (workers, _ready) = &*SHARED_WORKERS;

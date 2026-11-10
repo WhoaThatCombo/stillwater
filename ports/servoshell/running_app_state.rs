@@ -453,6 +453,7 @@ impl RunningAppState {
         // to run wpt test using servodriver.
         self.servoshell_preferences.webdriver_port.set(None);
         self.exit_scheduled.set(true);
+        note_shutdown("exit requested");
 
         #[cfg(all(
             any(coverage, llvm_pgo),
@@ -506,6 +507,16 @@ impl RunningAppState {
         }
     }
 
+    /// If the user has closed every window, the app is about to exit:
+    /// arm the shutdown watchdog now, before anything that could hang (see `shutdown`).
+    pub(crate) fn note_close_if_last_window(&self) {
+        if self.servoshell_preferences.webdriver_port.get().is_none() &&
+            self.windows.borrow().iter().all(|window| window.close_scheduled())
+        {
+            note_shutdown("last window closed");
+        }
+    }
+
     /// Close any [`ServoShellWindow`] that doesn't have an open [`WebView`].
     fn close_empty_windows(&self) {
         let mut move_focus = false;
@@ -550,6 +561,7 @@ impl RunningAppState {
     ) -> bool {
         self.handle_webdriver_messages(create_platform_window);
 
+        self.note_close_if_last_window();
         self.servo.spin_event_loop();
 
         // Download progress: refresh the sidebar's downloads indicator and panel.
@@ -1327,4 +1339,12 @@ impl ServoDelegate for ServoShellServoDelegate {
         println!("{message}");
         log::log!(level.into(), "{message}");
     }
+}
+
+/// Arm the desktop shutdown watchdog (`desktop::shutdown`).
+fn note_shutdown(reason: &str) {
+    #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+    crate::desktop::shutdown::begin(reason);
+    #[cfg(any(target_os = "android", target_env = "ohos"))]
+    let _ = reason;
 }

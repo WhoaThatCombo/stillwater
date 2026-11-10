@@ -899,6 +899,24 @@ impl Sidebar {
                         self.window_actions.push(WindowAction::OpenPane(PaneKind::Glance, url));
                     }
                 },
+                // The text fields' right-click menu (the page has no clipboard access of its own):
+                // Copy and Cut put text on the clipboard; opening the menu asks for its text, for
+                // Paste.
+                "clip-copy" => {
+                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                        let _ = clipboard.set_text(argument.to_owned());
+                    }
+                },
+                "clip-read" => {
+                    let text = arboard::Clipboard::new()
+                        .ok()
+                        .and_then(|mut clipboard| clipboard.get_text().ok())
+                        .filter(|text| !text.is_empty());
+                    self.call(&format!(
+                        "clipboardText({})",
+                        serde_json::to_string(&text).unwrap_or_else(|_| "null".into())
+                    ));
+                },
                 // Tests: write a value from the sidebar page to the diagnostic log.
                 "debug" => crate::desktop::diagnostics::log(format!("sidebar debug: {argument}")),
                 // Tests: run JavaScript in the current tab and log what it returns.

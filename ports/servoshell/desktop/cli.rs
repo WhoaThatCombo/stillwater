@@ -88,6 +88,9 @@ pub fn main() {
         env::current_exe().ok(),
         servoshell_preferences.url,
     ));
+    for note in single_instance::take_notes() {
+        diagnostics::log(format!("single instance: {note}"));
+    }
 
     crate::init_tracing(servoshell_preferences.tracing_filter.as_deref());
 
@@ -109,6 +112,7 @@ pub fn main() {
         let mut app = App::new(opts, preferences, servoshell_preferences, &event_loop);
         event_loop.run_app(&mut app);
     }
+    diagnostics::log("shutdown: event loop finished; exiting");
 
     crate::platform::deinit(clean_shutdown)
 }

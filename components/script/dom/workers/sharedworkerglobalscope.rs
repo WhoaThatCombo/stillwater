@@ -78,7 +78,6 @@ pub(crate) enum SharedWorkerScriptMsg {
 }
 
 pub(crate) enum SharedWorkerControlMsg {
-    #[expect(dead_code)]
     Exit,
     SetNetworkOnlineState(bool),
 }

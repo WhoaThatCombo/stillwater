@@ -28,7 +28,9 @@ pub enum AppEvent {
     /// event is handled (see `RepaintEventLoopWaker`).
     RequestRepaint(ServoShellWindowId, Arc<AtomicBool>),
     /// A later launch of Stillwater asked this instance to open a URL (or just come forward).
-    OpenUrl(String),
+    /// The hand-off, if any, is how that launch learns this instance is alive (see
+    /// `single_instance`).
+    OpenUrl(String, Option<crate::desktop::single_instance::Handoff>),
     /// The updater found a newer Stillwater release.
     UpdateAvailable(crate::desktop::updater::UpdateInfo),
     /// Progress of an update the user started.

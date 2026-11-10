@@ -836,6 +836,12 @@ button.secondary:hover {
   background: var(--toolbarbutton-background-color-hover);
 }
 
+/* Entries that don't apply right now (Paste with an empty clipboard). */
+.menu-item:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
 /* Long labels fade out (see .tab-label::after). */
 .menu-label {
   flex: 1;

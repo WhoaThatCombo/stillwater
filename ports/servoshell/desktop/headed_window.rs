@@ -1365,7 +1365,9 @@ impl HeadedWindow {
                     );
                 },
                 WindowEvent::CloseRequested => {
+                    crate::desktop::diagnostics::log("window close requested");
                     window.schedule_close();
+                    state.note_close_if_last_window();
                 },
                 WindowEvent::ThemeChanged(_) => {
                     // Respect the theme chosen in settings; otherwise follow Windows.

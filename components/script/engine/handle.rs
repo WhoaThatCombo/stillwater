@@ -28,6 +28,10 @@ impl Drop for JSEngineSetup {
     fn drop(&mut self) {
         *JS_ENGINE.lock().unwrap() = None;
 
+        // Shared workers outlive the pages that started them and nothing else stops them, so
+        // their threads (and JS runtimes) would keep the loop below waiting forever.
+        crate::dom::workers::sharedworker::SharedWorker::terminate_all();
+
         while !self.0.can_shutdown() {
             thread::sleep(Duration::from_millis(50));
         }

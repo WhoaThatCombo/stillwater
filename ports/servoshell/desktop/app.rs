@@ -322,18 +322,16 @@ impl App {
 
         let create_platform_window = |url: Url| self.create_platform_window(url, active_event_loop);
         if !state.spin_event_loop(Some(&create_platform_window)) {
+            // Usually armed already, when the last window was closed. Tabs, history, passwords
+            // and settings are saved as they change, so nothing is lost if the engine is slow
+            // to stop (it waits for every page's script thread, and a busy page can hold that
+            // up): the watchdog ends the process after a few seconds. It must be armed before
+            // the next line, which drops the last reference to Servo and so blocks until the
+            // engine has stopped.
+            crate::desktop::shutdown::begin("event loop stopping");
+            diagnostics::log("shutdown: stopping the engine");
             self.state = AppState::ShuttingDown;
-            // Tabs, history, passwords and settings are saved as they change, so nothing is
-            // lost if the engine is slow to stop (it waits for every page's script thread, and a
-            // busy page can hold that up): after a few seconds the process just exits.
-            std::thread::Builder::new()
-                .name("ShutdownDeadline".into())
-                .spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_secs(3));
-                    diagnostics::log("shutdown: the engine is still stopping after 3 s; exiting");
-                    std::process::exit(0);
-                })
-                .ok();
+            diagnostics::log("shutdown: engine stopped");
             return false;
         }
 
@@ -447,7 +445,7 @@ impl ApplicationHandler<AppEvent> for App {
         if !matches!(app_event, AppEvent::Waker | AppEvent::RequestRepaint(..)) {
             diagnostics::log(format!("app event: {app_event:?}"));
         }
-        let opened_url = matches!(app_event, AppEvent::OpenUrl(_));
+        let opened_url = matches!(app_event, AppEvent::OpenUrl(..));
         // Repaint requests coming faster than the monitor shows frames mean something is asking
         // to repaint after every repaint. Holding the repaint until the next frame of the window's
         // monitor (60, 144, 240 Hz...) paces it like vsync, so nothing real gets slower, and
@@ -490,7 +488,9 @@ impl ApplicationHandler<AppEvent> for App {
                     window.set_needs_repaint();
                 }
             },
-            AppEvent::OpenUrl(input) => {
+            // A launch that gave up waiting for us has opened its own window: don't open it twice.
+            AppEvent::OpenUrl(_, Some(ref handoff)) if !handoff.claim() => {},
+            AppEvent::OpenUrl(input, _) => {
                 let window = state
                     .focused_window()
                     .or_else(|| state.windows().first().cloned());

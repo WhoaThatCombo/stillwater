@@ -188,6 +188,11 @@ impl ServoShellWindow {
     }
 
     #[cfg_attr(target_os = "android", expect(dead_code))]
+    /// Whether the user closed this window (it goes away on the next turn of the event loop).
+    pub(crate) fn close_scheduled(&self) -> bool {
+        self.close_scheduled.get()
+    }
+
     pub(crate) fn schedule_close(&self) {
         // Gone from the screen at once: shutting down can take a moment (see `App`).
         self.platform_window.hide_for_close();

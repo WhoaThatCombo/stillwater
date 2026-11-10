@@ -38,6 +38,8 @@ static PENDING: Mutex<Option<PendingSession>> = Mutex::new(None);
 static ENABLED: AtomicBool = AtomicBool::new(false);
 /// The first window's sidebar has claimed the session file.
 static CLAIMED: AtomicBool = AtomicBool::new(false);
+/// The writer thread's channel, for `flush_from_any_thread` (cleared before the writer stops).
+static WRITER: Mutex<Option<Sender<Message>>> = Mutex::new(None);
 
 pub(crate) struct PendingSession {
     pub(crate) data: Value,
@@ -124,6 +126,9 @@ impl SessionWriter {
             .name("SessionWriter".into())
             .spawn(move || write_loop(&path, receiver))
             .ok()?;
+        if let Ok(mut writer) = WRITER.lock() {
+            *writer = Some(sender.clone());
+        }
         Some(Self {
             sender: Some(sender),
             thread: Some(thread),
@@ -162,9 +167,24 @@ impl Drop for SessionWriter {
     fn drop(&mut self) {
         // Closing the channel makes the thread write what's pending and stop.
         self.sender = None;
+        if let Ok(mut writer) = WRITER.lock() {
+            *writer = None;
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+/// Write the pending session now, from any thread, waiting at most `timeout` (the shutdown
+/// watchdog uses this, so the last changes are saved even if the main thread is stuck).
+pub(crate) fn flush_from_any_thread(timeout: Duration) {
+    let Some(sender) = WRITER.lock().ok().and_then(|writer| writer.clone()) else {
+        return;
+    };
+    let (reply, done) = mpsc::channel();
+    if sender.send(Message::Flush(reply)).is_ok() {
+        let _ = done.recv_timeout(timeout);
     }
 }
 
