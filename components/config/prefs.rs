@@ -158,7 +158,12 @@ pub struct Preferences {
     pub dom_credential_management_enabled: bool,
     // feature: WebCrypto API | #40687 | Web/API/Web_Crypto_API
     pub dom_crypto_subtle_enabled: bool,
+    /// Longest time between two clicks of a double (or triple) click, in milliseconds.
+    /// Stillwater: the Windows default; an embedder can pass the user's `GetDoubleClickTime`.
     pub dom_document_dblclick_timeout: i64,
+    /// Farthest two clicks of a double click may be apart on either axis, in CSS pixels.
+    /// Stillwater: the Windows default box (`SM_CXDOUBLECLK` = 4); an embedder can pass the
+    /// user's metric.
     pub dom_document_dblclick_dist: i64,
     /// Stillwater, for tests: the default clipboard delegate keeps copied data in memory and
     /// logs it instead of using the system clipboard.
@@ -469,8 +474,8 @@ impl Preferences {
             dom_credential_management_enabled: false,
             dom_crypto_subtle_enabled: true,
             dom_clipboard_test_mode: false,
-            dom_document_dblclick_dist: 1,
-            dom_document_dblclick_timeout: 300,
+            dom_document_dblclick_dist: 4,
+            dom_document_dblclick_timeout: 500,
             dom_entries_api_enabled: false,
             dom_exec_command_enabled: false,
             dom_fontface_enabled: false,

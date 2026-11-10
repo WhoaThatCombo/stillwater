@@ -141,6 +141,8 @@ impl MouseClickTracker {
         let (Some(previous_point), Some(previous_time)) =
             (state.last_click_point, state.last_click_time)
         else {
+            // No click to continue from (none yet, or the last press was a drag).
+            state.reset_click_count();
             return;
         };
 
@@ -163,10 +165,20 @@ impl MouseClickTracker {
         button: MouseButton,
         point_in_frame: Point2D<f32, CSSPixel>,
     ) -> usize {
-        self.state
-            .entry(NoTrace(button))
-            .or_default()
-            .increment_click_count(point_in_frame)
+        let state = self.state.entry(NoTrace(button)).or_default();
+        // Stillwater: a press that moved further than the double-click distance before its
+        // release was a drag (a drag selection, say). It still counts as this press, but a
+        // quick click after it starts a new click count instead of becoming a double click.
+        let moved = state.down_point.is_some_and(|down_point| {
+            let line = point_in_frame - down_point;
+            (line.dot(line) as f64).sqrt() > pref!(dom_document_dblclick_dist) as f64
+        });
+        let count = state.increment_click_count(point_in_frame);
+        if moved {
+            state.last_click_time = None;
+            state.last_click_point = None;
+        }
+        count
     }
 
     fn click_count_for(&self, button: MouseButton) -> usize {
