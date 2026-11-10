@@ -3188,6 +3188,12 @@ impl DocumentEventHandler {
         }
     }
 
+    /// Stillwater: end any drag gesture (a drag selection), e.g. when the window loses focus.
+    pub(crate) fn end_drag_gesture(&self) {
+        *self.drag_gesture.borrow_mut() = None;
+        self.selection_autoscroll_point.set(None);
+    }
+
     pub(crate) fn install_drag_gesture(&self, drag_gesture: DragGesture) {
         *self.drag_gesture.borrow_mut() = Some(drag_gesture);
     }
