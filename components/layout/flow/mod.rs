@@ -45,7 +45,9 @@ use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize, Size,
     SizeConstraint, Sizes,
 };
-use crate::style_ext::{AspectRatio, ContentBoxSizesAndPBM, LayoutStyle, PaddingBorderMargin};
+use crate::style_ext::{
+    AspectRatio, ComputedValuesExt, ContentBoxSizesAndPBM, LayoutStyle, PaddingBorderMargin,
+};
 
 mod construct;
 pub mod float;
@@ -1703,6 +1705,27 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         is_table,
     );
 
+    // `aspect-ratio` on a non-replaced box with an automatic block size: the block size comes
+    // from the inline size, as if it had been specified (so percentages inside resolve against
+    // it), but with `min-block-size: auto` and visible overflow the box still grows to fit its
+    // contents. <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-minimum>
+    let mut block_sizes = content_box_sizes.block;
+    let mut tentative_block_size = tentative_block_size;
+    let mut block_size_for_children = block_size_for_children;
+    if apply_aspect_ratio_to_block_sizes(
+        style,
+        base.base_fragment_info.flags,
+        is_table || context.is_some_and(|context| context.is_replaced()),
+        &pbm.padding_border_sums,
+        inline_size,
+        &mut block_sizes,
+    ) {
+        tentative_block_size =
+            block_sizes.resolve_extrinsic(automatic_block_size, Au::zero(), block_stretch_size);
+        block_size_for_children = tentative_block_size;
+        has_quirky_block_size = HasQuirkyBlockSize(false);
+    }
+
     let containing_block_for_children = ContainingBlock {
         size: ContainingBlockSize {
             inline: inline_size,
@@ -1715,7 +1738,7 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
     ContainingBlockPaddingAndBorder {
         containing_block: containing_block_for_children,
         pbm,
-        block_sizes: content_box_sizes.block,
+        block_sizes,
         depends_on_block_constraints,
         tentative_block_size,
         block_stretch_size,
@@ -1723,6 +1746,33 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         preferred_aspect_ratio,
         automatic_block_size,
     }
+}
+
+/// `aspect-ratio` on a non-replaced box whose block size is automatic: make the block size the
+/// one transferred from `inline_size`, as if it had been specified (so percentages inside
+/// resolve against it), except that with `min-block-size: auto` and visible overflow the box
+/// still grows to fit its contents. Returns whether `block_sizes` changed.
+/// <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-minimum>
+pub(crate) fn apply_aspect_ratio_to_block_sizes(
+    style: &ComputedValues,
+    flags: FragmentFlags,
+    is_replaced_or_table: bool,
+    padding_border_sums: &LogicalVec2<Au>,
+    inline_size: Au,
+    block_sizes: &mut Sizes,
+) -> bool {
+    if is_replaced_or_table || !block_sizes.preferred.is_initial() {
+        return false;
+    }
+    let Some(ratio) = style.preferred_aspect_ratio(None, padding_border_sums) else {
+        return false;
+    };
+    block_sizes.preferred =
+        Size::Numeric(ratio.compute_dependent_size(LogicalAxis::Block, inline_size));
+    if block_sizes.min.is_initial() && !style.establishes_scroll_container(flags) {
+        block_sizes.min = Size::MinContent;
+    }
+    true
 }
 
 /// Given the containing block and size of an in-flow box, determine the margins.
@@ -2286,6 +2336,21 @@ impl IndependentFormattingContext {
             is_table,
         );
 
+        // `aspect-ratio` on a non-replaced float or inline-block with an automatic block size.
+        let mut block_sizes = content_box_sizes_and_pbm.content_box_sizes.block.clone();
+        if apply_aspect_ratio_to_block_sizes(
+            style,
+            self.base_fragment_info().flags,
+            self.is_replaced() || is_table,
+            &pbm.padding_border_sums,
+            inline_size,
+            &mut block_sizes,
+        ) {
+            tentative_block_size =
+                block_sizes.resolve_extrinsic(automatic_block_size, Au::zero(), block_stretch_size);
+            has_quirky_block_size = HasQuirkyBlockSize(false);
+        }
+
         let containing_block_for_children = ContainingBlock {
             size: ContainingBlockSize {
                 inline: inline_size,
@@ -2298,7 +2363,7 @@ impl IndependentFormattingContext {
         // TODO: https://drafts.csswg.org/css-writing-modes/#orthogonal-flows
 
         let lazy_block_size = LazySize::new(
-            &content_box_sizes_and_pbm.content_box_sizes.block,
+            &block_sizes,
             LogicalAxis::Block,
             automatic_block_size,
             Au::zero,

@@ -32,7 +32,7 @@ use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize,
     SizeConstraint,
 };
-use crate::style_ext::{AspectRatio, Display, DisplayInside, LayoutStyle};
+use crate::style_ext::{AspectRatio, ComputedValuesExt, Display, DisplayInside, LayoutStyle};
 use crate::table::Table;
 use crate::taffy::TaffyContainer;
 use crate::{ArcRefCell, PropagatedBoxTreeData};
@@ -634,8 +634,12 @@ impl IndependentFormattingContext {
             IndependentFormattingContextContents::Replaced(replaced, _) => {
                 replaced.preferred_aspect_ratio(self.style(), padding_border_sums)
             },
-            // TODO: support preferred aspect ratios on non-replaced boxes.
-            _ => None,
+            // `aspect-ratio` doesn't apply to tables.
+            IndependentFormattingContextContents::Table(_) => None,
+            // Non-replaced boxes only have the ratio that `aspect-ratio` gives them.
+            _ => self
+                .style()
+                .preferred_aspect_ratio(None, padding_border_sums),
         }
     }
 

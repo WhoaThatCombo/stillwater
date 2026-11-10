@@ -498,33 +498,24 @@ impl FontContext {
         false
     }
 
-    fn is_local_or_unknown_url_font(
+    /// A template for `state`'s face from a web font file that was already downloaded, if it was.
+    fn template_from_downloaded_web_font(
         &self,
-        family_name: &LowercaseFontFamilyName,
-        source: &Source,
-    ) -> bool {
-        match source {
-            Source::Url(url) => !url
-                .url
-                .url()
-                .cloned()
-                .map(ServoUrl::from)
-                .map(FontIdentifier::Web)
-                .filter(|font_identifier| self.font_data.read().contains_key(font_identifier))
-                .is_some_and(|font_identifier| {
-                    self.web_fonts
-                        .read()
-                        .families
-                        .get(family_name)
-                        .is_some_and(|templates| {
-                            templates
-                                .templates
-                                .iter()
-                                .any(|template| template.borrow().identifier == font_identifier)
-                        })
-                }),
-            Source::Local(_) => true,
-        }
+        url: ServoUrl,
+        state: &WebFontDownloadState,
+    ) -> Option<FontTemplate> {
+        let identifier = FontIdentifier::Web(url);
+        let font_data = self.font_data.read().get(&identifier)?.clone();
+        let handle =
+            PlatformFont::new_from_data(identifier.clone(), &font_data, None, false).ok()?;
+        let mut descriptor = handle.descriptor();
+        descriptor
+            .override_values_with_css_font_template_descriptors(&state.css_font_face_descriptors);
+        Some(FontTemplate::new(
+            identifier,
+            descriptor,
+            state.initiator.font_face_rule().cloned(),
+        ))
     }
 
     /// Adds the provided new web font request to the list of pending downloads.
@@ -998,9 +989,6 @@ impl FontContext {
             .iter()
             .rev()
             .filter(Self::is_supported_web_font_source)
-            .filter(|source| {
-                self.is_local_or_unknown_url_font(&css_font_face_descriptors.family_name, source)
-            })
             .cloned()
             .collect();
 
@@ -1058,6 +1046,18 @@ impl FontContext {
         let web_font_family_name = state.css_font_face_descriptors.family_name.clone();
         match source {
             Source::Url(url_source) => {
+                // Another `@font-face` rule (or `FontFace`) already downloaded this file: build
+                // this face from that data. Skipping the source instead made a second copy of a
+                // rule fail, and since the newer copy wins the cascade, the family lost all of its
+                // faces (x.com: two stylesheets both declare TwitterChirp).
+                if let Some(template) = url_source
+                    .url
+                    .url()
+                    .and_then(|url| this.template_from_downloaded_web_font(url.clone().into(), &state))
+                {
+                    state.handle_web_font_load_success(template);
+                    return;
+                }
                 RemoteWebFontDownloader::download(url_source, this, web_font_family_name, state)
             },
             Source::Local(ref local_family_name) => {

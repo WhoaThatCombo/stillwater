@@ -175,8 +175,19 @@ impl FontTemplates {
     pub fn add_template(&mut self, new_template: FontTemplate) {
         for existing_template in &self.templates {
             let existing_template = existing_template.borrow();
+            // A template from another `@font-face` rule is kept even if it's the same face:
+            // when the older rule is dropped, its templates go with it.
+            let same_rule = match (
+                existing_template.font_face_rule.as_ref(),
+                new_template.font_face_rule.as_ref(),
+            ) {
+                (Some(existing), Some(new)) => ServoArc::ptr_eq(existing, new),
+                (None, None) => true,
+                _ => false,
+            };
             if *existing_template.identifier() == new_template.identifier &&
-                existing_template.descriptor == new_template.descriptor
+                existing_template.descriptor == new_template.descriptor &&
+                same_rule
             {
                 return;
             }

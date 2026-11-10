@@ -615,7 +615,7 @@ impl IndependentFormattingContext {
             true => style.get_align_self().0,
             false => resolved_alignment.block,
         };
-        let block_axis_solver = AbsoluteAxisSolver {
+        let mut block_axis_solver = AbsoluteAxisSolver {
             axis: LogicalAxis::Block,
             containing_size: cbbs,
             padding_border_sum: pbm.padding_border_sums.block,
@@ -675,6 +675,26 @@ impl IndependentFormattingContext {
             get_inline_content_size,
             is_table,
         );
+
+        // `aspect-ratio` on a non-replaced box with an automatic block size that isn't
+        // stretched between two insets.
+        let mut tentative_block_size = tentative_block_size;
+        if block_automatic_size != Size::Stretch &&
+            crate::flow::apply_aspect_ratio_to_block_sizes(
+                &style,
+                self.base_fragment_info().flags,
+                is_table_or_replaced,
+                &pbm.padding_border_sums,
+                inline_size,
+                &mut block_axis_solver.computed_sizes,
+            )
+        {
+            tentative_block_size = block_axis_solver.computed_sizes.resolve_extrinsic(
+                block_automatic_size,
+                Au::zero(),
+                block_stretch_size,
+            );
+        }
 
         let containing_block_for_children = ContainingBlock {
             size: ContainingBlockSize {
