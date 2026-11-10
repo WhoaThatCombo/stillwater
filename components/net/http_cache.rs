@@ -22,12 +22,12 @@ use log::{debug, error, info};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf;
 use net_traits::http_status::HttpStatus;
-use net_traits::request::{CacheMode, Request};
+use net_traits::request::{CacheMode, Destination, Request};
 use net_traits::response::{Response, ResponseBody};
 use net_traits::{CacheEntryDescriptor, Metadata, ResourceFetchTiming};
 use parking_lot::{Mutex as ParkingLotMutex, RwLock as ParkingLotRwLock};
 use quick_cache::sync::{Cache, PlaceholderGuard};
-use quick_cache::{DefaultHashBuilder, Lifecycle, UnitWeighter};
+use quick_cache::{DefaultHashBuilder, Lifecycle, OptionsBuilder};
 use serde::{Deserialize, Serialize};
 use servo_arc::Arc;
 use servo_config::pref;
@@ -264,12 +264,12 @@ pub(crate) struct CachedResponse {
 
 pub(crate) type CacheEntry = std::sync::Arc<TokioRwLock<Vec<CachedResource>>>;
 type QuickCache =
-    Cache<CacheKey, CacheEntry, UnitWeighter, DefaultHashBuilder, MemoryCacheLifecycle>;
+    Cache<CacheKey, CacheEntry, MemoryCacheWeighter, DefaultHashBuilder, MemoryCacheLifecycle>;
 type QuickCachePlaceholderGuard<'a> = PlaceholderGuard<
     'a,
     CacheKey,
     CacheEntry,
-    UnitWeighter,
+    MemoryCacheWeighter,
     DefaultHashBuilder,
     MemoryCacheLifecycle,
 >;
@@ -316,14 +316,25 @@ impl MallocSizeOf for HttpCache {
 impl HttpCache {
     /// Create a new HttpCache with [`HttpCacheAssignment`]
     pub fn new(assignment: HttpCacheAssignment) -> Self {
-        let size = pref!(network_http_cache_size)
+        let size: usize = pref!(network_http_cache_size)
             .try_into()
             .expect("http_cache_size needs to fit into u64");
+        let size = size.max(1);
         let (disk_cache, lifecycle) = DiskCache::new(assignment);
-        let memory_cache = Cache::with(
-            size,
-            size as u64,
-            UnitWeighter,
+        // At most 32 items per shard (quick_cache's own minimum), so that every shard can hold
+        // an entry of up to MEMORY_CACHE_MAX_ENTRY_BYTES.
+        let shards = size.div_ceil(32).next_power_of_two();
+        let options = OptionsBuilder::new()
+            .estimated_items_capacity(size)
+            .weight_capacity(MEMORY_CACHE_BYTES)
+            .shards(shards)
+            .build()
+            .expect("valid memory cache options");
+        let memory_cache = Cache::with_options(
+            options,
+            MemoryCacheWeighter {
+                min_weight: MEMORY_CACHE_BYTES / size as u64,
+            },
             DefaultHashBuilder::default(),
             lifecycle,
         );
@@ -374,6 +385,57 @@ impl Lifecycle<CacheKey, CacheEntry> for MemoryCacheLifecycle {
             let disk_cache_data = disk_cache_data.clone();
             tokio::spawn(async move { disk_cache_data.store(key, value).await });
         }
+    }
+}
+
+/// Audio and video bodies (and any range request) are streamed to their consumer and not kept
+/// whole in memory, nor in the memory cache: media elements fetch them in pieces as the player
+/// needs them, and a video file is far bigger than the memory cache.
+pub(crate) fn is_streamed_request(request: &Request) -> bool {
+    matches!(request.destination, Destination::Audio | Destination::Video) ||
+        request.headers.contains_key(header::RANGE)
+}
+
+/// Total bytes of response bodies the memory cache keeps.
+const MEMORY_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+/// Bodies bigger than this are not kept in the memory cache (they go to the disk cache).
+const MEMORY_CACHE_MAX_ENTRY_BYTES: u64 = 2 * 1024 * 1024;
+/// What a cached response costs besides its body (headers, URLs, bookkeeping).
+const MEMORY_CACHE_ENTRY_OVERHEAD: u64 = 2048;
+
+/// Weighs memory cache entries by the bytes they hold. Every entry weighs at least
+/// `MEMORY_CACHE_BYTES / network_http_cache_size`, so the cache also keeps at most that many
+/// entries, as before it was weighted by bytes. An entry over the per-entry limit outweighs any
+/// shard, so the cache evicts it at once (to the disk cache, if there is one).
+#[derive(Clone)]
+pub struct MemoryCacheWeighter {
+    min_weight: u64,
+}
+
+impl quick_cache::Weighter<CacheKey, CacheEntry> for MemoryCacheWeighter {
+    fn weight(&self, _key: &CacheKey, entry: &CacheEntry) -> u64 {
+        // Entries are weighed when inserted, before their body arrives, and again when a
+        // response is complete (see `HttpCache::update_awaiting_consumers`).
+        let Ok(resources) = entry.try_read() else {
+            return self.min_weight;
+        };
+        let bytes: u64 = resources
+            .iter()
+            .map(|resource| {
+                let body = match &*resource.body.lock() {
+                    ResponseBody::Receiving(body) | ResponseBody::Done(body) => body.len() as u64,
+                    ResponseBody::Empty => 0,
+                };
+                body + MEMORY_CACHE_ENTRY_OVERHEAD
+            })
+            .sum();
+        if resources.iter().any(|resource| {
+            matches!(&*resource.body.lock(), ResponseBody::Done(body)
+                if body.len() as u64 > MEMORY_CACHE_MAX_ENTRY_BYTES)
+        }) {
+            return MEMORY_CACHE_BYTES * 2;
+        }
+        bytes.max(self.min_weight)
     }
 }
 
@@ -1027,6 +1089,16 @@ impl HttpCache {
 
         let actual_response = response.actual_response();
 
+        // The entry was weighed before its body arrived: weigh it again now that it is complete
+        // (one over the per-entry limit is evicted to the disk cache).
+        if !actual_response.is_network_error() &&
+            matches!(*actual_response.body.lock(), ResponseBody::Done(_))
+        {
+            let _ = self
+                .entries
+                .replace(entry_key.clone(), cached_resources.clone(), true);
+        }
+
         // Ensure we only wake-up consumers of relevant resources,
         // ie we don't want to wake-up 200 awaiting consumers with a 206.
         let lock = cached_resources.read().await;
@@ -1181,6 +1253,10 @@ impl<'a> CachedResourcesOrGuard<'a> {
 
         if request.method != Method::GET {
             // Only Get requests are cached.
+            return;
+        }
+        if is_streamed_request(request) || response.status == StatusCode::PARTIAL_CONTENT {
+            // Their bodies are not kept (see `is_streamed_request`).
             return;
         }
         if request.headers.contains_key(header::AUTHORIZATION) {

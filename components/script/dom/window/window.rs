@@ -3792,11 +3792,16 @@ impl Window {
 
     /// Set whether to use less resources by running timers at a heavily limited rate.
     pub(crate) fn set_throttled(&self, throttled: bool) {
+        let changed = self.throttled.get() != throttled;
         self.throttled.set(throttled);
         if throttled {
             self.as_global_scope().slow_down_timers();
         } else {
             self.as_global_scope().speed_up_timers();
+        }
+        if changed && let Some(document) = self.document.get() {
+            // Silent videos stop fetching and decoding while nobody can see them.
+            document.media_elements_throttling_changed();
         }
     }
 

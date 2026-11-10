@@ -22,13 +22,19 @@ pub struct VideoFrame {
     width: i32,
     height: i32,
     data: VideoFrameData,
+    /// Keeps the backend's frame alive while a texture refers to it. Raw frames are copies, so
+    /// they let it go at once and the decoder can reuse its buffer.
     #[ignore_malloc_size_of = "Difficult"]
-    _buffer: Arc<dyn Buffer>,
+    _buffer: Option<Arc<dyn Buffer>>,
 }
 
 impl VideoFrame {
     pub fn new(width: i32, height: i32, buffer: Arc<dyn Buffer>) -> Option<Self> {
         let data = buffer.to_vec()?;
+        let buffer = match data {
+            VideoFrameData::Raw(_) => None,
+            VideoFrameData::Texture(_) | VideoFrameData::OESTexture(_) => Some(buffer),
+        };
         Some(VideoFrame {
             width,
             height,

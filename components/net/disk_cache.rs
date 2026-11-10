@@ -263,8 +263,19 @@ impl DiskCache {
             .iter()
             .filter(|cached_resource| cached_resource.is_done())
             .collect();
-        let Ok(data) = postcard::to_stdvec(&*data_to_serialize) else {
-            error!("Could not deserialize value");
+        if data_to_serialize.is_empty() {
+            return;
+        }
+        // Size the buffer exactly: growing it while serializing (`to_stdvec`) briefly needs up
+        // to twice the body on top of the body itself.
+        let Ok(size) =
+            postcard::serialize_with_flavor(&*data_to_serialize, postcard::ser_flavors::Size::default())
+        else {
+            error!("Could not serialize value");
+            return;
+        };
+        let Ok(data) = postcard::to_extend(&*data_to_serialize, Vec::with_capacity(size)) else {
+            error!("Could not serialize value");
             return;
         };
 

@@ -11,7 +11,12 @@ use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
 use url::Url;
 
-const MAX_SRC_QUEUE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB.
+/// Bytes the source queues before it asks for no more data (enough-data). The media element
+/// then stops its fetch and resumes it from the same byte when the queue is half empty
+/// (need-data), so a paused or slow player never holds the whole file in memory.
+const MAX_SRC_QUEUE_SIZE: u64 = 2 * 1024 * 1024;
+/// need-data is signalled when the queue drops to this percentage of MAX_SRC_QUEUE_SIZE.
+const SRC_QUEUE_MIN_PERCENT: u32 = 50;
 
 // Implementation sub-module of the GObject
 mod imp {
@@ -122,13 +127,7 @@ mod imp {
             let mut pos = self.position.lock().unwrap(); // will block seeking
 
             let length = u64::try_from(data.len()).unwrap();
-            let mut data_offset = 0;
-
             let buffer_starting_offset = pos.offset;
-
-            // @TODO: optimization: update the element's blocksize by
-            // X factor given current length
-
             pos.offset += length;
 
             gstreamer::trace!(self.cat, obj = parent, "offset: {}", pos.offset);
@@ -149,62 +148,29 @@ mod imp {
                 self.appsrc.set_size(new_size);
             }
 
-            // Split the received vec<> into buffers that are of a
-            // size basesrc suggest. It is important not to push
-            // buffers that are too large, otherwise incorrect
-            // buffering messages can be sent from the pipeline
-            let block_size = 4096;
-            let num_blocks = ((length - data_offset) as f64 / block_size as f64).ceil() as u64;
-
-            gstreamer::log!(
-                self.cat,
-                obj = parent,
-                "Splitting the received vec into {} blocks",
-                num_blocks
-            );
-
-            let mut ret: Result<gstreamer::FlowSuccess, gstreamer::FlowError> =
-                Ok(gstreamer::FlowSuccess::Ok);
-            for i in 0..num_blocks {
-                let start = usize::try_from(i * block_size + data_offset).unwrap();
-                data_offset = 0;
-                let size = usize::try_from(block_size.min(length - start as u64)).unwrap();
-                let end = start + size;
-
-                let buffer_offset = buffer_starting_offset + start as u64;
-                let buffer_offset_end = buffer_offset + size as u64;
-
-                let subdata = Vec::from(&data[start..end]);
-                let mut buffer = gstreamer::Buffer::from_slice(subdata);
-                {
-                    let buffer = buffer.get_mut().unwrap();
-                    buffer.set_offset(buffer_offset);
-                    buffer.set_offset_end(buffer_offset_end);
-                }
-
-                if self.seeking.load(Ordering::Relaxed) {
-                    gstreamer::trace!(
-                        self.cat,
-                        obj = parent,
-                        "stopping buffer appends due to seek"
-                    );
-                    ret = Ok(gstreamer::FlowSuccess::Ok);
-                    break;
-                }
-
-                gstreamer::trace!(self.cat, obj = parent, "Pushing buffer {:?}", buffer);
-
-                ret = self.appsrc.push_buffer(buffer);
-                match ret {
-                    Ok(_) => (),
-                    Err(gstreamer::FlowError::Eos) | Err(gstreamer::FlowError::Flushing) => {
-                        ret = Ok(gstreamer::FlowSuccess::Ok)
-                    },
-                    Err(_) => break,
-                }
+            // One buffer per network chunk, wrapping the data without copying it (it used to be
+            // copied into 4 KB buffers, which cost a buffer header per 4 KB and a second copy).
+            let mut buffer = gstreamer::Buffer::from_mut_slice(data);
+            {
+                let buffer = buffer.get_mut().unwrap();
+                buffer.set_offset(buffer_starting_offset);
+                buffer.set_offset_end(buffer_starting_offset + length);
             }
 
-            ret
+            gstreamer::trace!(self.cat, obj = parent, "Pushing buffer {:?}", buffer);
+
+            match self.appsrc.push_buffer(buffer) {
+                Ok(success) => Ok(success),
+                Err(gstreamer::FlowError::Eos) | Err(gstreamer::FlowError::Flushing) => {
+                    Ok(gstreamer::FlowSuccess::Ok)
+                },
+                Err(error) => Err(error),
+            }
+        }
+
+        /// Whether the queue of data waiting to enter the pipeline is full.
+        pub fn queue_full(&self) -> bool {
+            self.appsrc.current_level_bytes() >= self.appsrc.max_bytes()
         }
 
         inner_appsrc_proxy!(end_of_stream, Result<gstreamer::FlowSuccess, gstreamer::FlowError>);
@@ -323,6 +289,7 @@ mod imp {
 
             self.appsrc.set_caps(None::<&gstreamer::Caps>);
             self.appsrc.set_max_bytes(MAX_SRC_QUEUE_SIZE);
+            self.appsrc.set_min_percent(SRC_QUEUE_MIN_PERCENT);
             self.appsrc.set_block(false);
             self.appsrc.set_format(gstreamer::Format::Bytes);
             self.appsrc
@@ -433,6 +400,10 @@ impl ServoSrc {
         data: Vec<u8>,
     ) -> Result<gstreamer::FlowSuccess, gstreamer::FlowError> {
         self.imp().push_buffer(self, data)
+    }
+
+    pub fn queue_full(&self) -> bool {
+        self.imp().queue_full()
     }
 
     pub fn push_end_of_stream(&self) -> Result<gstreamer::FlowSuccess, gstreamer::FlowError> {

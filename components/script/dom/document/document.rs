@@ -951,6 +951,19 @@ impl Document {
             .remove(&Dom::from_ref(element));
     }
 
+    /// Let playing media elements react to the document being hidden or shown.
+    pub(crate) fn media_elements_throttling_changed(&self) {
+        let media_elements: Vec<DomRoot<HTMLMediaElement>> = self
+            .active_media_elements
+            .borrow()
+            .iter()
+            .map(|e| DomRoot::from_ref(&**e))
+            .collect();
+        for element in &media_elements {
+            element.document_throttling_changed();
+        }
+    }
+
     fn clean_up_media_elements(&self, no_gc: &NoGC) {
         let media_elements: Vec<DomRoot<HTMLMediaElement>> = self
             .active_media_elements

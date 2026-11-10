@@ -141,6 +141,9 @@ impl GStreamerRender {
         // keep up. The counts are reported through getVideoPlaybackQuality().
         appsink.set_max_lateness(20_000_000);
         appsink.set_qos(true);
+        // The render callbacks take every sample as it arrives; don't let decoded frames pile
+        // up in the sink if they ever fall behind (each 1080p frame is 8 MB).
+        appsink.set_max_buffers(super::player::VIDEO_SINK_MAX_BUFFERS as _);
 
         if let Some(render) = self.render.as_ref() {
             render.build_video_sink(appsink.upcast_ref::<gstreamer::Element>(), pipeline)?

@@ -97,7 +97,7 @@ use crate::fetch::methods::{Data, DoneChannel, FetchContext, Target, fetch, main
 use crate::hsts::HstsList;
 use crate::http_cache::{
     CacheKey, CachedResourcesOrGuard, HttpCache, ValidationStatus, construct_response,
-    invalidate_cached_resources, refresh,
+    invalidate_cached_resources, is_streamed_request, refresh,
 };
 use crate::resource_thread::{AuthCache, AuthCacheEntry};
 use crate::websocket_loader::start_websocket;
@@ -2401,7 +2401,13 @@ async fn http_network_fetch(
     let url1 = request.url();
     let url2 = url1.clone();
 
-    let prealloc_size: usize = if let Some(possible_length) = response_stream
+    // Media and range responses are only streamed to the consumer: they are not cached, so
+    // keeping the whole body (a video can be hundreds of MB) would only waste memory. Integrity
+    // checks need the whole body.
+    let keep_body = !is_streamed_request(request) || !request.integrity_metadata.is_empty();
+    let prealloc_size: usize = if !keep_body {
+        0
+    } else if let Some(possible_length) = response_stream
         .headers()
         .get(http::header::CONTENT_LENGTH)
         .and_then(|header_value| header_value.to_str().ok())
@@ -2438,7 +2444,9 @@ async fn http_network_fetch(
                     )));
                 }
                 if let ResponseBody::Receiving(ref mut body) = *response_body_accumulator.lock() {
-                    body.extend_from_slice(&chunk);
+                    if keep_body {
+                        body.extend_from_slice(&chunk);
+                    }
                     let _ = done_sender.send(Data::Payload(chunk));
                 }
                 future::ready(Ok(response_body_accumulator))

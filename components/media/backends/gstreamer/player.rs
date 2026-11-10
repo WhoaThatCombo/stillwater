@@ -41,13 +41,53 @@ const DEFAULT_PLAYBACK_RATE: f64 = 1.0;
 const DEFAULT_VOLUME: f64 = 1.0;
 const DEFAULT_TIME_RANGES: Vec<Range<f64>> = vec![];
 
-const MAX_BUFFER_SIZE: i32 = 500 * 1024 * 1024;
+/// Bytes the pipeline's network buffer (urisourcebin's queue2) holds ahead of the demuxer. The
+/// media element stops fetching when this and the source's own queue are full, so this bounds
+/// what a player keeps of a file; it used to be 500 MB, which let a video's whole file pile up.
+const MAX_BUFFER_SIZE: i32 = 4 * 1024 * 1024;
 
 /// Threads for converting decoded video frames to the compositor's format.
 const VIDEO_CONVERT_THREADS: u32 = 4;
 
-/// Most threads a software video decoder may use.
+/// Most threads a libvpx video decoder may use.
 const DECODER_THREADS: u32 = 8;
+
+/// Frame threads for libav video decoders up to 1080p, and above it. Every frame thread has
+/// its own codec context (several MB) and keeps frames in flight in the output pool, and the
+/// default is a thread per core; two keep up with 1080p60 H.264 on any recent CPU.
+const LIBAV_THREADS_HD: i32 = 2;
+const LIBAV_THREADS_UHD: i32 = 4;
+
+/// Decoded frames the video sink may queue: the render callback takes each one at once.
+pub(crate) const VIDEO_SINK_MAX_BUFFERS: u32 = 2;
+
+/// Sets `max-threads` on a libav video decoder from the size of the stream it is about to
+/// open; the decoder reads the property when it opens its codec on the caps event.
+fn limit_libav_threads(element: &gstreamer::Element) {
+    let Some(pad) = element.static_pad("sink") else {
+        element.set_property("max-threads", LIBAV_THREADS_HD);
+        return;
+    };
+    element.set_property("max-threads", LIBAV_THREADS_HD);
+    let decoder = element.downgrade();
+    pad.add_probe(gstreamer::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+        if let Some(gstreamer::PadProbeData::Event(ref event)) = info.data &&
+            let gstreamer::EventView::Caps(caps) = event.view() &&
+            let Some(structure) = caps.caps().structure(0) &&
+            let Some(decoder) = decoder.upgrade()
+        {
+            let width = structure.get::<i32>("width").unwrap_or(0);
+            let height = structure.get::<i32>("height").unwrap_or(0);
+            let threads = if width as i64 * height as i64 > 1920 * 1088 {
+                LIBAV_THREADS_UHD
+            } else {
+                LIBAV_THREADS_HD
+            };
+            decoder.set_property("max-threads", threads);
+        }
+        gstreamer::PadProbeReturn::Ok
+    });
+}
 
 /// Move a demuxer's time segment to start at `offset`, so decoders and sinks drop everything
 /// before it: a restarted Media Source Extensions stream begins at a keyframe, and playback must
@@ -331,7 +371,8 @@ impl PlayerInner {
 
     pub fn push_data(&mut self, data: Vec<u8>) -> Result<(), PlayerError> {
         if let Some(PlayerSource::Seekable(ref mut source)) = self.source {
-            if self.enough_data.load(Ordering::Relaxed) {
+            // Not pushed: the caller keeps the data and waits for NeedData.
+            if self.enough_data.load(Ordering::Relaxed) || source.queue_full() {
                 return Err(PlayerError::EnoughData);
             }
             return source
@@ -609,7 +650,7 @@ impl GStreamerPlayer {
             if name.starts_with("avdec_") && element.find_property("max-threads").is_some() {
                 // libav uses a thread per core by default, each holding frames in flight: on a
                 // 32-thread machine that doubles a 4K decoder's memory (~900 MB) for no speed.
-                element.set_property("max-threads", DECODER_THREADS as i32);
+                limit_libav_threads(&element);
             } else if name == "vp9dec" || name == "vp8dec" {
                 element.set_property("threads", DECODER_THREADS);
             } else if name.starts_with("videoconvert") || name == "videoscale" {
