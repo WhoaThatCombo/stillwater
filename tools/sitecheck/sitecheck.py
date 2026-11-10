@@ -183,6 +183,9 @@ def check_site(url: str, category: str, args, run_dir: Path) -> Result:
         f"--pref=network_http_disk_cache={profile / 'cache'}",
         *args.extra,
     ]
+    # Engine cookies/storage follow --config-dir, not STILLWATER_CONFIG_DIR (legacy path has no driver).
+    if not any(arg.startswith("--config-dir") for arg in browser_args):
+        browser_args.append(f"--config-dir={profile / 'engine'}")
     started = time.monotonic()
     with open(site_dir / "output.txt", "wb") as output:
         if args.legacy:

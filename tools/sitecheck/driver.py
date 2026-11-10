@@ -65,6 +65,10 @@ class Stillwater:
         args = list(args)
         if not any(arg.startswith("--pref=network_http_disk_cache") for arg in args):
             args.append(f"--pref=network_http_disk_cache={Path(profile) / 'cache'}")
+        # STILLWATER_CONFIG_DIR only moves the shell's own files. The engine's cookies and site
+        # storage follow --config-dir, and without it they are the user's real ones.
+        if not any(arg.startswith("--config-dir") for arg in args):
+            args.append(f"--config-dir={Path(profile) / 'engine'}")
         command = [str(exe), f"--webdriver={self.port}", f"--window-size={window_size}", *args]
         if headless:
             command.insert(1, "--headless")

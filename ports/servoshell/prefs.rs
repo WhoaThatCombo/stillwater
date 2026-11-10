@@ -713,6 +713,13 @@ fn parse_arguments_helper(args_without_binary: Args) -> ArgumentParsingResult {
     let config_dir = cmd_args
         .config_dir
         .clone()
+        // Stillwater: a scratch STILLWATER_CONFIG_DIR profile must not share the real engine
+        // store (cookies, storage, HSTS) in the default dir, so put the engine under it.
+        .or_else(|| {
+            std::env::var_os("STILLWATER_CONFIG_DIR")
+                .filter(|dir| !dir.is_empty())
+                .map(|dir| PathBuf::from(dir).join("engine"))
+        })
         .or_else(default_config_dir)
         .inspect(|config_dir| {
             if !config_dir.exists() {
