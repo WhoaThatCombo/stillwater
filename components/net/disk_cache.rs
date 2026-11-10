@@ -72,9 +72,8 @@ struct WriteProgress {
 const CHECKPOINT_QUIET: Duration = Duration::from_millis(500);
 /// ...or until it has waited this long.
 const CHECKPOINT_MAX_WAIT: Duration = Duration::from_secs(10);
-/// Truncate the WAL once it is fully copied into the file and bigger than this many pages
-/// (4 KB each).
-const TRUNCATE_WAL_PAGES: i64 = 1024;
+/// Truncate the WAL once it is fully copied into the file and bigger than this.
+const TRUNCATE_WAL_BYTES: i64 = 4 * 1024 * 1024;
 /// Read connections (reads beyond this many at once wait for one; a read takes well under a
 /// millisecond once the page is cached by the OS).
 const READERS: usize = 4;
@@ -245,6 +244,10 @@ fn open_reader(path: &Path) -> rusqlite::Result<Connection> {
 
 fn open_writer(path: &Path) -> rusqlite::Result<Connection> {
     let connection = open_reader(path)?;
+    // Bodies are stored in pages of this size, read one at a time: with SQLite's default
+    // 4 KB, a 10 MB script is 2500 reads, seconds on a USB hard drive. Only applies when the
+    // file is created (an existing cache keeps its page size).
+    connection.pragma_update(None, "page_size", 65536)?;
     connection.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
     // With WAL, NORMAL only risks losing the last writes on power loss, never corruption.
     connection.pragma_update(None, "synchronous", "NORMAL")?;
@@ -265,6 +268,9 @@ fn run_checkpointer(shared: Arc<Shared>, written: Receiver<()>) {
     let Ok(connection) = open_reader(&shared.path) else {
         return;
     };
+    let page_size: i64 = connection
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .unwrap_or(4096);
     while written.recv().is_ok() {
         let waiting_since = Instant::now();
         loop {
@@ -283,7 +289,7 @@ fn run_checkpointer(shared: Arc<Shared>, written: Receiver<()>) {
             Ok((frames, done)) => {
                 // Everything is in the file: give a big WAL's space back (this only waits
                 // for a write or read in progress).
-                if frames == done && frames > TRUNCATE_WAL_PAGES {
+                if frames == done && frames * page_size > TRUNCATE_WAL_BYTES {
                     let _ = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
                 }
                 info!(
