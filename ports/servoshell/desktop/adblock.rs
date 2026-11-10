@@ -109,6 +109,10 @@ fn data_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("STILLWATER_ADBLOCK_DIR") {
         return Some(PathBuf::from(dir));
     }
+    // A scratch STILLWATER_CONFIG_DIR profile keeps its lists to itself as well.
+    if let Some(dir) = std::env::var_os("STILLWATER_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
+        return Some(PathBuf::from(dir).join("adblock"));
+    }
     dirs::data_local_dir().map(|dir| dir.join("Stillwater").join("adblock"))
 }
 

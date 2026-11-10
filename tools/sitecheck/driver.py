@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import tempfile
 import socket
 import subprocess
 import time
@@ -63,7 +64,12 @@ class Stillwater:
             # 60 s; 0 never stops them).
             environment["STILLWATER_SLOW_SCRIPT_SECONDS"] = str(slow_script_seconds)
         args = list(args)
-        if not any(arg.startswith("--pref=network_http_disk_cache") for arg in args):
+        # Ad-block lists: never the real folder; one shared scratch copy so each test doesn't
+        # download them again.
+        environment.setdefault("STILLWATER_ADBLOCK_DIR",
+                               str(Path(tempfile.gettempdir()) / "stillwater-test-adblock"))
+        # Exactly this pref: network_http_disk_cache_size and friends don't name a folder.
+        if not any(arg.startswith("--pref=network_http_disk_cache=") for arg in args):
             args.append(f"--pref=network_http_disk_cache={Path(profile) / 'cache'}")
         # STILLWATER_CONFIG_DIR only moves the shell's own files. The engine's cookies and site
         # storage follow --config-dir, and without it they are the user's real ones.
