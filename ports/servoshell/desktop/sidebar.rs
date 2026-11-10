@@ -1083,6 +1083,8 @@ impl Sidebar {
                 },
                 "pw-autofill" => self.password(PasswordAction::SetAutofill(argument == "1")),
                 "pw-forget-never" => self.password(PasswordAction::ForgetNever(argument.to_owned())),
+                // Tests: a key pressed in the saved-login list under the focused field.
+                "pw-chooser-key" => self.password(PasswordAction::ChooserKey(argument.to_owned())),
                 "compare" => self.window_actions.push(WindowAction::Compare),
                 "zen-scan" => self
                     .window_actions

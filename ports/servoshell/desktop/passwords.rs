@@ -2,25 +2,34 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! Saved passwords. A small script in every page (`passwords.js`) reports sign-in forms and
-//! the username and password they were submitted with; Stillwater offers to save new logins in
-//! the sidebar and fills saved ones into sign-in forms on the same origin.
+//! Saved passwords. A small script in every page (`passwords.js`) reports sign-in forms,
+//! focused sign-in fields and the username and password a form was submitted with; Stillwater
+//! offers to save new logins in the sidebar and fills saved ones into sign-in forms on exactly
+//! the same origin (scheme, host and port). With one saved login for the page's origin it's
+//! filled in as the form appears; with several, nothing is filled until the user picks one
+//! from the list Stillwater draws under the focused field (`draw_chooser`). Only top-level
+//! pages are filled, never frames.
 //!
 //! Logins are kept in `<config dir>/stillwater-passwords.dat`, encrypted with Windows' DPAPI for
 //! the current Windows user (like Chrome and Edge). Passwords never go through the log: the
 //! page's messages are taken out before console output is printed or logged.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use log::warn;
 use serde_json::{Value, json};
-use servo::{JSValue, UserContentManager, UserScript, WebView};
+use servo::{JSValue, UserContentManager, UserScript, WebView, WebViewId};
 use url::Url;
 
 /// Console messages from the page-side script start with this.
 pub(crate) const MESSAGE_PREFIX: &str = "__stillwater_pw__";
+
+/// How long a login picked from the list on a username-first page is remembered for the
+/// password page that follows.
+const PICKED_LOGIN_LIFETIME: Duration = Duration::from_secs(5 * 60);
 
 /// Longest username or password accepted from a page.
 const MAX_FIELD: usize = 1024;
@@ -84,10 +93,27 @@ pub(crate) enum PasswordAction {
     /// Send a login's password to the sidebar to show it.
     Reveal(u64),
     Delete(u64),
-    /// Fill saved logins into sign-in forms when the page loads.
+    /// Fill saved logins into sign-in forms when the page loads, and list them under focused
+    /// sign-in fields.
     SetAutofill(bool),
+    /// Tests: press a key in the saved-login list ("down", "up", "enter", "escape").
+    ChooserKey(String),
     /// Let a site that was set to "Never" offer to save again.
     ForgetNever(String),
+}
+
+/// The list of saved logins shown under a focused sign-in field. It's drawn by Stillwater over
+/// the page, so the page never sees which logins are saved; only the one picked is filled in.
+pub(crate) struct Chooser {
+    pub(crate) webview: WebViewId,
+    /// The origin the list is for: the page's origin when the field was focused.
+    pub(crate) origin: String,
+    /// The field, in CSS pixels from the top left of the page's viewport.
+    pub(crate) field: [f32; 4],
+    /// Login ids and usernames, most recently used first.
+    pub(crate) entries: Vec<(u64, String)>,
+    /// The entry highlighted with the arrow keys.
+    pub(crate) selected: Option<usize>,
 }
 
 pub(crate) struct Passwords {
@@ -100,6 +126,10 @@ pub(crate) struct Passwords {
     /// Why saved passwords couldn't be read, if they couldn't.
     problem: Option<String>,
     offer: Option<Offer>,
+    chooser: Option<Chooser>,
+    /// The login picked from the list in each tab, with its origin and when: when a
+    /// username-first page then asks for the password, it's that login's.
+    picked: HashMap<WebViewId, (String, u64, Instant)>,
     _script: Rc<UserScript>,
 }
 
@@ -162,7 +192,9 @@ fn fills_on_load(url: &Url) -> bool {
 impl Passwords {
     pub(crate) fn new(user_content_manager: &UserContentManager) -> Self {
         let script = Rc::new(UserScript::new(
-            include_str!("passwords.js").replace("__PREFIX__", MESSAGE_PREFIX),
+            include_str!("passwords.js")
+                .replace("__DETECT__", DETECT)
+                .replace("__PREFIX__", MESSAGE_PREFIX),
             None,
         ));
         user_content_manager.add_script(script.clone());
@@ -176,6 +208,8 @@ impl Passwords {
             path,
             problem: None,
             offer: None,
+            chooser: None,
+            picked: HashMap::new(),
             _script: script,
         };
         passwords.load();
@@ -254,26 +288,177 @@ impl Passwords {
             .filter(move |login| login.origin == origin)
     }
 
-    /// A message from the page script (`MESSAGE_PREFIX` already removed).
-    pub(crate) fn on_page_message(&mut self, webview: &WebView, payload: &str) {
+    /// A message from the page script (`MESSAGE_PREFIX` already removed). Any page can send
+    /// these (and a frame's console messages arrive here too), so they're only hints: the
+    /// origin always comes from the tab's URL, the page never gets the list of saved logins,
+    /// and a password is only filled into the tab's top-level page on that exact origin.
+    /// Returns true if the list under the focused field changed (the window must redraw).
+    pub(crate) fn on_page_message(&mut self, webview: &WebView, payload: &str) -> bool {
         let Some(url) = webview.url() else {
-            return;
+            return false;
         };
         let Some(origin) = origin_of(&url) else {
-            return;
+            return self.close_chooser(webview.id());
         };
+        if self
+            .picked
+            .get(&webview.id())
+            .is_some_and(|(picked_origin, _, when)| {
+                *picked_origin != origin || when.elapsed() > PICKED_LOGIN_LIFETIME
+            })
+        {
+            self.picked.remove(&webview.id());
+        }
         let (kind, data) = payload.split_once('\t').unwrap_or((payload, ""));
         match kind {
             // The page shows a sign-in form: fill it if there's exactly one saved login (on
-            // secure pages only, see `fills_on_load`).
-            "form" if self.autofill && fills_on_load(&url) => {
+            // secure pages only, see `fills_on_load`), or the second step of a sign-in that
+            // started with a login picked from the list.
+            "form" if self.autofill => {
+                let picked = self
+                    .picked
+                    .get(&webview.id())
+                    .and_then(|(_, id, _)| self.get(*id))
+                    .filter(|login| login.origin == origin);
                 let mut logins = self.logins_for(&origin);
-                if let (Some(login), None) = (logins.next(), logins.next()) {
-                    fill(webview, login, false);
+                let only = match (logins.next(), logins.next()) {
+                    (Some(login), None) => Some(login),
+                    _ => None,
+                };
+                match (only, picked) {
+                    (Some(login), _) if fills_on_load(&url) => fill(webview, login, "load"),
+                    (_, Some(login)) => fill(webview, login, "continue"),
+                    _ => {},
                 }
+                false
             },
-            "submit" => self.on_submit(origin, data),
-            _ => {},
+            "focus" if self.autofill => {
+                let Some(field) = parse_rect(data) else {
+                    return false;
+                };
+                let mut logins: Vec<&Login> = self.logins_for(&origin).collect();
+                if logins.is_empty() {
+                    return self.close_chooser(webview.id());
+                }
+                logins.sort_by(|a, b| {
+                    b.last_used
+                        .cmp(&a.last_used)
+                        .then_with(|| a.username.cmp(&b.username))
+                });
+                let entries = logins
+                    .iter()
+                    .map(|login| (login.id, login.username.clone()))
+                    .collect();
+                self.chooser = Some(Chooser {
+                    webview: webview.id(),
+                    origin,
+                    field,
+                    entries,
+                    selected: None,
+                });
+                true
+            },
+            "move" => match (&mut self.chooser, parse_rect(data)) {
+                (Some(chooser), Some(field)) if chooser.webview == webview.id() => {
+                    chooser.field = field;
+                    true
+                },
+                _ => false,
+            },
+            "blur" => self.close_chooser(webview.id()),
+            "submit" => {
+                self.on_submit(origin, data);
+                false
+            },
+            _ => false,
+        }
+    }
+
+    /// The list under the focused field, if it's showing in `webview` on `url`'s origin.
+    pub(crate) fn chooser_for(&self, webview: &WebView) -> Option<&Chooser> {
+        let chooser = self.chooser.as_ref()?;
+        let origin = webview.url().as_ref().and_then(origin_of)?;
+        (chooser.webview == webview.id() && chooser.origin == origin).then_some(chooser)
+    }
+
+    /// Close the list if it's showing in `webview`. Returns true if it was.
+    pub(crate) fn close_chooser(&mut self, webview: WebViewId) -> bool {
+        if self
+            .chooser
+            .as_ref()
+            .is_some_and(|chooser| chooser.webview == webview)
+        {
+            self.chooser = None;
+            return true;
+        }
+        false
+    }
+
+    /// Fill the list's entry `index` into the focused field's form in `webview`.
+    pub(crate) fn pick(&mut self, webview: &WebView, index: usize) {
+        let Some(chooser) = self.chooser.take() else {
+            return;
+        };
+        let Some(&(id, _)) = chooser.entries.get(index) else {
+            return;
+        };
+        // The page must still be on the origin the list was shown for.
+        if chooser.webview != webview.id() ||
+            webview.url().as_ref().and_then(origin_of).as_ref() != Some(&chooser.origin)
+        {
+            return;
+        }
+        let Some(login) = self.get(id).filter(|login| login.origin == chooser.origin) else {
+            return;
+        };
+        fill(webview, login, "focused");
+        self.picked
+            .insert(webview.id(), (chooser.origin.clone(), id, Instant::now()));
+    }
+
+    /// A key pressed while the list shows in `webview`: the arrow keys move the highlight, Enter
+    /// fills the highlighted login and Escape closes the list. Returns true if the key was used
+    /// (and must not reach the page). Any other key closes the list and goes to the page.
+    pub(crate) fn chooser_key(&mut self, webview: &WebView, key: &str) -> bool {
+        let Some(chooser) = self.chooser.as_mut() else {
+            return false;
+        };
+        let count = chooser.entries.len();
+        if chooser.webview != webview.id() || count == 0 {
+            return false;
+        }
+        match key {
+            "down" => {
+                chooser.selected = Some(chooser.selected.map_or(0, |index| (index + 1) % count));
+                true
+            },
+            "up" => {
+                chooser.selected = Some(
+                    chooser
+                        .selected
+                        .map_or(count - 1, |index| (index + count - 1) % count),
+                );
+                true
+            },
+            "enter" => match chooser.selected {
+                Some(index) => {
+                    self.pick(webview, index);
+                    true
+                },
+                // Nothing highlighted: Enter submits the form as usual.
+                None => {
+                    self.chooser = None;
+                    false
+                },
+            },
+            "escape" => {
+                self.chooser = None;
+                true
+            },
+            _ => {
+                self.chooser = None;
+                false
+            },
         }
     }
 
@@ -403,8 +588,15 @@ impl Passwords {
             },
             PasswordAction::DismissOffer => self.offer = None,
             PasswordAction::Fill(id) => {
-                if let (Some(login), Some(page)) = (self.get(id), page) {
-                    fill(page, login, true);
+                if let (Some(login), Some(page)) = (self.get(id), page) &&
+                    page.url().as_ref().and_then(origin_of).as_ref() == Some(&login.origin)
+                {
+                    fill(page, login, "page");
+                }
+            },
+            PasswordAction::ChooserKey(key) => {
+                if let Some(page) = page {
+                    self.chooser_key(page, &key);
                 }
             },
             PasswordAction::Copy(id, password) => {
@@ -425,6 +617,10 @@ impl Passwords {
             },
             PasswordAction::SetAutofill(enabled) => {
                 self.autofill = enabled;
+                if !enabled {
+                    self.chooser = None;
+                    self.picked.clear();
+                }
                 self.save();
             },
             PasswordAction::ForgetNever(origin) => {
@@ -465,18 +661,175 @@ impl Passwords {
             })).collect::<Vec<_>>()).unwrap_or_default(),
             "list": list.iter().map(entry).collect::<Vec<_>>(),
             "never": self.never.iter().map(|origin| json!({ "origin": origin, "host": host_of(origin) })).collect::<Vec<_>>(),
+            // For tests: whether the list under a focused field shows, and how long it is.
+            "chooser": self.chooser.as_ref().map(|chooser| json!({
+                "count": chooser.entries.len(), "selected": chooser.selected,
+            })),
         })
     }
 }
 
-/// Fill a login into `webview`'s page (the script checks the page is still on its origin).
-fn fill(webview: &WebView, login: &Login, force: bool) {
-    let json = |text: &str| serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into());
+/// Draw the saved-login list under its field, over `content_rect` (where the page is shown,
+/// `zoom` times CSS pixels). Returns where it was drawn and the entry clicked, if any.
+pub(crate) fn draw_chooser(
+    ctx: &egui::Context,
+    chooser: &Chooser,
+    content_rect: egui::Rect,
+    zoom: f32,
+    theme: servo::Theme,
+) -> (egui::Rect, Option<usize>) {
+    use egui::{Color32, CornerRadius, Id, Order, Sense, Stroke, StrokeKind, pos2, vec2};
+
+    // The same palette as the find bar.
+    let (fill, hover, foreground, muted) = match theme {
+        servo::Theme::Dark => (
+            Color32::from_rgb(43, 42, 51),
+            Color32::from_rgb(62, 61, 72),
+            Color32::from_rgb(235, 235, 240),
+            Color32::from_rgb(160, 160, 170),
+        ),
+        servo::Theme::Light => (
+            Color32::from_rgb(250, 250, 252),
+            Color32::from_rgb(232, 232, 238),
+            Color32::from_rgb(30, 30, 36),
+            Color32::from_rgb(105, 105, 115),
+        ),
+    };
+    let accent = Color32::from_rgb(255, 150, 50);
+    const HEADER: f32 = 26.0;
+    const ROW: f32 = 40.0;
+    const PADDING: f32 = 4.0;
+    const MAX_ROWS: usize = 6;
+
+    let [x, y, width, height] = chooser.field.map(|value| value * zoom);
+    let rows = chooser.entries.len().min(MAX_ROWS) as f32;
+    let size = vec2(
+        width.max(260.0).min(content_rect.width()),
+        HEADER + rows * ROW + PADDING * 2.0,
+    );
+    // Under the field, or above it when there's no room below; always inside the page.
+    let below = content_rect.min.y + y + height + 2.0;
+    let top = if below + size.y > content_rect.max.y {
+        content_rect.min.y + y - size.y - 2.0
+    } else {
+        below
+    };
+    let min = pos2(
+        (content_rect.min.x + x).clamp(content_rect.min.x, (content_rect.max.x - size.x).max(content_rect.min.x)),
+        top.clamp(content_rect.min.y, (content_rect.max.y - size.y).max(content_rect.min.y)),
+    );
+    let rect = egui::Rect::from_min_size(min, size);
+    let host = host_of(&chooser.origin);
+
+    let mut picked = None;
+    egui::Area::new(Id::new("password-chooser"))
+        .order(Order::Foreground)
+        .fixed_pos(rect.min)
+        .show(ctx, |ui| {
+            let painter = ui.painter().clone();
+            painter.rect_filled(
+                rect.translate(vec2(0.0, 2.0)).expand(1.0),
+                CornerRadius::same(12),
+                Color32::from_black_alpha(40),
+            );
+            painter.rect_filled(rect, CornerRadius::same(10), fill);
+            painter.rect_stroke(
+                rect,
+                CornerRadius::same(10),
+                Stroke::new(1.0_f32, Color32::from_black_alpha(40)),
+                StrokeKind::Inside,
+            );
+            ui.interact(rect, Id::new("password-chooser-background"), Sense::click());
+            painter.text(
+                pos2(rect.min.x + 12.0, rect.min.y + PADDING + HEADER / 2.0),
+                egui::Align2::LEFT_CENTER,
+                format!("Saved passwords for {host}"),
+                egui::FontId::proportional(11.5),
+                muted,
+            );
+            let list = egui::Rect::from_min_max(
+                pos2(rect.min.x + PADDING, rect.min.y + PADDING + HEADER),
+                pos2(rect.max.x - PADDING, rect.max.y - PADDING),
+            );
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(list));
+            egui::ScrollArea::vertical()
+                .max_height(list.height())
+                .show(&mut child, |ui| {
+                    for (index, (_, username)) in chooser.entries.iter().enumerate() {
+                        let (row, response) =
+                            ui.allocate_exact_size(vec2(list.width(), ROW), Sense::click());
+                        let selected = chooser.selected == Some(index);
+                        if selected || response.hovered() {
+                            ui.painter().rect_filled(row, CornerRadius::same(7), hover);
+                        }
+                        if selected {
+                            ui.scroll_to_rect(row, None);
+                        }
+                        let painter = ui.painter().with_clip_rect(row.intersect(list));
+                        // A key-coloured dot, then the username and a masked password.
+                        let dot = pos2(row.min.x + 18.0, row.center().y);
+                        painter.circle_filled(dot, 11.0, accent.gamma_multiply(0.18));
+                        painter.text(
+                            dot,
+                            egui::Align2::CENTER_CENTER,
+                            username.chars().next().map_or("•".to_owned(), |c| c.to_uppercase().to_string()),
+                            egui::FontId::proportional(12.0),
+                            accent,
+                        );
+                        let name = if username.is_empty() {
+                            "(no username)"
+                        } else {
+                            username
+                        };
+                        painter.text(
+                            pos2(row.min.x + 38.0, row.min.y + 13.0),
+                            egui::Align2::LEFT_CENTER,
+                            name,
+                            egui::FontId::proportional(13.5),
+                            foreground,
+                        );
+                        painter.text(
+                            pos2(row.min.x + 38.0, row.min.y + 29.0),
+                            egui::Align2::LEFT_CENTER,
+                            "••••••••",
+                            egui::FontId::proportional(11.0),
+                            muted,
+                        );
+                        if response.clicked() {
+                            picked = Some(index);
+                        }
+                    }
+                });
+        });
+    (rect, picked)
+}
+
+/// The sign-in field finder shared by `passwords.js` and `passwords-fill.js`.
+const DETECT: &str = include_str!("passwords-detect.js");
+
+/// `{"x":…,"y":…,"w":…,"h":…}` from the page: a field's rectangle in CSS pixels.
+fn parse_rect(data: &str) -> Option<[f32; 4]> {
+    let value: Value = serde_json::from_str(data).ok()?;
+    let number = |key: &str| {
+        value[key]
+            .as_f64()
+            .filter(|number| number.is_finite())
+            .map(|number| number.clamp(-100_000.0, 100_000.0) as f32)
+    };
+    Some([number("x")?, number("y")?, number("w")?, number("h")?])
+}
+
+/// Fill a login into `webview`'s top-level page (the script checks the page is still on the
+/// login's origin). `mode` is "load", "focused" or "page" (see passwords-fill.js). The password
+/// goes straight into the script's arguments: it isn't put anywhere the page could read before
+/// the script runs, and the script only puts it in the sign-in form's password field.
+fn fill(webview: &WebView, login: &Login, mode: &str) {
+    // The page's data goes in last and in one piece, so nothing in it is taken for a
+    // placeholder.
+    let arguments = json!([login.origin, login.username, login.password, mode]).to_string();
     let script = include_str!("passwords-fill.js")
-        .replace("__ORIGIN__", &json(&login.origin))
-        .replace("__USERNAME__", &json(&login.username))
-        .replace("__PASSWORD__", &json(&login.password))
-        .replace("__FORCE__", if force { "true" } else { "false" });
+        .replace("__DETECT__", DETECT)
+        .replace("__ARGUMENTS__", &arguments);
     webview.evaluate_javascript(script, |_: Result<JSValue, _>| {});
 }
 

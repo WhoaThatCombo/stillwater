@@ -119,6 +119,8 @@ pub struct Gui {
     painted_webviews: HashSet<WebViewId>,
     /// The find bar (Ctrl+F).
     pub(crate) find_bar: FindBar,
+    /// Where the saved-login list under a focused sign-in field is drawn, if it shows.
+    password_chooser_rect: Option<egui::Rect>,
 }
 
 #[cfg(any(
@@ -309,6 +311,7 @@ impl Gui {
             pane_control_rects: Default::default(),
             painted_webviews: HashSet::new(),
             find_bar: FindBar::default(),
+            password_chooser_rect: None,
         }
     }
 
@@ -416,8 +419,19 @@ impl Gui {
     }
 
     /// Whether `point` is on the find bar (handled by egui, not the page).
+    /// Whether `point` is on the find bar or another egui overlay drawn over the page (the
+    /// saved-login list), whose clicks are egui's and not the page's.
     pub(crate) fn find_bar_contains(&self, point: Point2D<f32, DeviceIndependentPixel>) -> bool {
-        self.find_bar.contains(pos2(point.x, point.y))
+        self.find_bar.contains(pos2(point.x, point.y)) || self.password_chooser_contains(point)
+    }
+
+    /// Whether `point` is on the saved-login list under a focused sign-in field.
+    pub(crate) fn password_chooser_contains(
+        &self,
+        point: Point2D<f32, DeviceIndependentPixel>,
+    ) -> bool {
+        self.password_chooser_rect
+            .is_some_and(|rect| rect.contains(pos2(point.x, point.y)))
     }
 
     /// Whether `point` is on a pane's buttons (handled by egui, not the page).
@@ -843,9 +857,11 @@ impl Gui {
             command_bar,
             pane_focus,
             find_bar,
+            password_chooser_rect,
             ..
         } = self;
         pane_control_rects.borrow_mut().clear();
+        let mut picked_login = None;
 
         let winit_window = headed_window.winit_window();
         context.run(winit_window, |ctx| {
@@ -1065,6 +1081,26 @@ impl Gui {
                 );
             }
 
+            // The saved logins under a focused sign-in field in the active tab.
+            *password_chooser_rect = None;
+            if let Some(webview) = window.active_webview() &&
+                glance.is_none()
+            {
+                let passwords = state.passwords.borrow();
+                if let Some(chooser) = passwords.chooser_for(&webview) {
+                    let zoom = webview.page_zoom();
+                    let (rect, picked) = crate::desktop::passwords::draw_chooser(
+                        ctx,
+                        chooser,
+                        new_content_rect,
+                        zoom,
+                        theme,
+                    );
+                    *password_chooser_rect = Some(rect);
+                    picked_login = picked.map(|index| (webview.clone(), index));
+                }
+            }
+
             // Zen's top bar: the window buttons slide in when the mouse touches the top edge
             // and hide again when it leaves. Its empty part drags the window.
             {
@@ -1114,6 +1150,11 @@ impl Gui {
                 }
             }
         });
+
+        if let Some((webview, index)) = picked_login {
+            state.passwords.borrow_mut().pick(&webview, index);
+            window.set_needs_update();
+        }
 
         // If any egui widget requested a repaint, also request a repaint for our
         // containing window. This allows egui widget to animate on their own.

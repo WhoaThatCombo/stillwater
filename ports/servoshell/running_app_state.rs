@@ -1148,6 +1148,9 @@ impl WebViewDelegate for RunningAppState {
         // A new page has no media playing yet.
         if status == LoadStatus::Started {
             self.playing_media.borrow_mut().remove(&webview.id());
+            // The saved-login list belongs to the page that's going away.
+            #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+            self.passwords.borrow_mut().close_chooser(webview.id());
             self.render_caches_stale.set(true);
             self.loads_in_progress
                 .borrow_mut()
@@ -1283,7 +1286,9 @@ impl WebViewDelegate for RunningAppState {
         // or logged.
         #[cfg(not(any(target_os = "android", target_env = "ohos")))]
         if let Some(payload) = message.strip_prefix(crate::desktop::passwords::MESSAGE_PREFIX) {
-            self.passwords.borrow_mut().on_page_message(&webview, payload);
+            if self.passwords.borrow_mut().on_page_message(&webview, payload) {
+                self.window_for_webview(&webview).set_needs_update();
+            }
             return;
         }
         if matches!(level, ConsoleLogLevel::Error | ConsoleLogLevel::Warn) {

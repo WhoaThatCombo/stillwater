@@ -3,9 +3,12 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 //
 // Stillwater passwords: tell Stillwater when the page shows a sign-in form (so it can fill a
-// saved password) and which username and password were signed in with (so it can offer to save
-// them). Stillwater fills forms itself (passwords-fill.js). Messages go through a tagged console message that Stillwater keeps out of its logs.
-// Runs in top-level pages only.
+// saved password), when a sign-in field is focused (so it can show the saved logins under it)
+// and which username and password were signed in with (so it can offer to save them).
+// Stillwater fills forms itself (passwords-fill.js). Messages go through a tagged console
+// message that Stillwater keeps out of its logs. They never carry saved logins: the list of
+// saved logins is shown by Stillwater, outside the page, and only the one picked is filled in.
+// Runs in top-level pages only: logins are never filled into frames.
 
 (function () {
   "use strict";
@@ -15,40 +18,21 @@
   const stringify = JSON.stringify;
   const PREFIX = "__PREFIX__";
 
-  const USERNAME_TYPES = new Set(["text", "email", "tel", ""]);
+__DETECT__
 
-  function isPassword(input) {
-    return input instanceof HTMLInputElement && input.type === "password";
-  }
+  // ---- Offering to save what was signed in with ----
 
-  function visible(element) {
-    return element.offsetWidth > 0 || element.offsetHeight > 0 || element.getClientRects().length > 0;
-  }
-
-  // The username field for a password field: one marked as a username, otherwise the closest
-  // text-like field before it (in its form, or anywhere on the page when there's no form).
-  function usernameFor(password, onlyFilled) {
+  // The username that goes with a submitted password: the marked or closest filled-in
+  // text-like field before it.
+  function submittedUsername(password) {
     const scope = password.form || document;
     const inputs = Array.from(scope.querySelectorAll("input"));
     const before = inputs.slice(0, inputs.indexOf(password)).reverse();
     const candidates = before.filter((input) =>
-      USERNAME_TYPES.has(input.type) && !input.disabled && (!onlyFilled || input.value.trim()));
-    const marked = candidates.find((input) => /username|email/.test(input.autocomplete || ""));
+      USERNAME_TYPES.includes(input.type) && !input.disabled && input.value.trim());
+    const marked = candidates.find((input) => /username|email/.test(attribute(input, "autocomplete")));
     return marked || candidates[0] || null;
   }
-
-  // ---- Telling Stillwater about sign-in forms ----
-
-  let formReported = false;
-  function reportForm() {
-    if (formReported) return;
-    const password = Array.from(document.querySelectorAll("input[type=password]")).find(visible);
-    if (!password) return;
-    formReported = true;
-    log(PREFIX + "form");
-  }
-
-  // ---- Offering to save what was signed in with ----
 
   let lastSent = "";
   function capture(scope) {
@@ -63,7 +47,7 @@
       password = fields.length === 3 || values[0] !== values[values.length - 1]
         ? fields[fields.length - 1] : fields[0];
     }
-    const user = usernameFor(password, true);
+    const user = submittedUsername(password);
     const username = user ? user.value.trim() : "";
     const payload = stringify({ u: username, p: password.value });
     if (payload === lastSent) return;
@@ -81,24 +65,95 @@
     capture(form || document);
   }, true);
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && isPassword(event.target)) capture(event.target.form || document);
+    if (event.key === "Enter" && isPasswordField(event.target)) capture(event.target.form || document);
   }, true);
+
+  // ---- Telling Stillwater about sign-in forms ----
+
+  // Each sign-in field is reported once, so a username-first page is reported again when its
+  // password field appears.
+  const reported = new WeakSet();
+  function reportForms() {
+    let fresh = false;
+    for (const group of loginGroups()) {
+      for (const field of [group.user, group.password]) {
+        if (field && !reported.has(field)) {
+          reported.add(field);
+          fresh = true;
+        }
+      }
+    }
+    if (fresh) log(PREFIX + "form");
+  }
+
+  // ---- The saved-login list under a focused sign-in field ----
+
+  let shownFor = null;
+  function rectOf(field) {
+    const rect = field.getBoundingClientRect();
+    return stringify({ x: Math.round(rect.left), y: Math.round(rect.top),
+      w: Math.round(rect.width), h: Math.round(rect.height) });
+  }
+  function offerList(field) {
+    if (!(field instanceof HTMLInputElement) || !groupOf(field)) return;
+    shownFor = field;
+    log(PREFIX + "focus\t" + rectOf(field));
+  }
+  function hideList() {
+    if (!shownFor) return;
+    shownFor = null;
+    log(PREFIX + "blur");
+  }
+
+  document.addEventListener("focusin", (event) => {
+    reportForms();
+    const field = focusedElement();
+    if (field instanceof HTMLInputElement && groupOf(field)) offerList(field);
+    else hideList();
+  }, true);
+  document.addEventListener("focusout", () => {
+    // Focus moving between fields sends focusout then focusin; wait for the new field.
+    setTimeout(() => { if (focusedElement() !== shownFor) hideList(); }, 0);
+  }, true);
+  // A click into the field that already has focus shows the list again.
+  document.addEventListener("mousedown", (event) => {
+    const field = event.composedPath ? event.composedPath()[0] : event.target;
+    if (field === focusedElement()) offerList(field);
+  }, true);
+  // Clearing the field shows the list again.
+  document.addEventListener("input", (event) => {
+    const field = event.composedPath ? event.composedPath()[0] : event.target;
+    if (field instanceof HTMLInputElement && field === focusedElement() && field.value === "") offerList(field);
+  }, true);
+  // Keep the list under its field while the page scrolls or resizes.
+  let moving = false;
+  function follow() {
+    if (!shownFor || moving) return;
+    moving = true;
+    requestAnimationFrame(() => {
+      moving = false;
+      if (shownFor) log(PREFIX + "move\t" + rectOf(shownFor));
+    });
+  }
+  window.addEventListener("scroll", follow, { capture: true, passive: true });
+  window.addEventListener("resize", follow, { passive: true });
 
   // ---- Watching for sign-in forms that appear later ----
 
   function start() {
-    reportForm();
-    if (formReported) return;
+    reportForms();
+    // Single-page sites add and swap sign-in forms long after loading: keep watching, at most
+    // a few times a second.
     let pending = false;
     const observer = new MutationObserver(() => {
       if (pending) return;
       pending = true;
-      setTimeout(() => { pending = false; reportForm(); if (formReported) observer.disconnect(); }, 300);
+      setTimeout(() => { pending = false; reportForms(); }, 250);
     });
-    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["type", "style", "class", "hidden"] });
-    // Stop watching after a while to save CPU; a click on the page checks again.
-    setTimeout(() => observer.disconnect(), 60000);
-    document.addEventListener("focusin", (event) => { if (isPassword(event.target)) reportForm(); }, true);
+    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["type", "style", "class", "hidden", "disabled", "autocomplete"] });
+    // The field may have been focused (autofocus) before this ran.
+    const field = focusedElement();
+    if (field instanceof HTMLInputElement && groupOf(field)) offerList(field);
   }
 
   if (document.readyState === "loading") {

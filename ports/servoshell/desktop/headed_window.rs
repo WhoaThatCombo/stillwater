@@ -364,7 +364,7 @@ impl HeadedWindow {
     ) {
         // First, handle servoshell key bindings that are not overridable by, or visible to, the page.
         let keyboard_event = keyboard_event_from_winit(&winit_event, self.modifiers_state.get());
-        if self.handle_intercepted_key_bindings(state, window, &keyboard_event) {
+        if self.handle_intercepted_key_bindings(state.clone(), window, &keyboard_event) {
             return;
         }
 
@@ -372,6 +372,31 @@ impl HeadedWindow {
         let Some(webview) = window.active_webview() else {
             return;
         };
+
+        // While the saved-login list shows under a sign-in field, the arrow keys, Enter and
+        // Escape are the list's and never reach the page. Other keys close it.
+        if keyboard_event.event.state == KeyState::Down &&
+            state.passwords.borrow().chooser_for(&webview).is_some()
+        {
+            let plain = keyboard_event.event.modifiers.is_empty();
+            let key = match &keyboard_event.event.key {
+                Key::Named(NamedKey::ArrowDown) if plain => Some("down"),
+                Key::Named(NamedKey::ArrowUp) if plain => Some("up"),
+                Key::Named(NamedKey::Enter) if plain => Some("enter"),
+                Key::Named(NamedKey::Escape) => Some("escape"),
+                Key::Named(
+                    NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Meta,
+                ) => None,
+                _ => Some("other"),
+            };
+            if let Some(key) = key {
+                let used = state.passwords.borrow_mut().chooser_key(&webview, key);
+                window.set_needs_update();
+                if used {
+                    return;
+                }
+            }
+        }
 
         for xr_window_pose in self.xr_window_poses.borrow().iter() {
             xr_window_pose.handle_xr_rotation(&winit_event, self.modifiers_state.get());
@@ -1090,6 +1115,26 @@ impl HeadedWindow {
                         gui.find_bar_contains(point)
                 })
         };
+
+        // The saved-login list under a sign-in field closes on a click anywhere but on it (a
+        // click back into its field opens it again), and when the window loses focus.
+        let closes_chooser = match &event {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                ..
+            } => !self
+                .last_mouse_position
+                .get()
+                .is_some_and(|point| self.gui.borrow().password_chooser_contains(point)),
+            WindowEvent::Focused(false) => true,
+            _ => false,
+        };
+        if closes_chooser &&
+            let Some(webview) = window.active_webview() &&
+            state.passwords.borrow_mut().close_chooser(webview.id())
+        {
+            window.set_needs_update();
+        }
 
         // Compact mode: the hidden sidebar slides out when the mouse touches the left edge.
         // Check this before the resize edges, which also cover the left few pixels.
