@@ -8,7 +8,17 @@
   </head>
   <body>
     <main>
-      <img src="resource:///stillwater-icon.png" alt="" draggable="false" />
+      <!-- The mark, drawn here rather than as the icon image so its disc follows the theme. -->
+      <div class="logo">
+        <svg class="on-light" viewBox="0 0 88 88" width="88" height="88" fill="none" stroke-linecap="round" aria-hidden="true">
+          <path d="M22 38 C29 26 37 26 44 38 S59 50 66 38" stroke="#6473ff" stroke-width="7" />
+          <path d="M32 54 C36.5 49 40.5 49 45 54 S53.5 59 58 54" stroke="#a3b1ba" stroke-width="3" />
+        </svg>
+        <svg class="on-dark" viewBox="0 0 88 88" width="88" height="88" fill="none" stroke-linecap="round" aria-hidden="true">
+          <path d="M22 38 C29 26 37 26 44 38 S59 50 66 38" stroke="#6473ff" stroke-width="7" />
+          <path d="M32 54 C36.5 49 40.5 49 45 54 S53.5 59 58 54" stroke="#6f8591" stroke-width="3" />
+        </svg>
+      </div>
       <form action="https://duckduckgo.com/">
         <input name="q" aria-label="Search the web" autocomplete="off" />
         <span class="placeholder" aria-hidden="true">Search the web</span>

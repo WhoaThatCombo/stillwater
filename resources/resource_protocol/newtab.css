@@ -13,6 +13,8 @@
   --field-shadow: 0 1px 2px rgba(19, 32, 42, 0.08), 0 6px 24px -10px rgba(19, 32, 42, 0.25);
   --accent: #6473ff;
   --accent-text: #ffffff;
+  --logo-disc: #ffffff;
+  --logo-shadow: 0 1px 2px rgba(19, 32, 42, 0.08), 0 8px 26px -10px rgba(19, 32, 42, 0.28);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -22,6 +24,8 @@
     --muted: #8ea5a7;
     --field: #1c2f3b;
     --field-shadow: 0 0 0 1px rgba(220, 230, 228, 0.1), 0 10px 30px -12px rgba(0, 0, 0, 0.6);
+    --logo-disc: #1b2d3a;
+    --logo-shadow: 0 0 0 1px rgba(220, 230, 228, 0.06);
   }
 }
 
@@ -60,9 +64,30 @@ main {
   padding: 24px;
 }
 
-img {
+.logo {
   width: 88px;
   height: 88px;
+  border-radius: 50%;
+  background: var(--logo-disc);
+  box-shadow: var(--logo-shadow);
+}
+
+.logo svg {
+  display: block;
+}
+
+.logo .on-dark {
+  display: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  .logo .on-light {
+    display: none;
+  }
+
+  .logo .on-dark {
+    display: block;
+  }
 }
 
 form {
