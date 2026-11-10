@@ -17,6 +17,8 @@ use keyboard_types::{
 use layout_api::{QueryMsg, SegmentGranularity};
 use script_bindings::codegen::GenericBindings::DocumentBinding::DocumentMethods;
 use script_bindings::codegen::GenericBindings::EventBinding::EventMethods;
+use script_bindings::codegen::GenericBindings::MouseEventBinding::MouseEventMethods;
+use script_bindings::codegen::GenericBindings::NodeBinding::NodeMethods;
 use script_bindings::codegen::GenericBindings::SelectionBinding::SelectionMethods;
 use script_bindings::codegen::GenericBindings::UIEventBinding::UIEventMethods as _;
 use script_bindings::dom::UnrootedDom;
@@ -508,6 +510,44 @@ impl Document {
         else {
             return;
         };
+
+        // Stillwater: Shift+click extends the selection from its anchor to the click
+        // (Shift+double-click to the edge of the clicked word), as in Chrome and Firefox;
+        // a Shift+drag keeps extending it.
+        if mouse_event.ShiftKey() &&
+            let Some(anchor) = selection.composed_anchor_position()
+        {
+            let focus = match action {
+                MouseButtonSelectionAction::MoveCursor => Some(boundary.clone()),
+                MouseButtonSelectionAction::SelectRange(granularity) => self
+                    .window()
+                    .query_text_segment(
+                        cx,
+                        &boundary.container,
+                        boundary.utf32_offset(),
+                        granularity,
+                    )
+                    .map(|(start, end)| {
+                        if boundary.cmp(cx.no_gc(), &anchor) == std::cmp::Ordering::Less {
+                            start
+                        } else {
+                            end
+                        }
+                    }),
+            };
+            if let Some(focus) = focus {
+                selection.set_anchor_and_focus(cx, &anchor, &focus);
+                self.event_handler().install_drag_gesture(DragGesture::new(
+                    DragHandler::DocumentSelection(DocumentSelectionDragHandler::new(
+                        self,
+                        user_select_contain_node.as_deref(),
+                        None,
+                    )),
+                ));
+                mouse_event.upcast::<Event>().mark_as_handled();
+                return;
+            }
+        }
 
         let segment_data = match action {
             MouseButtonSelectionAction::MoveCursor => {
