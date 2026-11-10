@@ -52,6 +52,22 @@ pub(crate) trait TextControlElement {
     fn handle_text_content_changed(&self, cx: &mut JSContext);
     fn handle_key_reaction(&self, cx: &mut JSContext, action: KeyReaction);
 
+    /// Stillwater: queue a `select` event at this element, as when its selection changes
+    /// by user interaction (a drag or a double click) and not only through the API.
+    fn queue_select_event(&self) {
+        let element = self.as_element();
+        element
+            .owner_global()
+            .task_manager()
+            .user_interaction_task_source()
+            .queue_event(
+                element.upcast::<EventTarget>(),
+                atom!("select"),
+                EventBubbles::Bubbles,
+                EventCancelable::NotCancelable,
+            );
+    }
+
     fn insert_content(&self, cx: &mut JSContext, text_content: &str) {
         self.text_input_mut().insert(text_content);
         self.handle_text_content_changed(cx);

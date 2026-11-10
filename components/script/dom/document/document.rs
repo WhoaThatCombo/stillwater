@@ -4212,6 +4212,12 @@ impl Document {
     }
 
     pub(crate) fn gained_or_lost_system_focus(&self, cx: &mut JSContext, gained_focus: bool) {
+        // Stillwater: a mouse release that happens while another window has focus never
+        // reaches the page, so a drag selection must not outlive the focus: otherwise the
+        // next mouse move would keep extending it (the "select everything" after Alt+Tab).
+        if !gained_focus {
+            self.event_handler().end_drag_gesture();
+        }
         let focus_handler = self.focus_handler();
         if !self.is_fully_active() || !focus_handler.has_focus() {
             return;

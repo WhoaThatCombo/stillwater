@@ -158,8 +158,16 @@ pub struct Preferences {
     pub dom_credential_management_enabled: bool,
     // feature: WebCrypto API | #40687 | Web/API/Web_Crypto_API
     pub dom_crypto_subtle_enabled: bool,
+    /// Longest time between two clicks of a double (or triple) click, in milliseconds.
+    /// Stillwater: the Windows default; an embedder can pass the user's `GetDoubleClickTime`.
     pub dom_document_dblclick_timeout: i64,
+    /// Farthest two clicks of a double click may be apart on either axis, in CSS pixels.
+    /// Stillwater: the Windows default box (`SM_CXDOUBLECLK` = 4); an embedder can pass the
+    /// user's metric.
     pub dom_document_dblclick_dist: i64,
+    /// Stillwater, for tests: the default clipboard delegate keeps copied data in memory and
+    /// logs it instead of using the system clipboard.
+    pub dom_clipboard_test_mode: bool,
     // feature: File and Directory Entries API | #45653 | Web/API/File_and_Directory_Entries_API
     pub dom_entries_api_enabled: bool,
     // feature: Document.execCommand | #25005 | Web/API/Document/execCommand
@@ -321,6 +329,13 @@ pub struct Preferences {
     // feature: Largest Contentful Paint | #42000 | Web/API/LargestContentfulPaint
     pub largest_contentful_paint_enabled: bool,
     pub layout_animations_test_enabled: bool,
+    /// Stillwater: the default selection highlight (the system Highlight colour) when a page
+    /// doesn't style `::selection`. The default is Windows' `COLOR_HIGHLIGHT`; an embedder
+    /// can pass the user's `GetSysColor(COLOR_HIGHLIGHT)`.
+    pub layout_selection_background_rgba: [f64; 4],
+    /// Stillwater: the text colour on the default selection highlight (HighlightText,
+    /// `GetSysColor(COLOR_HIGHLIGHTTEXT)`).
+    pub layout_selection_text_rgba: [f64; 4],
     pub layout_css_backdrop_filter_enabled: bool,
     // feature: CSS Multicol | #22397 | Web/CSS/Guides/Multicol_layout
     pub layout_css_columns_enabled: bool,
@@ -465,8 +480,9 @@ impl Preferences {
             dom_cookiestore_enabled: false,
             dom_credential_management_enabled: false,
             dom_crypto_subtle_enabled: true,
-            dom_document_dblclick_dist: 1,
-            dom_document_dblclick_timeout: 300,
+            dom_clipboard_test_mode: false,
+            dom_document_dblclick_dist: 4,
+            dom_document_dblclick_timeout: 500,
             dom_entries_api_enabled: false,
             dom_exec_command_enabled: false,
             dom_fontface_enabled: false,
@@ -591,6 +607,8 @@ impl Preferences {
             container_timing_enabled: false,
             largest_contentful_paint_enabled: false,
             layout_animations_test_enabled: false,
+            layout_selection_background_rgba: [0.0, 120.0 / 255.0, 215.0 / 255.0, 1.0],
+            layout_selection_text_rgba: [1.0, 1.0, 1.0, 1.0],
             layout_css_backdrop_filter_enabled: false,
             layout_css_columns_enabled: false,
             layout_css_masking_enabled: true,

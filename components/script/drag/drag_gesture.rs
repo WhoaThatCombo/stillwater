@@ -47,6 +47,24 @@ impl DragGesture {
         }
     }
 
+    /// Stillwater: whether this is a drag selecting text in the document (not in a text field).
+    pub(crate) fn is_document_selection(&self) -> bool {
+        matches!(self.handler, DragHandler::DocumentSelection(..))
+    }
+
+    /// Stillwater: the page auto-scrolled under a held selection drag; extend the selection
+    /// to the content now under the pointer. Returns `true` if the gesture should continue.
+    pub(crate) fn handle_autoscroll(
+        &self,
+        cx: &mut JSContext,
+        hit_test_result: &HitTestResult,
+    ) -> bool {
+        match &self.handler {
+            DragHandler::DocumentSelection(handler) => handler.moved(cx, hit_test_result),
+            DragHandler::TextInputSelection(..) => true,
+        }
+    }
+
     pub(crate) fn need_dom_position_from_hit_test(&self) -> bool {
         matches!(self.handler, DragHandler::DocumentSelection(..))
     }

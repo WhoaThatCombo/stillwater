@@ -658,6 +658,11 @@ impl ServoInner {
                     webview.clipboard_delegate().set_text(webview, string);
                 }
             },
+            EmbedderMsg::SetClipboardHtml(webview_id, text, html) => {
+                if let Some(webview) = self.get_webview_handle(webview_id) {
+                    webview.clipboard_delegate().set_html(webview, text, html);
+                }
+            },
             EmbedderMsg::SetCursor(webview_id, cursor) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
                     webview.set_cursor(cursor);

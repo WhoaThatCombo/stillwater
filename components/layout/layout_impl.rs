@@ -97,6 +97,7 @@ use crate::query::{
     process_node_scroll_area_request, process_offset_parent_query, process_padding_request,
     process_resolved_font_style_query, process_resolved_style_request,
     process_scroll_container_query, process_text_range_rect_request,
+    process_text_range_rects_request,
 };
 use crate::selection::PositionInInlineFormattingContext;
 use crate::traversal::{RecalcStyle, compute_damage_and_rebuild_box_tree};
@@ -480,6 +481,25 @@ impl Layout for LayoutThread {
             let stacking_context_tree = self.stacking_context_tree.borrow();
             let stacking_context_tree = stacking_context_tree.as_ref()?;
             process_text_range_rect_request(self, stacking_context_tree, node, range)
+        })
+    }
+
+    #[servo_tracing::instrument(skip_all)]
+    fn query_text_range_rects(
+        &self,
+        node: TrustedNodeAddress,
+        range: std::ops::Range<Utf32CodeUnits>,
+    ) -> Vec<Rect<Au, CSSPixel>> {
+        with_layout_state(|| {
+            if self.fragment_tree.borrow().is_none() {
+                return Vec::new();
+            }
+            let node = unsafe { ServoLayoutNode::new(&node) };
+            let stacking_context_tree = self.stacking_context_tree.borrow();
+            let Some(stacking_context_tree) = stacking_context_tree.as_ref() else {
+                return Vec::new();
+            };
+            process_text_range_rects_request(self, stacking_context_tree, node, range)
         })
     }
 

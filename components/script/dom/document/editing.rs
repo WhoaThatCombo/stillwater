@@ -14,16 +14,20 @@ use keyboard_types::{
     CompositionEvent, CompositionState, Key, KeyState, KeyboardEvent as KeyboardTypesEvent,
     Modifiers, NamedKey, ShortcutMatcher,
 };
-use layout_api::{QueryMsg, SegmentGranularity};
+use layout_api::{HitTestFlags, QueryMsg, SegmentGranularity};
 use script_bindings::codegen::GenericBindings::DocumentBinding::DocumentMethods;
 use script_bindings::codegen::GenericBindings::EventBinding::EventMethods;
+use script_bindings::codegen::GenericBindings::MouseEventBinding::MouseEventMethods;
+use script_bindings::codegen::GenericBindings::NodeBinding::NodeMethods;
 use script_bindings::codegen::GenericBindings::SelectionBinding::SelectionMethods;
 use script_bindings::codegen::GenericBindings::UIEventBinding::UIEventMethods as _;
+use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
 use script_bindings::dom::UnrootedDom;
 use script_bindings::inheritance::Castable;
 use script_bindings::root::DomRoot;
 use script_bindings::str::DOMString;
 use servo_base::generic_channel::GenericCallback;
+use servo_base::text::RangeAny;
 
 use crate::dom::clipboardevent::ClipboardEventType;
 use crate::dom::event::{EventBubbles, EventCancelable};
@@ -34,9 +38,10 @@ use crate::dom::text_control::TextControlElement;
 use crate::dom::text_input::InputEventType;
 use crate::dom::types::{
     ClipboardEvent, DataTransfer, Event, EventTarget, HTMLInputElement, HTMLTextAreaElement,
-    MouseEvent, UIEvent,
+    MouseEvent, Text, UIEvent,
 };
-use crate::dom::{Document, Node, NodeTraits};
+use crate::dom::iterators::ShadowIncluding;
+use crate::dom::{CharacterData, Document, Node, NodeTraits};
 use crate::drag::document_selection_drag::{
     DocumentDragSegment, DocumentSelectionDragHandler, adjust_anchor_for_user_select,
 };
@@ -145,10 +150,17 @@ impl Document {
                     // Implementations should create alternate text/html and text/plain
                     // clipboard formats when content in a web page is selected.
                     if let Some(selection) = editing_context.selection_content(cx) {
-                        self.send_to_embedder(EmbedderMsg::SetClipboardText(
-                            self.webview_id(),
-                            selection,
-                        ));
+                        match editing_context.selection_html(cx) {
+                            Some(html) => self.send_to_embedder(EmbedderMsg::SetClipboardHtml(
+                                self.webview_id(),
+                                selection,
+                                html,
+                            )),
+                            None => self.send_to_embedder(EmbedderMsg::SetClipboardText(
+                                self.webview_id(),
+                                selection,
+                            )),
+                        }
                     }
                     // Step 3.2. Fire a clipboard event named clipboardchange
                     self.fire_clipboard_event(cx, &event_target, ClipboardEventType::Change);
@@ -348,16 +360,24 @@ impl Document {
             // Step 1.1 Clear the clipboard.
             self.send_to_embedder(EmbedderMsg::ClearClipboard(self.webview_id()));
             // Step 1.2
+            // Stillwater: a page that sets both `text/plain` and `text/html` gets both on
+            // the clipboard (before, each part replaced the previous one as plain text, so
+            // the HTML source could end up as the pasted text).
+            let mut plain_text = None;
+            let mut html = None;
             for item in drag_data_store.iter_item_list() {
                 match item {
-                    Kind::Text { data, .. } => {
+                    Kind::Text { data, type_ } => {
                         // Step 1.2.1.1 Ensure encoding is correct per OS and locale conventions
                         // Step 1.2.1.2 Normalize line endings according to platform conventions
                         // Step 1.2.1.3
-                        self.send_to_embedder(EmbedderMsg::SetClipboardText(
-                            self.webview_id(),
-                            data.to_string(),
-                        ));
+                        if type_.to_string().eq_ignore_ascii_case("text/html") {
+                            html = Some(data.to_string());
+                        } else if plain_text.is_none() ||
+                            type_.to_string().eq_ignore_ascii_case("text/plain")
+                        {
+                            plain_text = Some(data.to_string());
+                        }
                     },
                     Kind::File { .. } => {
                         // Step 1.2.2 If data is of a type listed in the mandatory data types list, then
@@ -365,6 +385,17 @@ impl Document {
                         // Step 1.2.3 Else this is left to the implementation
                     },
                 }
+            }
+            match (plain_text, html) {
+                (plain_text, Some(html)) => self.send_to_embedder(EmbedderMsg::SetClipboardHtml(
+                    self.webview_id(),
+                    plain_text.unwrap_or_default(),
+                    html,
+                )),
+                (Some(plain_text), None) => self.send_to_embedder(
+                    EmbedderMsg::SetClipboardText(self.webview_id(), plain_text),
+                ),
+                (None, None) => {},
             }
         } else {
             // Step 2.1
@@ -483,6 +514,55 @@ impl Document {
             return;
         };
 
+        // Stillwater: Shift+click extends the selection from its anchor to the click
+        // (Shift+double-click to the edge of the clicked word), as in Chrome and Firefox;
+        // a Shift+drag keeps extending it.
+        if mouse_event.ShiftKey() &&
+            let Some(anchor) = selection.composed_anchor_position()
+        {
+            let focus = match action {
+                MouseButtonSelectionAction::MoveCursor => Some(boundary.clone()),
+                MouseButtonSelectionAction::SelectRange(granularity) => self
+                    .window()
+                    .query_text_segment(
+                        cx,
+                        &boundary.container,
+                        boundary.utf32_offset(),
+                        granularity,
+                    )
+                    .map(|(start, end)| {
+                        if boundary.cmp(cx.no_gc(), &anchor) == std::cmp::Ordering::Less {
+                            start
+                        } else {
+                            end
+                        }
+                    }),
+            };
+            if let Some(focus) = focus {
+                selection.set_anchor_and_focus(cx, &anchor, &focus);
+                self.event_handler().install_drag_gesture(DragGesture::new(
+                    DragHandler::DocumentSelection(DocumentSelectionDragHandler::new(
+                        self,
+                        user_select_contain_node.as_deref(),
+                        None,
+                    )),
+                ));
+                mouse_event.upcast::<Event>().mark_as_handled();
+                return;
+            }
+        }
+
+        // Stillwater: <https://w3c.github.io/selection-api/#selectstart-event>: a cancelable
+        // `selectstart` fires where the selection starts; cancelling it leaves the
+        // selection alone (sites use this to make content unselectable).
+        if !boundary
+            .container
+            .upcast::<EventTarget>()
+            .fire_bubbling_cancelable_event(cx, atom!("selectstart"))
+        {
+            return;
+        }
+
         let segment_data = match action {
             MouseButtonSelectionAction::MoveCursor => {
                 selection.collapse_to_dom_position(cx, &boundary);
@@ -538,6 +618,10 @@ impl TextControlElementEditingContext {
             hit_test_result,
         ) {
             text_control.maybe_update_shared_selection();
+            // Stillwater: a double or triple click that selects text fires `select`.
+            if text_control.has_uncollapsed_selection() {
+                text_control.queue_select_event();
+            }
             mouse_event.upcast::<Event>().mark_as_handled();
         }
     }
@@ -603,6 +687,17 @@ impl EditingContext {
                 .selection()
                 .map(|selection| selection.Stringifier(cx).to_string())
                 .filter(|selection| !selection.is_empty()),
+        }
+    }
+
+    /// Stillwater: the selection as an HTML fragment for the clipboard's `text/html`
+    /// format. Text controls copy plain text only.
+    pub(crate) fn selection_html(&self, cx: &mut JSContext) -> Option<String> {
+        match self {
+            EditingContext::TextControl(..) => None,
+            EditingContext::Document(document) => document
+                .selection()
+                .and_then(|selection| selection.html_for_clipboard(cx)),
         }
     }
 
@@ -774,6 +869,12 @@ impl EditingContext {
         if let EditingAction::SelectAll = action {
             self.select_all(cx);
             return true;
+        }
+
+        if let EditingContext::Document(document) = self &&
+            let EditingAction::MoveCursor(direction, motion, ModifySelection::Yes) = action
+        {
+            return document.extend_selection_with_keyboard(cx, direction, motion);
         }
 
         match self {
@@ -991,4 +1092,366 @@ pub(crate) fn editing_action_from_composition_event(event: &CompositionEvent) ->
         CompositionState::Update => EditingAction::InsertCompositionText(event.data.to_string()),
         CompositionState::End => EditingAction::EndComposition(event.data.to_string()),
     }
+}
+
+/// Stillwater: Shift+arrows, Ctrl+Shift+arrows and Shift+Home/End extend a selection in the
+/// page itself (not only in text fields) by moving its focus, as in Chrome and Firefox.
+impl Document {
+    /// Returns false when there is no selection to extend or the focus cannot move.
+    pub(crate) fn extend_selection_with_keyboard(
+        &self,
+        cx: &mut JSContext,
+        direction: EditingDirection,
+        motion: EditingMotion,
+    ) -> bool {
+        let Some(selection) = self.GetSelection(cx) else {
+            return false;
+        };
+        let (Some(anchor), Some(focus)) = (
+            selection.composed_anchor_position(),
+            selection.composed_focus_position(),
+        ) else {
+            return false;
+        };
+        let forward = direction == EditingDirection::Forward;
+        let Some(focus) = self.text_position(cx.no_gc(), &focus, forward) else {
+            return false;
+        };
+        let new_focus = match motion {
+            EditingMotion::Character | EditingMotion::Grapheme => {
+                self.position_after_character(cx.no_gc(), &focus, forward)
+            },
+            EditingMotion::Word => self.position_after_word(cx, &focus, forward),
+            EditingMotion::LineStartOrEnd => self.line_edge_position(cx, &focus, forward),
+            EditingMotion::Line => self.position_on_adjacent_line(cx, &focus, forward),
+            EditingMotion::Page | EditingMotion::DocumentStartOrEnd => None,
+        };
+        let Some(new_focus) = new_focus else {
+            return false;
+        };
+        selection.set_anchor_and_focus(cx, &anchor, &new_focus);
+        true
+    }
+
+    /// The position of `boundary` as an offset in a rendered text node: the boundary itself
+    /// when it is in one, otherwise the nearest rendered text in the direction of travel.
+    fn text_position(
+        &self,
+        no_gc: &NoGC,
+        boundary: &RootedSelectionBoundary,
+        forward: bool,
+    ) -> Option<RootedSelectionBoundary> {
+        if boundary.container.is::<Text>() {
+            return Some(boundary.clone());
+        }
+        let child = boundary.container.children().nth(boundary.offset as usize);
+        if forward {
+            let start = match child {
+                Some(child) if is_rendered_text(&child) => {
+                    return Some(RootedSelectionBoundary::new_with_utf16_offset(child, 0));
+                },
+                Some(child) => child,
+                None => {
+                    // After the container's last child: start after its last descendant.
+                    let mut last = boundary.container.clone();
+                    while let Some(child) = last.GetLastChild() {
+                        last = child;
+                    }
+                    last
+                },
+            };
+            let text = self.adjacent_rendered_text(no_gc, &start, true)?;
+            Some(RootedSelectionBoundary::new_with_utf16_offset(text, 0))
+        } else {
+            if let Some(child) = child {
+                let text = self.adjacent_rendered_text(no_gc, &child, false)?;
+                let length = text.len();
+                return Some(RootedSelectionBoundary::new_with_utf16_offset(text, length));
+            }
+            let mut last = boundary.container.clone();
+            while let Some(child) = last.GetLastChild() {
+                last = child;
+            }
+            let text = if is_rendered_text(&last) {
+                last
+            } else {
+                self.adjacent_rendered_text(no_gc, &last, false)?
+            };
+            let length = text.len();
+            Some(RootedSelectionBoundary::new_with_utf16_offset(text, length))
+        }
+    }
+
+    /// The next (or previous) text node in tree order that is rendered and selectable.
+    fn adjacent_rendered_text(
+        &self,
+        _no_gc: &NoGC,
+        node: &Node,
+        forward: bool,
+    ) -> Option<DomRoot<Node>> {
+        let root = self.upcast::<Node>();
+        if forward {
+            node.following_nodes(root, ShadowIncluding::No)
+                .find(|candidate| is_rendered_text(candidate))
+        } else {
+            node.preceding_nodes(root)
+                .find(|candidate| is_rendered_text(candidate))
+        }
+    }
+
+    /// One character on from the text position `position`, crossing into the adjacent
+    /// rendered text node at a node boundary. Between two blocks the boundary itself is the
+    /// character (the line break), as in Chrome.
+    fn position_after_character(
+        &self,
+        no_gc: &NoGC,
+        position: &RootedSelectionBoundary,
+        forward: bool,
+    ) -> Option<RootedSelectionBoundary> {
+        let node = &position.container;
+        let data = node.downcast::<CharacterData>()?.data().to_string();
+        let offset = position.offset as usize;
+        if forward {
+            if let Some(length) = character_length_after(&data, offset) {
+                return Some(RootedSelectionBoundary::new_with_utf16_offset(
+                    node.clone(),
+                    (offset + length) as u32,
+                ));
+            }
+            let next = self.adjacent_rendered_text(no_gc, node, true)?;
+            let step = if rendered_text_separator_is_nothing(no_gc, node, &next) {
+                character_length_after(&next.downcast::<CharacterData>()?.data(), 0).unwrap_or(0)
+            } else {
+                0
+            };
+            Some(RootedSelectionBoundary::new_with_utf16_offset(next, step as u32))
+        } else {
+            if let Some(length) = character_length_before(&data, offset) {
+                return Some(RootedSelectionBoundary::new_with_utf16_offset(
+                    node.clone(),
+                    (offset - length) as u32,
+                ));
+            }
+            let previous = self.adjacent_rendered_text(no_gc, node, false)?;
+            let previous_data = previous.downcast::<CharacterData>()?.data().to_string();
+            let length = utf16_length(&previous_data);
+            let step = if rendered_text_separator_is_nothing(no_gc, &previous, node) {
+                character_length_before(&previous_data, length).unwrap_or(0)
+            } else {
+                0
+            };
+            Some(RootedSelectionBoundary::new_with_utf16_offset(
+                previous,
+                (length - step) as u32,
+            ))
+        }
+    }
+
+    /// To the end of the next word (forward) or the start of the previous one (backward),
+    /// skipping the spaces and punctuation in between.
+    fn position_after_word(
+        &self,
+        cx: &mut JSContext,
+        position: &RootedSelectionBoundary,
+        forward: bool,
+    ) -> Option<RootedSelectionBoundary> {
+        // Skip characters that are not part of a word, crossing text nodes.
+        let mut current = position.clone();
+        loop {
+            let data = current.container.downcast::<CharacterData>()?.data().to_string();
+            let character = if forward {
+                character_after(&data, current.offset as usize)
+            } else {
+                character_before(&data, current.offset as usize)
+            };
+            match character {
+                Some(character) if !character.is_alphanumeric() && character != '_' => {
+                    current = self.position_after_character(cx.no_gc(), &current, forward)?;
+                },
+                Some(_) => break,
+                None => {
+                    // At a node boundary: carry on in the adjacent text node.
+                    let next = self.adjacent_rendered_text(cx.no_gc(), &current.container, forward)?;
+                    let offset = if forward { 0 } else { next.len() };
+                    current = RootedSelectionBoundary::new_with_utf16_offset(next, offset);
+                },
+            }
+        }
+        // Then to the edge of the word there.
+        let data = current.container.downcast::<CharacterData>()?.data().to_string();
+        let inside_word = if forward {
+            current.offset
+        } else {
+            current.offset - character_length_before(&data, current.offset as usize)? as u32
+        };
+        let inside_word =
+            RootedSelectionBoundary::new_with_utf16_offset(current.container.clone(), inside_word);
+        let (start, end) = self.window().query_text_segment(
+            cx,
+            &inside_word.container,
+            inside_word.utf32_offset(),
+            SegmentGranularity::Word,
+        )?;
+        Some(if forward { end } else { start })
+    }
+
+    /// The start or end of the visual line holding the text position `position` (or of its
+    /// paragraph, when the line cannot be hit-tested).
+    fn line_edge_position(
+        &self,
+        cx: &mut JSContext,
+        position: &RootedSelectionBoundary,
+        forward: bool,
+    ) -> Option<RootedSelectionBoundary> {
+        let (paragraph_start, paragraph_end) = self.window().query_text_segment(
+            cx,
+            &position.container,
+            position.utf32_offset(),
+            SegmentGranularity::HardLineBreak,
+        )?;
+        let paragraph_edge = if forward {
+            paragraph_end.clone()
+        } else {
+            paragraph_start.clone()
+        };
+        let Some(caret) = self.caret_rect(cx, position) else {
+            return Some(paragraph_edge);
+        };
+        let width = self.window().InnerWidth() as f32;
+        let x = if forward { width - 2.0 } else { 1.0 };
+        let y = caret.origin.y.to_f32_px() + caret.size.height.to_f32_px() / 2.0;
+        let Some(hit) = self.position_at_point(cx, x, y) else {
+            return Some(paragraph_edge);
+        };
+        // Only a position on the same paragraph counts: the hit test may land on something
+        // else at the edge of the page (a sidebar, a positioned element).
+        let no_gc = cx.no_gc();
+        if hit.cmp(no_gc, &paragraph_start) == std::cmp::Ordering::Less ||
+            hit.cmp(no_gc, &paragraph_end) == std::cmp::Ordering::Greater ||
+            hit.cmp(no_gc, position) == if forward {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        {
+            return Some(paragraph_edge);
+        }
+        Some(hit)
+    }
+
+    /// The position on the line above or below the text position `position`, at the same
+    /// horizontal position.
+    fn position_on_adjacent_line(
+        &self,
+        cx: &mut JSContext,
+        position: &RootedSelectionBoundary,
+        forward: bool,
+    ) -> Option<RootedSelectionBoundary> {
+        let caret = self.caret_rect(cx, position)?;
+        let x = caret.origin.x.to_f32_px();
+        let top = caret.origin.y.to_f32_px();
+        let height = caret.size.height.to_f32_px().max(1.0);
+        let y = if forward {
+            top + height * 1.5
+        } else {
+            top - height * 0.5
+        };
+        let hit = self.position_at_point(cx, x, y)?;
+        let ordering = hit.cmp(cx.no_gc(), position);
+        let moved = if forward {
+            ordering == std::cmp::Ordering::Greater
+        } else {
+            ordering == std::cmp::Ordering::Less
+        };
+        moved.then_some(hit)
+    }
+
+    /// The zero-width rectangle of the caret at the text position `position`, in viewport
+    /// coordinates.
+    fn caret_rect(
+        &self,
+        cx: &mut JSContext,
+        position: &RootedSelectionBoundary,
+    ) -> Option<euclid::Rect<app_units::Au, style_traits::CSSPixel>> {
+        let window = self.window();
+        window.layout_reflow(cx, QueryMsg::BoxAreas);
+        let offset = servo_base::text::Utf32CodeUnits(position.utf32_offset().0);
+        window
+            .layout()
+            .query_text_range_rects(position.container.to_trusted_node_address(), offset..offset)
+            .into_iter()
+            .next()
+    }
+
+    /// The selection position that a click at (`x`, `y`) in the viewport would give.
+    fn position_at_point(
+        &self,
+        cx: &mut JSContext,
+        x: f32,
+        y: f32,
+    ) -> Option<RootedSelectionBoundary> {
+        let height = self.window().InnerHeight() as f32;
+        if y < 0.0 || y >= height {
+            return None;
+        }
+        self.window()
+            .hit_test_from_point_in_viewport(
+                cx,
+                HitTestFlags::IncludeDomPosition,
+                euclid::Point2D::new(x, y),
+            )?
+            .dom_position_for_selection
+    }
+}
+
+fn is_rendered_text(node: &Node) -> bool {
+    node.is::<Text>() &&
+        !node.is_in_ua_widget() &&
+        node.downcast::<CharacterData>()
+            .and_then(|text| text.rendered_text(RangeAny::new(None, None)))
+            .is_some_and(|text| !text.trim().is_empty())
+}
+
+fn rendered_text_separator_is_nothing(no_gc: &NoGC, previous: &Node, next: &Node) -> bool {
+    crate::dom::selection::rendered_text_separator_is_nothing(no_gc, previous, next)
+}
+
+fn utf16_length(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+/// The UTF-16 byte-free helpers below take and return UTF-16 offsets into `text`.
+fn character_after(text: &str, utf16_offset: usize) -> Option<char> {
+    let mut seen = 0;
+    for character in text.chars() {
+        if seen == utf16_offset {
+            return Some(character);
+        }
+        seen += character.len_utf16();
+        if seen > utf16_offset {
+            return None;
+        }
+    }
+    None
+}
+
+fn character_before(text: &str, utf16_offset: usize) -> Option<char> {
+    let mut seen = 0;
+    let mut previous = None;
+    for character in text.chars() {
+        if seen == utf16_offset {
+            return previous;
+        }
+        seen += character.len_utf16();
+        previous = Some(character);
+    }
+    (seen == utf16_offset).then_some(previous).flatten()
+}
+
+fn character_length_after(text: &str, utf16_offset: usize) -> Option<usize> {
+    character_after(text, utf16_offset).map(char::len_utf16)
+}
+
+fn character_length_before(text: &str, utf16_offset: usize) -> Option<usize> {
+    character_before(text, utf16_offset).map(char::len_utf16)
 }

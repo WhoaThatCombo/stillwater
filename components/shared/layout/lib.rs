@@ -426,6 +426,13 @@ pub trait Layout {
         node: TrustedNodeAddress,
         range: std::ops::Range<Utf32CodeUnits>,
     ) -> Option<Rect<Au, CSSPixel>>;
+    /// Stillwater: the rectangles, one per line and each only as wide as the characters, of
+    /// the `char`s in `range` of the text node `node` (`Range.getClientRects()`).
+    fn query_text_range_rects(
+        &self,
+        node: TrustedNodeAddress,
+        range: std::ops::Range<Utf32CodeUnits>,
+    ) -> Vec<Rect<Au, CSSPixel>>;
     fn query_client_rect(&self, node: TrustedNodeAddress) -> Rect<i32, CSSPixel>;
     fn query_current_css_zoom(&self, node: TrustedNodeAddress) -> f32;
     fn query_element_inner_outer_text(&self, node: TrustedNodeAddress) -> String;

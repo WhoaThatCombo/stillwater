@@ -103,12 +103,6 @@ input::placeholder {
   pointer-events: none !important;
 }
 
-input::selection,
-textarea::selection {
-  background: rgba(176, 214, 255, 1.0);
-  color: black;
-}
-
 /* Button type inputs */
 button,
 select,
@@ -561,6 +555,11 @@ slot {
   display: contents;
 }
 
+/* Stillwater: the default selection colours come from the system (prefs
+   `layout_selection_background_rgba` / `layout_selection_text_rgba`), which this placeholder
+   background stands for; layout swaps it for them. Being a real UA rule, an author
+   `::selection` overrides it property by property, as in other browsers. Do not change this
+   colour without changing `DEFAULT_SELECTION_PLACEHOLDER` in layout's display_list/mod.rs. */
 *::selection {
-  background: rgba(176, 214, 255, 1.0);
+  background-color: rgb(1 2 3 / 0.5);
 }

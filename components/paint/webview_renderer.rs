@@ -93,6 +93,9 @@ pub(crate) struct WebViewRenderer {
     pub webview: Box<dyn WebViewTrait>,
     /// The root [`PipelineId`] of the currently displayed page in this WebView.
     pub root_pipeline_id: Option<PipelineId>,
+    /// Stillwater: the canvas background colour of the root pipeline's latest display list
+    /// (`None`: transparent, so the default canvas colour shows).
+    pub root_background_color: Option<webrender_api::ColorF>,
     /// The rectangle of the [`WebView`] in device pixels, which is the viewport.
     pub rect: DeviceRect,
     /// Tracks details about each active pipeline that `Paint` knows about.
@@ -115,6 +118,9 @@ pub(crate) struct WebViewRenderer {
     hidpi_scale_factor: Scale<f32, DeviceIndependentPixel, DevicePixel>,
     /// Whether or not this [`WebViewRenderer`] is hidden.
     hidden: bool,
+    /// Stillwater: the viewport changed (window resize, scale factor, ...) while this WebView
+    /// was hidden; the page is told when it is shown again.
+    pending_window_size_message: Cell<bool>,
     /// Whether or not this [`WebViewRenderer`] isn't throttled and has a pipeline with
     /// active animations or animation frame callbacks.
     animating: bool,
@@ -154,6 +160,7 @@ impl WebViewRenderer {
             id: webview_id,
             webview: renderer_webview,
             root_pipeline_id: None,
+            root_background_color: None,
             rect,
             pipelines: Default::default(),
             touch_handler: TouchHandler::new(webview_id),
@@ -163,6 +170,7 @@ impl WebViewRenderer {
             pinch_zoom: PinchZoom::new(rect),
             hidpi_scale_factor: Scale::new(hidpi_scale_factor.0),
             hidden: false,
+            pending_window_size_message: Cell::new(false),
             animating: false,
             viewport_description: Default::default(),
             screen_size: viewport_details.device_size,
@@ -208,6 +216,9 @@ impl WebViewRenderer {
         let _ = self.embedder_to_constellation_sender.send(
             EmbedderToConstellationMessage::SetWebViewHidden(self.id, new_value),
         );
+        if !new_value && self.pending_window_size_message.get() {
+            self.send_window_size_message();
+        }
         self.update_animation_state();
         true
     }
@@ -1106,6 +1117,16 @@ impl WebViewRenderer {
     }
 
     fn send_window_size_message(&self) {
+        // Stillwater: every tab of a window shares its rendering context, so a window resize
+        // reaches every WebView. Re-laying out the hidden ones (background tabs) as well made
+        // the visible page wait for them: their reflows run on the same script thread when they
+        // are same-site, and all layouts take turns on the global style thread pool. Like
+        // Chromium, a hidden page learns its new viewport when it is shown.
+        if self.hidden {
+            self.pending_window_size_message.set(true);
+            return;
+        }
+        self.pending_window_size_message.set(false);
         // The device pixel ratio used by the style system should include the scale from page pixels
         // to device pixels, but not including any pinch zoom.
         let device_pixel_ratio = self.device_pixels_per_page_pixel_not_including_pinch_zoom();
