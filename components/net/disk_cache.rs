@@ -23,7 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use log::{error, info};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use rusqlite::{Connection, OptionalExtension, params};
 use servo_config::pref;
 use tokio::sync::RwLock as TokioRwLock;
@@ -64,8 +64,12 @@ struct WriteProgress {
     /// Some entries are locked by a fetch: retry soon.
     busy: bool,
 }
-/// Read connections kept open for reuse.
-const IDLE_READERS: usize = 4;
+/// Truncate the WAL once it is fully copied into the file and bigger than this many pages
+/// (4 KB each).
+const TRUNCATE_WAL_PAGES: i64 = 1024;
+/// Read connections (reads beyond this many at once wait for one; a read takes well under a
+/// millisecond once the page is cached by the OS).
+const READERS: usize = 4;
 
 struct IndexEntry {
     size: u64,
@@ -156,7 +160,18 @@ struct Shared {
     path: PathBuf,
     max_size: u64,
     state: Mutex<State>,
-    readers: Mutex<Vec<Connection>>,
+    readers: Mutex<Readers>,
+    /// Signalled when a read connection is returned to `readers`.
+    reader_returned: Condvar,
+}
+
+/// Read connections, opened once and reused: opening one reads the file's header and
+/// schema, which takes tens of milliseconds on a slow disk.
+#[derive(Default)]
+struct Readers {
+    idle: Vec<Connection>,
+    /// How many are open (idle or in use), at most `READERS`.
+    open: usize,
 }
 
 enum Command {
@@ -222,9 +237,42 @@ fn open_writer(path: &Path) -> rusqlite::Result<Connection> {
     // With WAL, NORMAL only risks losing the last writes on power loss, never corruption.
     connection.pragma_update(None, "synchronous", "NORMAL")?;
     connection.query_row("PRAGMA journal_size_limit = 16777216", [], |_| Ok(()))?;
+    // Checkpoints (copying the WAL into the file, with fsyncs) take seconds on a slow disk:
+    // they run on their own thread (`run_checkpointer`) so writes don't wait for them.
+    connection.query_row("PRAGMA wal_autocheckpoint = 0", [], |_| Ok(()))?;
     connection.execute_batch(CREATE_DATA_TABLE)?;
     connection.execute_batch(CREATE_META_TABLE)?;
     Ok(connection)
+}
+
+/// Copy written pages from the WAL into the database file whenever the writer has written
+/// something, without blocking it or the readers.
+fn run_checkpointer(path: PathBuf, written: Receiver<()>) {
+    let Ok(connection) = open_reader(&path) else {
+        return;
+    };
+    while written.recv().is_ok() {
+        while written.try_recv().is_ok() {}
+        let start = Instant::now();
+        let result = connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+            Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+        });
+        match result {
+            Ok((frames, done)) => {
+                // Everything is in the file: give a big WAL's space back (this only waits
+                // for a write or read in progress).
+                if frames == done && frames > TRUNCATE_WAL_PAGES {
+                    let _ = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+                }
+                info!(
+                    target: "cache_timing",
+                    "disk checkpoint: {done} of {frames} WAL pages, {} us",
+                    start.elapsed().as_micros()
+                )
+            },
+            Err(error) => error!("Disk cache checkpoint failed: {error}"),
+        }
+    }
 }
 
 /// Make the metadata table describe exactly the rows of the data table. A cache file from an
@@ -315,13 +363,18 @@ impl DiskCache {
             start.elapsed().as_micros()
         );
 
-        // Ready for the first lookup.
-        let readers = open_reader(&path).into_iter().collect();
+        // One ready for the first lookup; the writer thread opens the others.
+        let idle: Vec<Connection> = open_reader(&path).into_iter().collect();
+        let readers = Readers {
+            open: idle.len(),
+            idle,
+        };
         let shared = Arc::new(Shared {
             path,
             max_size,
             state: Mutex::new(state),
             readers: Mutex::new(readers),
+            reader_returned: Condvar::new(),
         });
         let (sender, receiver) = channel();
         let writer_shared = shared.clone();
@@ -404,19 +457,61 @@ impl DiskCache {
 }
 
 impl Shared {
+    /// An idle read connection; opens one if fewer than `READERS` are open, else waits.
+    fn take_reader(&self) -> Option<Connection> {
+        {
+            let mut readers = self.readers.lock();
+            loop {
+                if let Some(connection) = readers.idle.pop() {
+                    return Some(connection);
+                }
+                if readers.open < READERS {
+                    readers.open += 1;
+                    break;
+                }
+                self.reader_returned.wait(&mut readers);
+            }
+        }
+        match open_reader(&self.path) {
+            Ok(connection) => Some(connection),
+            Err(error) => {
+                error!("Could not open the disk cache for reading: {error}");
+                self.readers.lock().open -= 1;
+                self.reader_returned.notify_one();
+                None
+            },
+        }
+    }
+
+    fn return_reader(&self, connection: Connection) {
+        self.readers.lock().idle.push(connection);
+        self.reader_returned.notify_one();
+    }
+
+    /// Open the remaining read connections ahead of the first burst of lookups.
+    fn open_readers(&self) {
+        loop {
+            {
+                let mut readers = self.readers.lock();
+                if readers.open >= READERS {
+                    return;
+                }
+                readers.open += 1;
+            }
+            match open_reader(&self.path) {
+                Ok(connection) => self.return_reader(connection),
+                Err(_) => {
+                    self.readers.lock().open -= 1;
+                    return;
+                },
+            }
+        }
+    }
+
     fn read(&self, key: &str) -> Option<CacheEntry> {
         let _span = profile_traits::trace_span!("query disk cache").entered();
-        let pooled = self.readers.lock().pop();
-        let connection = match pooled {
-            Some(connection) => connection,
-            None => match open_reader(&self.path) {
-                Ok(connection) => connection,
-                Err(error) => {
-                    error!("Could not open the disk cache for reading: {error}");
-                    return None;
-                },
-            },
-        };
+        let start = Instant::now();
+        let connection = self.take_reader()?;
         let bytes = connection
             .prepare_cached("SELECT data FROM disk_cache WHERE key = ?1")
             .and_then(|mut statement| {
@@ -424,12 +519,7 @@ impl Shared {
                     .query_row([key], |row| row.get::<_, Vec<u8>>(0))
                     .optional()
             });
-        {
-            let mut readers = self.readers.lock();
-            if readers.len() < IDLE_READERS {
-                readers.push(connection);
-            }
-        }
+        self.return_reader(connection);
         let bytes = match bytes {
             Ok(bytes) => bytes?,
             Err(error) => {
@@ -455,11 +545,24 @@ impl Shared {
                 entry.fingerprint = entry_fingerprint(&resources);
             }
         }
+        info!(
+            target: "cache_timing",
+            "disk read {}us {key}",
+            start.elapsed().as_micros()
+        );
         Some(std::sync::Arc::new(TokioRwLock::new(resources)))
     }
 
     fn run_writer(&self, mut connection: Connection, commands: Receiver<Command>) {
+        self.open_readers();
+        let (checkpoint, written) = channel();
+        let path = self.path.clone();
+        let _ = std::thread::Builder::new()
+            .name("DiskCacheCheckpoint".into())
+            .spawn(move || run_checkpointer(path, written));
         self.trim(&mut connection);
+        // Also takes in what an earlier run left in the WAL.
+        let _ = checkpoint.send(());
         let mut progress = WriteProgress::default();
         loop {
             let mut received = vec![];
@@ -506,6 +609,7 @@ impl Shared {
                 }
             }
             progress = self.write_some(&mut connection);
+            let _ = checkpoint.send(());
         }
     }
 
@@ -533,6 +637,7 @@ impl Shared {
         if queued.is_empty() {
             return WriteProgress::default();
         }
+        info!(target: "cache_timing", "disk writer: {} queued", queued.len());
         let mut busy = false;
         let mut sized: Vec<(usize, (String, CacheEntry, u64))> = queued
             .into_iter()
@@ -706,11 +811,19 @@ impl Shared {
             state.evict_to(self.max_size)
         };
         let deleted = delete_rows(&transaction, &evicted);
+        let commit_start = Instant::now();
         if let Err(error) = deleted.and_then(|_| transaction.commit()) {
             error!("Could not write to the disk cache: {error}");
             self.forget_pending(chunk);
             return (0, false);
         }
+        info!(
+            target: "cache_timing",
+            "disk commit: {} entries, {} evicted, {} us",
+            chunk.len(),
+            evicted.len(),
+            commit_start.elapsed().as_micros()
+        );
 
         let mut state = self.state.lock();
         for ((key, _, generation), outcome) in chunk.iter().zip(outcomes) {
