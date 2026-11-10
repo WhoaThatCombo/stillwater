@@ -145,10 +145,17 @@ impl Document {
                     // Implementations should create alternate text/html and text/plain
                     // clipboard formats when content in a web page is selected.
                     if let Some(selection) = editing_context.selection_content(cx) {
-                        self.send_to_embedder(EmbedderMsg::SetClipboardText(
-                            self.webview_id(),
-                            selection,
-                        ));
+                        match editing_context.selection_html(cx) {
+                            Some(html) => self.send_to_embedder(EmbedderMsg::SetClipboardHtml(
+                                self.webview_id(),
+                                selection,
+                                html,
+                            )),
+                            None => self.send_to_embedder(EmbedderMsg::SetClipboardText(
+                                self.webview_id(),
+                                selection,
+                            )),
+                        }
                     }
                     // Step 3.2. Fire a clipboard event named clipboardchange
                     self.fire_clipboard_event(cx, &event_target, ClipboardEventType::Change);
@@ -348,16 +355,24 @@ impl Document {
             // Step 1.1 Clear the clipboard.
             self.send_to_embedder(EmbedderMsg::ClearClipboard(self.webview_id()));
             // Step 1.2
+            // Stillwater: a page that sets both `text/plain` and `text/html` gets both on
+            // the clipboard (before, each part replaced the previous one as plain text, so
+            // the HTML source could end up as the pasted text).
+            let mut plain_text = None;
+            let mut html = None;
             for item in drag_data_store.iter_item_list() {
                 match item {
-                    Kind::Text { data, .. } => {
+                    Kind::Text { data, type_ } => {
                         // Step 1.2.1.1 Ensure encoding is correct per OS and locale conventions
                         // Step 1.2.1.2 Normalize line endings according to platform conventions
                         // Step 1.2.1.3
-                        self.send_to_embedder(EmbedderMsg::SetClipboardText(
-                            self.webview_id(),
-                            data.to_string(),
-                        ));
+                        if type_.to_string().eq_ignore_ascii_case("text/html") {
+                            html = Some(data.to_string());
+                        } else if plain_text.is_none() ||
+                            type_.to_string().eq_ignore_ascii_case("text/plain")
+                        {
+                            plain_text = Some(data.to_string());
+                        }
                     },
                     Kind::File { .. } => {
                         // Step 1.2.2 If data is of a type listed in the mandatory data types list, then
@@ -365,6 +380,17 @@ impl Document {
                         // Step 1.2.3 Else this is left to the implementation
                     },
                 }
+            }
+            match (plain_text, html) {
+                (plain_text, Some(html)) => self.send_to_embedder(EmbedderMsg::SetClipboardHtml(
+                    self.webview_id(),
+                    plain_text.unwrap_or_default(),
+                    html,
+                )),
+                (Some(plain_text), None) => self.send_to_embedder(
+                    EmbedderMsg::SetClipboardText(self.webview_id(), plain_text),
+                ),
+                (None, None) => {},
             }
         } else {
             // Step 2.1
@@ -603,6 +629,17 @@ impl EditingContext {
                 .selection()
                 .map(|selection| selection.Stringifier(cx).to_string())
                 .filter(|selection| !selection.is_empty()),
+        }
+    }
+
+    /// Stillwater: the selection as an HTML fragment for the clipboard's `text/html`
+    /// format. Text controls copy plain text only.
+    pub(crate) fn selection_html(&self, cx: &mut JSContext) -> Option<String> {
+        match self {
+            EditingContext::TextControl(..) => None,
+            EditingContext::Document(document) => document
+                .selection()
+                .and_then(|selection| selection.html_for_clipboard(cx)),
         }
     }
 

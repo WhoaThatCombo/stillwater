@@ -8,6 +8,7 @@ use std::cmp::Ordering;
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 use bitflags::bitflags;
 use dom_struct::dom_struct;
+use html5ever::LocalName;
 use js::context::{JSContext, NoGC};
 use layout_api::QueryMsg;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -18,6 +19,9 @@ use script_bindings::reflector::{Reflector, reflect_dom_object};
 use servo_base::text::{
     AssumeUnder4GB, RangeAny, Utf16CodeUnits, Utf32CodeUnits, Utf32CodeUnitsOrNodeOffset,
 };
+use servo_url::ServoUrl;
+use style::values::specified::box_::{DisplayInside, DisplayOutside};
+use style::values::specified::text::TextDecorationLine;
 
 use crate::dom::abstractrange::bp_position;
 use crate::dom::bindings::cell::AtomicSafeBorrowMut;
@@ -41,7 +45,7 @@ use crate::dom::range::Range;
 use crate::dom::selection_range::{RootedSelectionBoundary, SelectionBoundary, SelectionRange};
 use crate::dom::staticrange::StaticRange;
 use crate::dom::traversal::FlatTreeForSelectionNoGcTraversal;
-use crate::dom::types::ShadowRoot;
+use crate::dom::types::{Element, HTMLBRElement, HTMLParagraphElement, ShadowRoot, Text};
 use crate::dom::{CharacterData, FlatTreeParent, NodeDamage, NodeFlags, StartOrEnd};
 
 /// Used value of [`user-select`](https://drafts.csswg.org/css-ui-4/#propdef-user-select):
@@ -1431,25 +1435,187 @@ impl SelectionMethods<crate::DomTypeHolder> for Selection {
             return DOMString::new();
         };
 
+        // Stillwater: like Chrome and Firefox, this follows the innerText rendered text
+        // collection steps clipped to the selection, so copied text keeps its structure:
+        // line breaks between blocks (two around paragraphs), `<br>` as a line break, tabs
+        // between table cells and a line break between rows. Hidden and `user-select: none`
+        // text is left out.
+        let no_gc = cx.no_gc();
         let mut user_select_cache = Default::default();
-        let mut string = DOMString::new();
+        let mut string = String::new();
+        let mut previous: Option<UnrootedDom<'_, Node>> = None;
         for node in visible_selection.traversal() {
-            let Some(character_data) = node.downcast::<CharacterData>() else {
-                continue;
-            };
-
-            if node.used_user_select(cx.no_gc(), &mut user_select_cache) == UsedUserSelect::None {
+            let text: std::borrow::Cow<'_, str> =
+                if let Some(character_data) = node.downcast::<CharacterData>() {
+                    if !node.is::<Text>() || node.is_in_ua_widget() {
+                        continue;
+                    }
+                    if node.used_user_select(no_gc, &mut user_select_cache) ==
+                        UsedUserSelect::None
+                    {
+                        continue;
+                    }
+                    if !text_is_visible(&node) {
+                        continue;
+                    }
+                    let range = visible_selection.range_for_character_data(character_data);
+                    let Some(text) = character_data.rendered_text(range) else {
+                        continue;
+                    };
+                    text.into()
+                } else if node.is::<HTMLBRElement>() &&
+                    !node.is_in_ua_widget() &&
+                    node.downcast::<Element>()
+                        .and_then(Element::style)
+                        .is_some_and(|style| !style.get_box().display.is_none())
+                {
+                    "\n".into()
+                } else {
+                    continue;
+                };
+            if text.is_empty() {
                 continue;
             }
 
-            let range = visible_selection.range_for_character_data(character_data);
-            let Some(text) = character_data.rendered_text(range) else {
-                continue;
-            };
-            string.push_str(&text);
+            let separator = previous
+                .as_ref()
+                .map_or(RenderedTextSeparator::Nothing, |previous| {
+                    rendered_text_separator(no_gc, previous, &node)
+                });
+            match separator {
+                RenderedTextSeparator::LineBreaks(count) => {
+                    // A whitespace-only text between blocks renders nothing.
+                    let trimmed = text.trim_start_matches([' ', '\t']);
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    // Collapsible spaces at the end of a block are not rendered.
+                    let trimmed_length = string.trim_end_matches(' ').len();
+                    string.truncate(trimmed_length);
+                    let existing = string.len() - string.trim_end_matches('\n').len();
+                    for _ in existing..count {
+                        string.push('\n');
+                    }
+                    string.push_str(trimmed);
+                },
+                RenderedTextSeparator::RowBreak => {
+                    string.push('\n');
+                    string.push_str(&text);
+                },
+                RenderedTextSeparator::Tab => {
+                    string.push('\t');
+                    string.push_str(&text);
+                },
+                RenderedTextSeparator::Nothing => string.push_str(&text),
+            }
+            previous = Some(node);
         }
 
-        string
+        DOMString::from(string)
+    }
+}
+
+/// What separates two pieces of rendered text in [`Selection::Stringifier`].
+#[derive(Clone, Copy, PartialEq)]
+enum RenderedTextSeparator {
+    Nothing,
+    /// A table cell boundary.
+    Tab,
+    /// A table row boundary.
+    RowBreak,
+    /// A block boundary, with its required line break count.
+    LineBreaks(usize),
+}
+
+/// Stillwater: whether nothing (no line break or tab) separates the rendered text of two
+/// consecutive nodes, i.e. they are on the same line.
+pub(crate) fn rendered_text_separator_is_nothing(no_gc: &NoGC, previous: &Node, next: &Node) -> bool {
+    rendered_text_separator(no_gc, previous, next) == RenderedTextSeparator::Nothing
+}
+
+/// Whether the given text node's parent has `visibility: visible`.
+fn text_is_visible(node: &Node) -> bool {
+    node.GetParentElement()
+        .and_then(|parent| parent.style())
+        .is_none_or(|style| {
+            style.get_inherited_box().visibility == style::computed_values::visibility::T::Visible
+        })
+}
+
+/// The separator that the innerText rendered text collection steps put between two
+/// consecutive rendered nodes: the strongest one contributed by an element that is left
+/// after `previous` or entered before `next`.
+fn rendered_text_separator(no_gc: &NoGC, previous: &Node, next: &Node) -> RenderedTextSeparator {
+    let previous_chain: Vec<UnrootedDom<'_, Node>> = previous
+        .inclusive_ancestors_in_flat_tree_unrooted(no_gc)
+        .collect();
+    let mut boundary_elements: Vec<UnrootedDom<'_, Node>> = Vec::new();
+    let mut common = None;
+    for ancestor in next.inclusive_ancestors_in_flat_tree_unrooted(no_gc) {
+        if let Some(index) = previous_chain.iter().position(|node| *node == ancestor) {
+            common = Some(index);
+            break;
+        }
+        boundary_elements.push(ancestor);
+    }
+    let left = &previous_chain[..common.unwrap_or(previous_chain.len())];
+    // Between two cells of the same table, the cell and row boundaries win over any
+    // blocks inside the cells, as in Chrome: `a\tb`, not `a\n\tb`.
+    let within_table = common
+        .and_then(|index| previous_chain[index].downcast::<Element>().and_then(Element::style))
+        .is_some_and(|style| {
+            matches!(
+                style.get_box().display.inside(),
+                DisplayInside::Table |
+                    DisplayInside::TableRowGroup |
+                    DisplayInside::TableHeaderGroup |
+                    DisplayInside::TableFooterGroup |
+                    DisplayInside::TableRow
+            )
+        });
+
+    let mut separator = RenderedTextSeparator::Nothing;
+    let mut table_separator = RenderedTextSeparator::Nothing;
+    for node in left.iter().chain(boundary_elements.iter()) {
+        let Some(element) = node.downcast::<Element>() else {
+            continue;
+        };
+        let Some(style) = element.style() else {
+            continue;
+        };
+        let display = style.get_box().display;
+        let this_separator = match (display.outside(), display.inside()) {
+            (_, DisplayInside::TableCell) => RenderedTextSeparator::Tab,
+            (_, DisplayInside::TableRow) => RenderedTextSeparator::RowBreak,
+            (DisplayOutside::Block, _) if node.is::<HTMLParagraphElement>() => {
+                RenderedTextSeparator::LineBreaks(2)
+            },
+            (DisplayOutside::Block | DisplayOutside::TableCaption, _) => {
+                RenderedTextSeparator::LineBreaks(1)
+            },
+            _ => RenderedTextSeparator::Nothing,
+        };
+        match this_separator {
+            RenderedTextSeparator::LineBreaks(count) => {
+                if let RenderedTextSeparator::LineBreaks(existing) = separator {
+                    separator = RenderedTextSeparator::LineBreaks(existing.max(count));
+                } else {
+                    separator = this_separator;
+                }
+            },
+            RenderedTextSeparator::RowBreak => table_separator = RenderedTextSeparator::RowBreak,
+            RenderedTextSeparator::Tab if table_separator == RenderedTextSeparator::Nothing => {
+                table_separator = RenderedTextSeparator::Tab
+            },
+            _ => {},
+        }
+    }
+    if within_table && table_separator != RenderedTextSeparator::Nothing {
+        return table_separator;
+    }
+    match separator {
+        RenderedTextSeparator::Nothing => table_separator,
+        _ => separator,
     }
 }
 
@@ -1854,6 +2020,355 @@ impl<'no_gc> VisibleSelectionFlagUpdate<'no_gc> {
         }
         if self.needs_new_display_list {
             document.window().layout().set_needs_new_display_list();
+        }
+    }
+}
+
+impl Selection {
+    /// Stillwater: an HTML fragment of the selected content for the `text/html` clipboard
+    /// format, so that pasting into a rich text editor keeps links, emphasis, lists and
+    /// tables. Like Chrome, it includes the inline and block context that the selection is
+    /// inside of (a selection inside a link or a list item still pastes as one), leaves out
+    /// hidden and `user-select: none` content, makes link and image URLs absolute and drops
+    /// page styling other than bold, italic, underline and strike-through.
+    pub(crate) fn html_for_clipboard(&self, cx: &mut JSContext) -> Option<String> {
+        let range = self.active_range(cx)?;
+        if range.collapsed() {
+            return None;
+        }
+        let common = range.CommonAncestorContainer();
+        let mut serializer = ClipboardHtmlSerializer {
+            range: &range,
+            no_gc: cx.no_gc(),
+            base_url: self.document.base_url(),
+            user_select_cache: Default::default(),
+        };
+        let mut html = String::new();
+        if common.is::<Text>() {
+            serializer.serialize_node(&common, &mut html);
+        } else {
+            for child in common.children() {
+                serializer.serialize_node(&child, &mut html);
+            }
+        }
+        if html.trim().is_empty() {
+            return None;
+        }
+
+        // Wrap the fragment in the context it is inside of: inline formatting (a link,
+        // emphasis) and the nearest block, plus the list or table around it when the
+        // selection spans list items or table cells.
+        let mut ancestor = if common.is::<Element>() {
+            Some(common.clone())
+        } else {
+            common.GetParentNode()
+        };
+        while let Some(node) = ancestor {
+            let Some(element) = node.downcast::<Element>() else {
+                break;
+            };
+            if !element.is_html_element() {
+                break;
+            }
+            let name = &**element.local_name();
+            if matches!(name, "body" | "html") {
+                break;
+            }
+            // A selection inside one table cell pastes as the cell's content.
+            if matches!(name, "td" | "th") {
+                break;
+            }
+            let block = element
+                .style()
+                .is_some_and(|style| style.get_box().display.outside() != DisplayOutside::Inline);
+            let keep = if block {
+                matches!(
+                    name,
+                    "table" |
+                        "thead" |
+                        "tbody" |
+                        "tfoot" |
+                        "tr" |
+                        "ul" |
+                        "ol" |
+                        "li" |
+                        "dl" |
+                        "pre" |
+                        "blockquote" |
+                        "p" |
+                        "h1" |
+                        "h2" |
+                        "h3" |
+                        "h4" |
+                        "h5" |
+                        "h6"
+                )
+            } else {
+                INLINE_CLIPBOARD_ELEMENTS.contains(&name)
+            };
+            if keep {
+                let mut start_tag = String::new();
+                serializer.start_tag(element, name, &mut start_tag);
+                html = format!("{start_tag}{html}</{name}>");
+            }
+            // Keep going up through table and list structure; stop at any other block.
+            if block && !matches!(name, "thead" | "tbody" | "tfoot" | "tr" | "li") {
+                break;
+            }
+            ancestor = node.GetParentNode();
+        }
+        Some(html)
+    }
+}
+
+/// Inline elements that keep their tag in the clipboard HTML.
+const INLINE_CLIPBOARD_ELEMENTS: &[&str] = &[
+    "a", "b", "strong", "i", "em", "u", "s", "strike", "del", "ins", "code", "kbd", "samp", "var",
+    "sub", "sup", "mark", "small", "q", "cite", "abbr", "img", "br", "span", "time",
+];
+
+/// Block elements that keep their tag in the clipboard HTML. Other blocks become `div`.
+const BLOCK_CLIPBOARD_ELEMENTS: &[&str] = &[
+    "p", "div", "pre", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "dl",
+    "dt", "dd", "table", "caption", "thead", "tbody", "tfoot", "tr", "td", "th", "hr", "figure",
+    "figcaption", "img", "br", "section", "article", "header", "footer", "aside", "nav", "main",
+    "address",
+];
+
+/// Elements whose content is never copied as HTML.
+const SKIPPED_CLIPBOARD_ELEMENTS: &[&str] = &[
+    "script", "style", "template", "noscript", "head", "title", "meta", "link", "iframe",
+    "object", "embed", "video", "audio", "canvas", "input", "textarea", "select", "button",
+    "dialog", "map", "slot",
+];
+
+struct ClipboardHtmlSerializer<'a, 'no_gc> {
+    range: &'a Range,
+    no_gc: &'no_gc NoGC,
+    base_url: ServoUrl,
+    user_select_cache: FxHashMap<UnrootedDom<'no_gc, Node>, UsedUserSelect>,
+}
+
+impl ClipboardHtmlSerializer<'_, '_> {
+    fn serialize_node(&mut self, node: &Node, out: &mut String) {
+        if !self.range.IntersectsNode(self.no_gc, node) {
+            return;
+        }
+        if node.used_user_select(self.no_gc, &mut self.user_select_cache) == UsedUserSelect::None
+        {
+            return;
+        }
+        if node.is::<Text>() {
+            if !text_is_visible(node) {
+                return;
+            }
+            let data = node.downcast::<CharacterData>().unwrap().data();
+            let start = if *self.range.start_container() == *node {
+                utf16_offset_to_byte_index(&data, self.range.start_offset())
+            } else {
+                0
+            };
+            let end = if *self.range.end_container() == *node {
+                utf16_offset_to_byte_index(&data, self.range.end_offset())
+            } else {
+                data.len()
+            };
+            if start < end {
+                escape_html_text(&data[start..end], out);
+            }
+            return;
+        }
+        let Some(element) = node.downcast::<Element>() else {
+            return;
+        };
+        if !element.is_html_element() {
+            return;
+        }
+        let name = &**element.local_name();
+        if SKIPPED_CLIPBOARD_ELEMENTS.contains(&name) {
+            return;
+        }
+        let Some(style) = element.style() else {
+            return;
+        };
+        if style.get_box().display.is_none() {
+            return;
+        }
+        if name == "img" &&
+            style.get_inherited_box().visibility != style::computed_values::visibility::T::Visible
+        {
+            return;
+        }
+
+        let block = style.get_box().display.outside() != DisplayOutside::Inline;
+        let tag = if INLINE_CLIPBOARD_ELEMENTS.contains(&name) ||
+            BLOCK_CLIPBOARD_ELEMENTS.contains(&name)
+        {
+            Some(name)
+        } else if block {
+            Some("div")
+        } else {
+            None
+        };
+
+        let mut content = String::new();
+        for child in node.children() {
+            self.serialize_node(&child, &mut content);
+        }
+        let Some(tag) = tag else {
+            out.push_str(&content);
+            return;
+        };
+        let is_void = matches!(name, "img" | "br" | "hr");
+        // Leave out elements that only touch the selection's edge.
+        if !is_void && content.is_empty() && !matches!(tag, "td" | "th") {
+            return;
+        }
+        self.start_tag(element, tag, out);
+        if !is_void {
+            out.push_str(&content);
+            out.push_str("</");
+            out.push_str(tag);
+            out.push('>');
+        }
+    }
+
+    fn start_tag(&self, element: &Element, tag: &str, out: &mut String) {
+        let get = |name: &str| {
+            let name = LocalName::from(name);
+            element
+                .has_attribute(&name)
+                .then(|| element.get_string_attribute(&name).to_string())
+        };
+        let absolute = |url: String| {
+            self.base_url
+                .join(&url)
+                .map(|url| url.into_string())
+                .unwrap_or(url)
+        };
+        let mut attributes: Vec<(&str, String)> = Vec::new();
+        match tag {
+            "a" => {
+                if let Some(href) = get("href") {
+                    attributes.push(("href", absolute(href)));
+                }
+            },
+            "img" => {
+                if let Some(src) = get("src") {
+                    attributes.push(("src", absolute(src)));
+                }
+                for name in ["alt", "width", "height"] {
+                    if let Some(value) = get(name) {
+                        attributes.push((name, value));
+                    }
+                }
+            },
+            "td" | "th" => {
+                for name in ["colspan", "rowspan"] {
+                    if let Some(value) = get(name) {
+                        attributes.push((name, value));
+                    }
+                }
+            },
+            "ol" => {
+                if let Some(value) = get("start") {
+                    attributes.push(("start", value));
+                }
+            },
+            _ => {},
+        }
+        if let Some(dir) = get("dir") {
+            attributes.push(("dir", dir));
+        }
+
+        // Emphasis that comes from page styles rather than from the tag itself.
+        let mut css = String::new();
+        if let Some(style) = element.style() {
+            let parent_style = element
+                .upcast::<Node>()
+                .GetParentElement()
+                .and_then(|parent| parent.style());
+            let bold = style.get_font().font_weight.is_bold();
+            let parent_bold = parent_style
+                .as_ref()
+                .is_some_and(|parent| parent.get_font().font_weight.is_bold());
+            if bold != parent_bold &&
+                !matches!(
+                    tag,
+                    "b" | "strong" | "th" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+                )
+            {
+                css.push_str(if bold {
+                    "font-weight:bold;"
+                } else {
+                    "font-weight:normal;"
+                });
+            }
+            let normal = style::values::computed::FontStyle::NORMAL;
+            let italic = style.get_font().font_style != normal;
+            let parent_italic = parent_style
+                .as_ref()
+                .is_some_and(|parent| parent.get_font().font_style != normal);
+            if italic && !parent_italic && !matches!(tag, "i" | "em" | "cite" | "var") {
+                css.push_str("font-style:italic;");
+            }
+            let line = style.get_text().text_decoration_line;
+            if line.contains(TextDecorationLine::UNDERLINE) && !matches!(tag, "u" | "ins" | "a") {
+                css.push_str("text-decoration:underline;");
+            } else if line.contains(TextDecorationLine::LINE_THROUGH) &&
+                !matches!(tag, "s" | "strike" | "del")
+            {
+                css.push_str("text-decoration:line-through;");
+            }
+        }
+        if !css.is_empty() {
+            attributes.push(("style", css));
+        }
+
+        out.push('<');
+        out.push_str(tag);
+        for (name, value) in attributes {
+            out.push(' ');
+            out.push_str(name);
+            out.push_str("=\"");
+            escape_html_attribute(&value, out);
+            out.push('"');
+        }
+        out.push('>');
+    }
+}
+
+fn utf16_offset_to_byte_index(text: &str, utf16_offset: u32) -> usize {
+    let mut remaining = utf16_offset as usize;
+    for (index, character) in text.char_indices() {
+        if remaining == 0 {
+            return index;
+        }
+        remaining = remaining.saturating_sub(character.len_utf16());
+    }
+    text.len()
+}
+
+fn escape_html_text(text: &str, out: &mut String) {
+    for character in text.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\u{A0}' => out.push_str("&nbsp;"),
+            _ => out.push(character),
+        }
+    }
+}
+
+fn escape_html_attribute(text: &str, out: &mut String) {
+    for character in text.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(character),
         }
     }
 }

@@ -160,6 +160,9 @@ pub struct Preferences {
     pub dom_crypto_subtle_enabled: bool,
     pub dom_document_dblclick_timeout: i64,
     pub dom_document_dblclick_dist: i64,
+    /// Stillwater, for tests: the default clipboard delegate keeps copied data in memory and
+    /// logs it instead of using the system clipboard.
+    pub dom_clipboard_test_mode: bool,
     // feature: File and Directory Entries API | #45653 | Web/API/File_and_Directory_Entries_API
     pub dom_entries_api_enabled: bool,
     // feature: Document.execCommand | #25005 | Web/API/Document/execCommand
@@ -465,6 +468,7 @@ impl Preferences {
             dom_cookiestore_enabled: false,
             dom_credential_management_enabled: false,
             dom_crypto_subtle_enabled: true,
+            dom_clipboard_test_mode: false,
             dom_document_dblclick_dist: 1,
             dom_document_dblclick_timeout: 300,
             dom_entries_api_enabled: false,

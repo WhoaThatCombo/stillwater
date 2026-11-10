@@ -57,22 +57,58 @@ pub trait ClipboardDelegate {
 
     /// A request to set the text contents of the system clipboard to `new_contents`.
     fn set_text(&self, _webview: WebView, _new_contents: String) {}
+
+    /// A request to set the system clipboard to formatted text: `text` as plain text and
+    /// `html`, an HTML fragment, for applications that paste formatting. The default
+    /// implementation sets only the plain text.
+    fn set_html(&self, webview: WebView, text: String, _html: String) {
+        self.set_text(webview, text);
+    }
 }
 
 pub(crate) struct DefaultClipboardDelegate;
 
 impl ClipboardDelegate for DefaultClipboardDelegate {
     fn clear(&self, _webview: WebView) {
+        if test_mode() {
+            return fallback_clipboard::clear();
+        }
         clipboard::clear();
     }
 
     fn get_text(&self, _webview: WebView, request: StringRequest) {
+        if test_mode() {
+            return fallback_clipboard::get_text(request);
+        }
         clipboard::get_text(request);
     }
 
     fn set_text(&self, _webview: WebView, new_contents: String) {
+        if test_mode() {
+            log::warn!("Stillwater clipboard (test mode) text/plain: {new_contents:?}");
+            fallback_clipboard::set_text(new_contents);
+            return;
+        }
         clipboard::set_text(new_contents);
     }
+
+    fn set_html(&self, _webview: WebView, text: String, html: String) {
+        if test_mode() {
+            log::warn!("Stillwater clipboard (test mode) text/plain: {text:?}");
+            log::warn!("Stillwater clipboard (test mode) text/html: {html:?}");
+            fallback_clipboard::set_text(text);
+            return;
+        }
+        clipboard::set_html(text, html);
+    }
+}
+
+/// Stillwater: with the `dom_clipboard_test_mode` pref, the default delegate never touches
+/// the system clipboard. It keeps the contents in memory (so paste in the same process gets
+/// them back) and logs what would have been written, so automated tests can check copy
+/// without reading or replacing the user's clipboard.
+fn test_mode() -> bool {
+    servo_config::pref!(dom_clipboard_test_mode)
 }
 
 mod fallback_clipboard {
@@ -156,6 +192,12 @@ mod clipboard {
             fallback_clipboard::set_text(new_contents);
         }
     }
+
+    pub(super) fn set_html(text: String, html: String) {
+        if with_shared_clipboard(|clipboard| clipboard.set_html(&html, Some(&text))).is_err() {
+            set_text(text);
+        }
+    }
 }
 
 #[cfg(all(feature = "clipboard", target_env = "ohos"))]
@@ -193,6 +235,10 @@ mod clipboard {
             fallback_clipboard::set_text(new_contents);
         }
     }
+
+    pub(super) fn set_html(text: String, _html: String) {
+        set_text(text);
+    }
 }
 
 #[cfg(any(
@@ -213,5 +259,9 @@ mod clipboard {
 
     pub(super) fn set_text(new_contents: String) {
         fallback_clipboard::set_text(new_contents);
+    }
+
+    pub(super) fn set_html(text: String, _html: String) {
+        fallback_clipboard::set_text(text);
     }
 }
