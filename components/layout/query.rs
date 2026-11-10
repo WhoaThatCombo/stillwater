@@ -55,7 +55,7 @@ use crate::display_list::{ClosestFragmentSearch, StackingContextTree, au_rect_to
 use crate::dom::NodeExt;
 use crate::flow::inline::text_transform::TextTransformationIterator;
 use crate::fragment_tree::{
-    BoxFragment, Fragment, FragmentFlags, FragmentTree, SpecificLayoutInfo,
+    BoxFragment, Fragment, FragmentFlags, FragmentTree, SpecificLayoutInfo, TextFragment,
 };
 use crate::geom::{AuOrAuto, LengthPercentageOrAuto, PhysicalRect, PhysicalSides};
 use crate::layout_impl::LayoutThread;
@@ -228,6 +228,144 @@ pub(crate) fn process_text_range_rect_request(
     let transform =
         root_transform_for_fragments(&stacking_context_tree.paint_info.scroll_tree, &fragments)?;
     transform_au_rectangle(union, transform)
+}
+
+/// Stillwater: the horizontal extent, as advances from the start of `fragment`, of the
+/// characters in `range` (post-transform character offsets, as returned by
+/// `map_dom_range_to_transformed_range`). This is the same walk over the glyphs that paints
+/// the selection.
+pub(crate) fn text_fragment_advances_for_range(
+    fragment: &TextFragment,
+    range: &std::ops::Range<Utf32CodeUnits>,
+) -> (Au, Au) {
+    let mut current_character_index = fragment.character_range_in_dom_node.start;
+    let mut current_advance = Au::zero();
+    let mut start_advance = None;
+    let mut end_advance = None;
+    for glyph_store in fragment.glyphs.iter() {
+        let glyph_store_character_count = glyph_store.character_count();
+        if current_character_index + glyph_store_character_count < range.start {
+            current_advance += glyph_store.total_advance() +
+                (fragment.justification_adjustment * glyph_store.total_word_separators() as i32);
+            current_character_index += glyph_store_character_count;
+            continue;
+        }
+        if current_character_index >= range.end {
+            break;
+        }
+        for glyph in glyph_store.glyphs() {
+            if current_character_index >= range.start {
+                start_advance = start_advance.or(Some(current_advance));
+            }
+            current_character_index += glyph.character_count();
+            current_advance += glyph.advance();
+            if glyph.char_is_word_separator() {
+                current_advance += fragment.justification_adjustment;
+            }
+            if current_character_index <= range.end {
+                end_advance = Some(current_advance);
+            }
+        }
+    }
+    let start = start_advance.unwrap_or(current_advance);
+    let end = end_advance.unwrap_or(current_advance).max(start);
+    (start, end)
+}
+
+/// Stillwater: the rectangles (one per line) of the DOM `char`s in `range` of the text node
+/// `node`, each only as wide as those characters, in the same space as
+/// [`process_box_area_request`]. This is what `Range.getClientRects()` returns for a
+/// partially selected text node; an empty `range` gives a zero-width rectangle at that
+/// position (a caret).
+pub(crate) fn process_text_range_rects_request(
+    layout_thread: &LayoutThread,
+    stacking_context_tree: &StackingContextTree,
+    node: ServoLayoutNode<'_>,
+    range: std::ops::Range<Utf32CodeUnits>,
+) -> Vec<Rect<Au, CSSPixel>> {
+    fn collect(
+        fragment: &Fragment,
+        origin: Point2D<Au, CSSPixel>,
+        target: OpaqueNode,
+        range: &std::ops::Range<Utf32CodeUnits>,
+        rects: &mut Vec<PhysicalRect<Au>>,
+    ) {
+        let Some(children) = fragment.children() else {
+            return;
+        };
+        for child in children.iter() {
+            if let Fragment::Text(text) = child {
+                let is_target = text
+                    .base
+                    .tag
+                    .as_ref()
+                    .is_some_and(|tag| tag.node == target && tag.pseudo_element_chain.is_empty());
+                if !is_target {
+                    continue;
+                }
+                let range = text
+                    .run_data
+                    .map_dom_range_to_transformed_range(range.clone().into());
+                let fragment_range = &text.character_range_in_dom_node;
+                if range.start == range.end {
+                    if range.start < fragment_range.start || range.start > fragment_range.end {
+                        continue;
+                    }
+                } else if range.start >= fragment_range.end || range.end <= fragment_range.start {
+                    continue;
+                }
+                let (start_x, end_x) = text_fragment_advances_for_range(text, &range);
+                let fragment_rect = text.base.rect();
+                let rect = PhysicalRect::new(
+                    Point2D::new(fragment_rect.origin.x + start_x, fragment_rect.origin.y),
+                    Size2D::new(end_x - start_x, fragment_rect.size.height),
+                );
+                rects.push(rect.translate(origin.to_vector()));
+            } else if let Some(base) = child.base() {
+                collect(
+                    child,
+                    origin + base.rect().origin.to_vector(),
+                    target,
+                    range,
+                    rects,
+                );
+            }
+        }
+    }
+
+    // Text fragments are children of the boxes of the nearest flat tree ancestor that has any.
+    let target = node.opaque();
+    let mut ancestor = node;
+    let fragments = loop {
+        #[expect(unsafe_code)]
+        let Some(parent) = (unsafe { ancestor.dangerous_flat_tree_parent_considering_pseudos() })
+        else {
+            return Vec::new();
+        };
+        ancestor = parent;
+        let fragments = ancestor.fragments_for_pseudo(None);
+        if !fragments.is_empty() {
+            break fragments;
+        }
+    };
+
+    let mut rects = Vec::new();
+    for fragment in &fragments {
+        if let Some(content_rect) =
+            fragment.cumulative_box_area_rect(BoxAreaType::Content, layout_thread.into())
+        {
+            collect(fragment, content_rect.origin, target, &range, &mut rects);
+        }
+    }
+    let Some(transform) =
+        root_transform_for_fragments(&stacking_context_tree.paint_info.scroll_tree, &fragments)
+    else {
+        return Vec::new();
+    };
+    rects
+        .into_iter()
+        .filter_map(|rect| transform_au_rectangle(rect, transform))
+        .collect()
 }
 
 pub fn process_client_rect_request(node: ServoLayoutNode<'_>) -> Rect<i32, CSSPixel> {

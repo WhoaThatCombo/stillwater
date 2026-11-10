@@ -4,7 +4,6 @@
 
 use std::cell::LazyCell;
 use std::cmp::Ordering;
-use std::iter;
 use std::rc::Rc;
 
 use app_units::Au;
@@ -13,9 +12,11 @@ use euclid::Rect;
 use js::context::{JSContext, NoGC};
 use js::jsapi::JSTracer;
 use js::rust::HandleObject;
+use layout_api::QueryMsg;
 use script_bindings::cell::DomRefCell;
 use script_bindings::dom::{MutDom, UnrootedDom};
 use script_bindings::reflector::reflect_weak_referenceable_dom_object_with_proto;
+use servo_base::text::Utf16CodeUnits;
 use smallvec::SmallVec;
 use style_traits::CSSPixel;
 
@@ -375,9 +376,13 @@ impl Range {
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-range-getclientrects>
+    ///
+    /// Stillwater: only the range's own rectangles: the border boxes of the elements it
+    /// contains and, for each text node it selects or partially selects, the rectangles of
+    /// the selected characters. Before, a range inside one text node returned the boxes of
+    /// the whole rest of the document, which put selection popups (highlighters,
+    /// translation, "quote reply") in the wrong place.
     fn client_rects(&self, cx: &mut JSContext) -> Vec<Rect<Au, CSSPixel>> {
-        // FIXME: For text nodes that are only partially selected, this should return the client
-        // rect of the selected part, not the whole text node.
         let start = self.start_container();
         let end = self.end_container();
         // > The getClientRects() method, when invoked, must return an empty DOMRectList
@@ -386,35 +391,63 @@ impl Range {
             return vec![];
         }
 
+        let window = start.owner_window();
+        window.layout_reflow(cx, QueryMsg::BoxAreas);
+
         // Per the spec, only Text nodes contribute rects when the range is collapsed
         // (including when the boundary points are identical).
         if self.collapsed() {
-            if start.is::<CharacterData>() {
-                return start.border_boxes(cx);
+            if start.is::<Text>() {
+                let offset = self.start_offset();
+                return text_range_rects(&window, &start, offset, offset);
             } else {
                 return vec![];
             }
         }
 
-        let document = start.owner_doc();
-        let nodes: Vec<DomRoot<Node>> = {
-            let unrooted_end = end.as_unrooted(cx.no_gc());
-            start
-                .following_nodes_unrooted(
-                    cx.no_gc(),
-                    document.upcast::<Node>(),
-                    ShadowIncluding::No,
-                )
-                .take_while(|node| *node != *end)
-                .chain(iter::once(unrooted_end))
-                .map(|node| node.as_rooted())
-                .collect()
-        };
+        let mut rects = Vec::new();
+        self.collect_client_rects(cx, &window, &self.CommonAncestorContainer(), &mut rects);
+        rects
+    }
 
-        nodes
-            .iter()
-            .flat_map(move |node| node.border_boxes(cx))
-            .collect()
+    fn collect_client_rects(
+        &self,
+        cx: &mut JSContext,
+        window: &Window,
+        node: &Node,
+        rects: &mut Vec<Rect<Au, CSSPixel>>,
+    ) {
+        if node.is::<Text>() {
+            let start = if *self.start_container() == *node {
+                self.start_offset()
+            } else {
+                0
+            };
+            let end = if *self.end_container() == *node {
+                self.end_offset()
+            } else {
+                node.len()
+            };
+            if start < end {
+                rects.extend(text_range_rects(window, node, start, end));
+            }
+            return;
+        }
+        if node.is::<Element>() && self.contains(cx.no_gc(), node) {
+            rects.extend(node.border_boxes(cx));
+        }
+        let mut seen_intersecting_child = false;
+        for child in node.children() {
+            if !self.IntersectsNode(cx.no_gc(), &child) {
+                if seen_intersecting_child {
+                    // Children are in tree order: everything after this is past the end.
+                    break;
+                }
+                continue;
+            }
+            seen_intersecting_child = true;
+            self.collect_client_rects(cx, window, &child, rects);
+        }
     }
 
     /// <https://dom.spec.whatwg.org/#concept-range-bp-set>
@@ -1417,9 +1450,15 @@ impl RangeMethods<crate::DomTypeHolder> for Range {
         // Step 3. If all rectangles in list have zero width or height, return the first rectangle in list.
         // Step 4. Otherwise, return a DOMRect object describing the smallest rectangle that includes all
         // of the rectangles in list of which the height or width is not zero.
-        let bounding_rect = list
-            .into_iter()
-            .fold(euclid::Rect::zero(), |acc, rect| acc.union(&rect));
+        let non_empty = || {
+            list.iter()
+                .filter(|rect| rect.size.width != Au(0) && rect.size.height != Au(0))
+        };
+        let bounding_rect = if non_empty().next().is_none() {
+            list.first().copied().unwrap_or_else(euclid::Rect::zero)
+        } else {
+            non_empty().fold(euclid::Rect::zero(), |acc, rect| acc.union(rect))
+        };
 
         DOMRect::new(
             cx,
@@ -1714,4 +1753,43 @@ impl Document {
             }
         });
     }
+}
+
+/// Stillwater: the rectangles of the characters between the UTF-16 offsets `start` and `end`
+/// of the text node `node`.
+fn text_range_rects(window: &Window, node: &Node, start: u32, end: u32) -> Vec<Rect<Au, CSSPixel>> {
+    let Some(character_data) = node.downcast::<CharacterData>() else {
+        return vec![];
+    };
+    let (start, end) = {
+        let data = character_data.data();
+        (
+            Utf16CodeUnits(start).to_utf32_code_units_in(&data),
+            Utf16CodeUnits(end).to_utf32_code_units_in(&data),
+        )
+    };
+    let rects = window
+        .layout()
+        .query_text_range_rects(node.to_trusted_node_address(), start..end);
+    if start == end {
+        // A position at the boundary of two text fragments (a soft line break) touches both;
+        // the caret belongs to the following one, as in other browsers.
+        return rects.last().copied().into_iter().collect();
+    }
+    // Layout has a fragment per run of text, often several on one line: merge the
+    // neighbouring ones so there is a rectangle per line, as in other browsers.
+    let mut merged: Vec<Rect<Au, CSSPixel>> = Vec::with_capacity(rects.len());
+    for rect in rects {
+        if let Some(last) = merged.last_mut() &&
+            (last.origin.y - rect.origin.y).abs() <= Au(30) &&
+            (last.size.height - rect.size.height).abs() <= Au(30) &&
+            rect.origin.x >= last.origin.x &&
+            rect.origin.x <= last.max_x() + Au(60)
+        {
+            *last = last.union(&rect);
+            continue;
+        }
+        merged.push(rect);
+    }
+    merged
 }
