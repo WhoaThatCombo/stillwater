@@ -14,6 +14,12 @@
 //!   wait behind a write.
 //! - Reading an entry leaves it on disk, and an entry is only written again when it changed
 //!   (see `entry_fingerprint`).
+//!
+//! The size limit applies to the files on disk, not to the bodies they hold: the database file
+//! is kept within the limit minus room for the WAL (`file_budget`), counting the pages it really
+//! uses (bodies are rounded up to whole 64 KB pages, b-trees are never completely full). Pages
+//! freed by evictions are reused, and with `auto_vacuum = INCREMENTAL` the ones beyond the budget
+//! are given back to the file system.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -72,8 +78,11 @@ struct WriteProgress {
 const CHECKPOINT_QUIET: Duration = Duration::from_millis(500);
 /// ...or until it has waited this long.
 const CHECKPOINT_MAX_WAIT: Duration = Duration::from_secs(10);
-/// Truncate the WAL once it is fully copied into the file and bigger than this.
-const TRUNCATE_WAL_BYTES: i64 = 4 * 1024 * 1024;
+/// How much of the size limit is left for the WAL (and its index): a sixteenth of it, between
+/// 1 and 4 MB (but at most a quarter). The database file gets the rest.
+fn wal_reserve(max_size: u64) -> u64 {
+    (max_size / 16).clamp(1 << 20, 4 << 20).min(max_size / 4)
+}
 /// Read connections (reads beyond this many at once wait for one; a read takes well under a
 /// millisecond once the page is cached by the OS).
 const READERS: usize = 4;
@@ -144,18 +153,18 @@ impl State {
         self.total = 0;
     }
 
-    /// Remove the oldest entries from the index until the total fits `max_size`; returns
-    /// their keys so their rows can be deleted.
-    fn evict_to(&mut self, max_size: u64) -> Vec<String> {
+    /// Remove the oldest entries from the index, at least one and until they add up to `bytes`;
+    /// returns their keys so their rows can be deleted.
+    fn evict_oldest(&mut self, bytes: u64) -> Vec<String> {
         let mut evicted = vec![];
-        while self.total > max_size {
+        let mut freed = 0;
+        while freed < bytes.max(1) {
             let Some((_, key)) = self.order.pop_first() else {
-                error!("Disk cache size accounting is off by {} bytes", self.total);
-                self.total = 0;
                 break;
             };
             if let Some(entry) = self.index.remove(&key) {
                 self.total -= entry.size;
+                freed += entry.size.max(1);
             }
             evicted.push(key);
         }
@@ -166,7 +175,19 @@ impl State {
 /// What is shared between the cache, its writer thread and its readers.
 struct Shared {
     path: PathBuf,
-    max_size: u64,
+    /// The WAL next to `path`.
+    wal_path: PathBuf,
+    /// What the database file may take (the size limit minus `wal_reserve`).
+    file_budget: u64,
+    /// The WAL is checkpointed and truncated by the writer itself once it is bigger than this.
+    wal_reserve: u64,
+    /// Entries bigger than this (an eighth of the limit) are not stored: one transaction's
+    /// worth of pages sits in the WAL on top of the file until it is checkpointed.
+    max_entry: u64,
+    page_size: u64,
+    /// Held while checkpointing: SQLite fails a checkpoint at once (it doesn't wait) while
+    /// another connection runs one.
+    checkpointing: Mutex<()>,
     state: Mutex<State>,
     readers: Mutex<Readers>,
     /// Signalled when a read connection is returned to `readers`.
@@ -242,16 +263,63 @@ fn open_reader(path: &Path) -> rusqlite::Result<Connection> {
     Ok(connection)
 }
 
-fn open_writer(path: &Path) -> rusqlite::Result<Connection> {
-    let connection = open_reader(path)?;
+/// The file next to the cache file whose name ends in `suffix` ("-wal", "-shm").
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    name.into()
+}
+
+/// Delete a cache file and its WAL. Fails (leaving the files as they were, or at least
+/// consistent) if another connection has them open.
+fn remove_cache_files(path: &Path) -> std::io::Result<()> {
+    let remove = |path: &Path| match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    };
+    // Closing the last connection copied the WAL into the file and deleted it, so the file
+    // goes first: if it can't be deleted the WAL (if any) is still there to go with it.
+    remove(path)?;
+    remove(&sibling(path, "-wal"))?;
+    remove(&sibling(path, "-shm"))?;
+    remove(&sibling(path, "-journal"))
+}
+
+fn open_writer(path: &Path, wal_limit: u64) -> rusqlite::Result<Connection> {
+    let mut connection = open_reader(path)?;
+    // A cache file from before `auto_vacuum` (0.8.4 and earlier) never gets smaller: the pages
+    // of deleted entries stay in it. Turning `auto_vacuum` on means rewriting the whole file
+    // (VACUUM), seconds of disk work, so such a file is started afresh instead.
+    let tables: i64 =
+        connection.query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))?;
+    let auto_vacuum: i64 = connection.query_row("PRAGMA auto_vacuum", [], |row| row.get(0))?;
+    if tables > 0 && auto_vacuum != 2 {
+        drop(connection);
+        match remove_cache_files(path) {
+            Ok(()) => info!("Replaced a disk cache file from an older version"),
+            Err(error) => error!("Could not replace an old disk cache file: {error}"),
+        }
+        // A WAL left over without its file would be applied to the new file.
+        if !path.exists() && sibling(path, "-wal").exists() {
+            return Err(rusqlite::Error::InvalidPath(path.to_owned()));
+        }
+        connection = open_reader(path)?;
+    }
     // Bodies are stored in pages of this size, read one at a time: with SQLite's default
     // 4 KB, a 10 MB script is 2500 reads, seconds on a USB hard drive. Only applies when the
-    // file is created (an existing cache keeps its page size).
+    // file is created (an existing cache keeps its page size), as does `auto_vacuum`.
     connection.pragma_update(None, "page_size", 65536)?;
+    connection.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
     connection.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
     // With WAL, NORMAL only risks losing the last writes on power loss, never corruption.
     connection.pragma_update(None, "synchronous", "NORMAL")?;
-    connection.query_row("PRAGMA journal_size_limit = 16777216", [], |_| Ok(()))?;
+    // A WAL that grew (a big write while a checkpoint waited) shrinks back to this when it is
+    // next reused.
+    connection.query_row(
+        &format!("PRAGMA journal_size_limit = {wal_limit}"),
+        [],
+        |_| Ok(()),
+    )?;
     // Checkpoints (copying the WAL into the file, with fsyncs) take seconds on a slow disk:
     // they run on their own thread (`run_checkpointer`) so writes don't wait for them.
     connection.query_row("PRAGMA wal_autocheckpoint = 0", [], |_| Ok(()))?;
@@ -268,9 +336,6 @@ fn run_checkpointer(shared: Arc<Shared>, written: Receiver<()>) {
     let Ok(connection) = open_reader(&shared.path) else {
         return;
     };
-    let page_size: i64 = connection
-        .query_row("PRAGMA page_size", [], |row| row.get(0))
-        .unwrap_or(4096);
     while written.recv().is_ok() {
         let waiting_since = Instant::now();
         loop {
@@ -281,15 +346,16 @@ fn run_checkpointer(shared: Arc<Shared>, written: Receiver<()>) {
             std::thread::sleep((CHECKPOINT_QUIET - quiet).min(Duration::from_millis(100)));
         }
         while written.try_recv().is_ok() {}
+        let _checkpointing = shared.checkpointing.lock();
         let start = Instant::now();
         let result = connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
             Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
         });
         match result {
             Ok((frames, done)) => {
-                // Everything is in the file: give a big WAL's space back (this only waits
+                // Everything is in the file: give the WAL's space back (this only waits
                 // for a write or read in progress).
-                if frames == done && frames * page_size > TRUNCATE_WAL_BYTES {
+                if frames == done && shared.wal_bytes() > shared.wal_reserve / 2 {
                     let _ = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
                 }
                 info!(
@@ -370,13 +436,15 @@ impl DiskCache {
             return (None, MemoryCacheLifecycle::empty());
         };
         let max_size: u64 = pref!(network_http_disk_cache_size);
+        let wal_reserve = wal_reserve(max_size);
         let start = Instant::now();
-        let opened = open_writer(&path).and_then(|mut connection| {
+        let opened = open_writer(&path, wal_reserve).and_then(|mut connection| {
             sync_metadata(&mut connection)?;
             let state = load_index(&connection)?;
-            Ok((connection, state))
+            let page_size: u64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+            Ok((connection, state, page_size))
         });
-        let (connection, state) = match opened {
+        let (connection, state, page_size) = match opened {
             Ok(opened) => opened,
             Err(error) => {
                 error!("Could not open the disk cache: {error}");
@@ -398,8 +466,13 @@ impl DiskCache {
             idle,
         };
         let shared = Arc::new(Shared {
+            wal_path: sibling(&path, "-wal"),
             path,
-            max_size,
+            file_budget: max_size - wal_reserve,
+            wal_reserve,
+            max_entry: max_size / 8,
+            page_size,
+            checkpointing: Mutex::new(()),
             state: Mutex::new(state),
             readers: Mutex::new(readers),
             reader_returned: Condvar::new(),
@@ -681,17 +754,93 @@ impl Shared {
                 }
             }
             progress = self.write_some(&mut connection);
+            self.limit_wal(&connection, 0);
             let _ = checkpoint.send(());
         }
     }
 
+    fn wal_bytes(&self) -> u64 {
+        std::fs::metadata(&self.wal_path).map_or(0, |metadata| metadata.len())
+    }
+
+    /// While writes keep coming the checkpointer can't catch up with them (or waits for reads
+    /// to pause), and the WAL keeps growing: when it would grow past `wal_reserve` with
+    /// `incoming` more bytes, copy it into the file and truncate it here, between two writes.
+    /// Reads go on meanwhile; queued writes wait.
+    fn limit_wal(&self, connection: &Connection, incoming: u64) {
+        let wal = self.wal_bytes();
+        if wal == 0 || wal.saturating_add(incoming) <= self.wal_reserve {
+            return;
+        }
+        let start = Instant::now();
+        let _checkpointing = self.checkpointing.lock();
+        let busy = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            row.get::<_, i64>(0)
+        });
+        info!(
+            target: "cache_timing",
+            "disk writer checkpoint: {} us, busy {busy:?}, WAL now {} bytes",
+            start.elapsed().as_micros(),
+            self.wal_bytes()
+        );
+    }
+
+    /// Evict the oldest entries until the database file has `room` bytes free within `budget`
+    /// (normally `file_budget`), counting the pages it really uses; then give pages beyond the
+    /// budget back to the file system. Returns how many entries were evicted.
+    fn make_room(
+        &self,
+        connection: &Connection,
+        room: u64,
+        budget: u64,
+    ) -> rusqlite::Result<usize> {
+        let budget = budget / self.page_size;
+        let needed = room.div_ceil(self.page_size);
+        let mut evicted = 0;
+        loop {
+            let (pages, free) = connection.query_row(
+                "SELECT * FROM pragma_page_count(), pragma_freelist_count()",
+                [],
+                |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
+            )?;
+            let used = pages.saturating_sub(free);
+            let keys = if used + needed > budget {
+                self.state
+                    .lock()
+                    .evict_oldest((used + needed - budget) * self.page_size)
+            } else {
+                vec![]
+            };
+            if keys.is_empty() {
+                if pages > budget {
+                    // Moves pages in use from the end of the file into free ones, then
+                    // truncates: as much work as the file outgrew its budget by.
+                    let mut statement = connection
+                        .prepare(&format!("PRAGMA incremental_vacuum({})", pages - budget))?;
+                    let mut rows = statement.query([])?;
+                    while rows.next()?.is_some() {}
+                }
+                return Ok(evicted);
+            }
+            evicted += keys.len();
+            delete_rows(connection, &keys)?;
+        }
+    }
+
     fn clear_disk(&self, connection: &Connection) {
-        if let Err(error) =
-            connection.execute_batch("DELETE FROM disk_cache; DELETE FROM disk_cache_meta;")
-        {
+        self.state.lock().clear_index();
+        let result = connection
+            .execute_batch("DELETE FROM disk_cache; DELETE FROM disk_cache_meta;")
+            .and_then(|_| {
+                // Every page is free now: truncate the file.
+                let mut statement = connection.prepare("PRAGMA incremental_vacuum")?;
+                let mut rows = statement.query([])?;
+                while rows.next()?.is_some() {}
+                Ok(())
+            });
+        if let Err(error) = result {
             error!("Could not clear the disk cache: {error}");
         }
-        self.state.lock().clear_index();
     }
 
     /// Write one transaction's worth of the queued entries, smallest first: on a slow disk
@@ -763,7 +912,18 @@ impl Shared {
         enum Outcome {
             /// Nothing to write: the disk has this version, or nothing in it is complete.
             Unchanged,
-            Stored { size: u64, seq: u64, fingerprint: u64 },
+            /// Serialized, to be written.
+            Write {
+                data: Vec<u8>,
+                fingerprint: u64,
+            },
+            /// Too big to keep: delete what the disk has.
+            Remove,
+            Stored {
+                size: u64,
+                seq: u64,
+                fingerprint: u64,
+            },
             Removed,
             /// Locked by a fetch; try again later.
             Busy,
@@ -773,18 +933,12 @@ impl Shared {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_secs())
             .unwrap_or(0) as i64;
-        let transaction = match connection.transaction() {
-            Ok(transaction) => transaction,
-            Err(error) => {
-                error!("Could not write to the disk cache: {error}");
-                self.forget_pending(chunk);
-                return (0, false);
-            },
-        };
-        let mut outcomes = Vec::with_capacity(chunk.len());
-        for (key, entry, _, age) in chunk {
+        // Serialize first, to know how much room to make before writing.
+        let mut room = 0;
+        let mut prepared = Vec::with_capacity(chunk.len());
+        for (key, entry, _, _) in chunk {
             let Ok(resources) = entry.try_read() else {
-                outcomes.push(Outcome::Busy);
+                prepared.push(Outcome::Busy);
                 continue;
             };
             let fingerprint = entry_fingerprint(&resources);
@@ -799,7 +953,7 @@ impl Shared {
                 .get(key)
                 .is_some_and(|stored| stored.fingerprint == fingerprint);
             if complete.is_empty() || unchanged {
-                outcomes.push(Outcome::Unchanged);
+                prepared.push(Outcome::Unchanged);
                 continue;
             }
             // Size the buffer exactly: growing it while serializing briefly needs up to twice
@@ -813,59 +967,122 @@ impl Shared {
             drop(resources);
             let Ok(data) = data else {
                 error!("Could not serialize a cache entry");
-                outcomes.push(Outcome::Unchanged);
+                prepared.push(Outcome::Unchanged);
                 continue;
             };
-            let size = data.len() as u64;
-            let result = if size > self.max_size {
-                transaction
+            if data.len() as u64 > self.max_entry {
+                prepared.push(Outcome::Remove);
+                continue;
+            }
+            room += self.disk_bytes(data.len() + key.len());
+            prepared.push(Outcome::Write { data, fingerprint });
+        }
+
+        // Make room in the WAL too, so that the file and the WAL together stay within the
+        // limit, also while the WAL is copied into the file (which grows before the WAL is
+        // truncated). Besides the rows, a transaction writes a few b-tree, free list and
+        // pointer map pages. When that is more than `wal_reserve`, the file must shrink by
+        // the difference before writing, and stay that small until the next checkpoint.
+        let wal_room = if room > 0 {
+            room + (16 * self.page_size).min(self.wal_reserve / 4)
+        } else {
+            0
+        };
+        let budget = self
+            .file_budget
+            .saturating_sub(wal_room.saturating_sub(self.wal_reserve));
+        // Shrinking moves pages from the end of the file into free ones, through the WAL: in
+        // steps of half the reserve, each checkpointed before the next.
+        let mut step = self.file_budget;
+        while step > budget {
+            step = step.saturating_sub(self.wal_reserve / 2).max(budget);
+            let result = write_transaction(connection).and_then(|transaction| {
+                let evicted = self.make_room(&transaction, 0, step)?;
+                transaction.commit()?;
+                Ok(evicted)
+            });
+            if let Err(error) = result {
+                error!("Could not evict from the disk cache: {error}");
+                break;
+            }
+            self.limit_wal(connection, u64::MAX);
+        }
+        self.limit_wal(connection, wal_room);
+        let transaction = match write_transaction(connection) {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                error!("Could not write to the disk cache: {error}");
+                self.forget_pending(chunk);
+                return (0, false);
+            },
+        };
+        // Evict first, so the new rows take the pages of the old ones instead of growing the
+        // file (a b-tree page split or two may still need a new page: hence the margin).
+        let mut evicted = 0;
+        if room > 0 {
+            match self.make_room(&transaction, room + 2 * self.page_size, budget) {
+                Ok(count) => evicted += count,
+                Err(error) => {
+                    error!("Could not evict from the disk cache: {error}");
+                    self.forget_pending(chunk);
+                    return (0, false);
+                },
+            }
+        }
+        let mut outcomes = Vec::with_capacity(chunk.len());
+        for ((key, _, _, age), outcome) in chunk.iter().zip(prepared) {
+            let result = match outcome {
+                Outcome::Remove => transaction
                     .execute("DELETE FROM disk_cache WHERE key = ?1", [key])
                     .and_then(|_| {
                         transaction.execute("DELETE FROM disk_cache_meta WHERE key = ?1", [key])
                     })
-                    .map(|_| Outcome::Removed)
-            } else {
-                // Entries age from when they were last stored or used, not from when the
-                // writer got to them.
-                let seq = *age;
-                transaction
-                    .prepare_cached(
-                        "INSERT INTO disk_cache (key, data, size, insertion_timestamp)
+                    .map(|_| Outcome::Removed),
+                Outcome::Write { data, fingerprint } => {
+                    let size = data.len() as u64;
+                    // Entries age from when they were last stored or used, not from when the
+                    // writer got to them.
+                    let seq = *age;
+                    transaction
+                        .prepare_cached(
+                            "INSERT INTO disk_cache (key, data, size, insertion_timestamp)
                             VALUES (?1, ?2, ?3, ?4)
                             ON CONFLICT(key) DO UPDATE SET data = excluded.data,
                                 size = excluded.size,
                                 insertion_timestamp = excluded.insertion_timestamp",
-                    )
-                    .and_then(|mut statement| {
-                        statement.execute(params![key, data, size as i64, timestamp])
-                    })
-                    .and_then(|_| {
-                        transaction
-                            .prepare_cached(
-                                "INSERT INTO disk_cache_meta (key, size, seq, fingerprint)
+                        )
+                        .and_then(|mut statement| {
+                            statement.execute(params![key, data, size as i64, timestamp])
+                        })
+                        .and_then(|_| {
+                            transaction
+                                .prepare_cached(
+                                    "INSERT INTO disk_cache_meta (key, size, seq, fingerprint)
                                     VALUES (?1, ?2, ?3, ?4)
                                     ON CONFLICT(key) DO UPDATE SET size = excluded.size,
                                         seq = excluded.seq, fingerprint = excluded.fingerprint",
-                            )?
-                            .execute(params![key, size as i64, seq as i64, fingerprint as i64])
-                    })
-                    .map(|_| Outcome::Stored {
-                        size,
-                        seq,
-                        fingerprint,
-                    })
+                                )?
+                                .execute(params![key, size as i64, seq as i64, fingerprint as i64])
+                        })
+                        .map(|_| Outcome::Stored {
+                            size,
+                            seq,
+                            fingerprint,
+                        })
+                },
+                other => Ok(other),
             };
             outcomes.push(result.unwrap_or_else(|error| {
                 error!("Could not write a cache entry: {error}");
                 Outcome::Unchanged
             }));
         }
-        // Update the index and delete the oldest entries in the same transaction, so the
-        // file never holds more than the size limit. (Until the commit, lookups of these
-        // entries are answered from `pending`.)
+        // Update the index, then check the file against its budget in the same transaction
+        // (evicting more if the estimate fell short), so it never holds more. (Until the
+        // commit, lookups of these entries are answered from `pending`.)
         let mut written = 0;
         let mut busy = false;
-        let evicted = {
+        {
             let mut state = self.state.lock();
             for ((key, ..), outcome) in chunk.iter().zip(&outcomes) {
                 match *outcome {
@@ -879,14 +1096,15 @@ impl Shared {
                     },
                     Outcome::Removed => state.remove(key),
                     Outcome::Busy => busy = true,
-                    Outcome::Unchanged => {},
+                    _ => {},
                 }
             }
-            state.evict_to(self.max_size)
-        };
-        let deleted = delete_rows(&transaction, &evicted);
+        }
+        let fitted = self
+            .make_room(&transaction, 0, budget)
+            .map(|count| evicted += count);
         let commit_start = Instant::now();
-        if let Err(error) = deleted.and_then(|_| transaction.commit()) {
+        if let Err(error) = fitted.and_then(|_| transaction.commit()) {
             error!("Could not write to the disk cache: {error}");
             self.forget_pending(chunk);
             return (0, false);
@@ -895,7 +1113,7 @@ impl Shared {
             target: "cache_timing",
             "disk commit: {} entries, {} evicted, {} us",
             chunk.len(),
-            evicted.len(),
+            evicted,
             commit_start.elapsed().as_micros()
         );
 
@@ -927,22 +1145,41 @@ impl Shared {
         }
     }
 
-    /// Delete the oldest entries until the cache fits its size limit (when the limit was
-    /// lowered, or an older version left the cache over it).
+    /// Delete the oldest entries until the file fits its budget, and truncate it (when the
+    /// limit was lowered).
     fn trim(&self, connection: &mut Connection) {
-        let evicted = self.state.lock().evict_to(self.max_size);
-        if evicted.is_empty() {
-            return;
-        }
-        let result = connection.transaction().and_then(|transaction| {
-            delete_rows(&transaction, &evicted)?;
-            transaction.commit()
+        let start = Instant::now();
+        let result = write_transaction(connection).and_then(|transaction| {
+            let evicted = self.make_room(&transaction, 0, self.file_budget)?;
+            transaction.commit()?;
+            Ok(evicted)
         });
-        if let Err(error) = result {
-            error!("Could not delete old disk cache entries: {error}");
+        match result {
+            Ok(evicted) => info!(
+                target: "cache_timing",
+                "disk trim: {evicted} entries deleted, {} us",
+                start.elapsed().as_micros()
+            ),
+            Err(error) => error!("Could not delete old disk cache entries: {error}"),
         }
-        info!(target: "cache_timing", "disk trim: {} entries deleted", evicted.len());
     }
+
+    /// Roughly what a row of `bytes` takes in the file: a row too big for a quarter of a page
+    /// keeps a part in its b-tree page and the rest in whole overflow pages.
+    fn disk_bytes(&self, bytes: usize) -> u64 {
+        let bytes = bytes as u64 + 32;
+        if bytes > self.page_size / 4 {
+            bytes.div_ceil(self.page_size - 4) * self.page_size
+        } else {
+            bytes
+        }
+    }
+}
+
+/// A transaction that takes the write lock when it begins (waiting for a checkpoint that holds
+/// it): one that reads first, as `make_room` does, fails at once if it has to wait to write.
+fn write_transaction(connection: &mut Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
 }
 
 fn delete_rows(connection: &Connection, keys: &[String]) -> rusqlite::Result<()> {
