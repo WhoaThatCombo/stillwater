@@ -403,7 +403,15 @@ impl DiskCache {
     pub(crate) async fn get(&self, key: CacheKey) -> Option<CacheEntry> {
         let key = key.as_ref().to_owned();
         {
+            let lock_start = Instant::now();
             let state = self.shared.state.lock();
+            if lock_start.elapsed() > Duration::from_millis(1) {
+                info!(
+                    target: "cache_timing",
+                    "disk index lock waited {} us",
+                    lock_start.elapsed().as_micros()
+                );
+            }
             if let Some((entry, _)) = state.pending.get(&key) {
                 return Some(entry.clone());
             }
@@ -512,6 +520,7 @@ impl Shared {
         let _span = profile_traits::trace_span!("query disk cache").entered();
         let start = Instant::now();
         let connection = self.take_reader()?;
+        let got_connection = start.elapsed().as_micros();
         let bytes = connection
             .prepare_cached("SELECT data FROM disk_cache WHERE key = ?1")
             .and_then(|mut statement| {
@@ -520,6 +529,7 @@ impl Shared {
                     .optional()
             });
         self.return_reader(connection);
+        let queried = start.elapsed().as_micros();
         let bytes = match bytes {
             Ok(bytes) => bytes?,
             Err(error) => {
@@ -533,7 +543,9 @@ impl Shared {
             error!("Could not deserialize cached resource");
             return None;
         };
+        let size = bytes.len();
         drop(bytes);
+        let deserialized = start.elapsed().as_micros();
         {
             let mut state = self.state.lock();
             state.touch(key);
@@ -547,7 +559,8 @@ impl Shared {
         }
         info!(
             target: "cache_timing",
-            "disk read {}us {key}",
+            "disk read {}us (connection {got_connection}, query {queried}, deserialize \
+             {deserialized}) {size} bytes {key}",
             start.elapsed().as_micros()
         );
         Some(std::sync::Arc::new(TokioRwLock::new(resources)))
