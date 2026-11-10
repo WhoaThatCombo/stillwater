@@ -69,6 +69,49 @@ pub(crate) fn is_settings_url(url: &Url) -> bool {
 }
 const SIDEBAR_URL: &str = "servo:sidebar/index.html";
 
+/// A tab stops showing as loading after this long even without a load event (e.g. a
+/// navigation that answered 204 No Content and so never completes).
+const LOADING_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+thread_local! {
+    /// Tabs with a page load in flight, from the moment it was asked for: Servo reports
+    /// `LoadStatus::Started` only once the response arrives (with `Complete` right behind on
+    /// fast pages), so it can't drive the tab's loading indicator by itself.
+    static NAVIGATING: RefCell<HashMap<WebViewId, std::time::Instant>> = RefCell::new(HashMap::new());
+}
+
+/// A page load started or was asked for in `webview` (a link, the address bar, reload).
+pub(crate) fn navigation_started(webview: WebViewId) {
+    NAVIGATING.with(|map| map.borrow_mut().insert(webview, std::time::Instant::now()));
+}
+
+/// Whether going to `target` only jumps to a `#fragment` of the page showing (`current`),
+/// which loads nothing and so never completes.
+pub(crate) fn is_same_document(current: Option<Url>, target: &Url) -> bool {
+    target.fragment().is_some() &&
+        current.is_some_and(|mut current| {
+            let mut target = target.clone();
+            current.set_fragment(None);
+            target.set_fragment(None);
+            current == target
+        })
+}
+
+/// `webview`'s load finished, failed, became a download, or the tab closed.
+pub(crate) fn navigation_finished(webview: WebViewId) {
+    NAVIGATING.with(|map| map.borrow_mut().remove(&webview));
+}
+
+/// Whether `webview` is loading a page, for the tab's loading indicator.
+fn is_navigating(webview: &WebView) -> bool {
+    let pending = NAVIGATING.with(|map| {
+        map.borrow()
+            .get(&webview.id())
+            .is_some_and(|started| started.elapsed() < LOADING_LIMIT)
+    });
+    pending || matches!(webview.load_status(), LoadStatus::Started | LoadStatus::HeadParsed)
+}
+
 /// Window operations requested by the sidebar's own caption buttons.
 #[derive(Clone, Debug)]
 pub(crate) enum WindowAction {
@@ -617,6 +660,12 @@ impl Sidebar {
 
     /// Move keyboard focus between the sidebar and the active web content.
     pub(crate) fn set_focused(&self, focused: bool, window: &ServoShellWindow) {
+        // Unfocusing the sidebar's WebView doesn't blur the element focused inside it, so the
+        // address bar would keep its edited text and stop following the page. Done even if
+        // Rust thought the sidebar unfocused already: the page can focus its field by itself.
+        if !focused {
+            self.call("leaveUrl()");
+        }
         if self.focused.replace(focused) == focused {
             return;
         }
@@ -783,7 +832,15 @@ impl Sidebar {
                         .unwrap_or_else(|| argument.to_owned());
                     match (&self.pane_focus, url::Url::parse(&target)) {
                         (Some(pane), Ok(url)) => pane.load(url),
-                        _ => window.queue_user_interface_command(UserInterfaceCommand::Go(target)),
+                        _ => {
+                            if let Some(active) = window.active_webview() &&
+                                let Ok(url) = url::Url::parse(&target) &&
+                                !is_same_document(active.url(), &url)
+                            {
+                                navigation_started(active.id());
+                            }
+                            window.queue_user_interface_command(UserInterfaceCommand::Go(target))
+                        },
                     }
                     self.set_focused(false, window);
                 },
@@ -802,7 +859,12 @@ impl Sidebar {
                 },
                 "reload" => match &self.pane_focus {
                     Some(pane) => pane.reload(),
-                    None => window.queue_user_interface_command(UserInterfaceCommand::Reload),
+                    None => {
+                        if let Some(active) = window.active_webview() {
+                            navigation_started(active.id());
+                        }
+                        window.queue_user_interface_command(UserInterfaceCommand::Reload)
+                    },
                 },
                 // Open a tab in split view (the tab moves there) or a pinned tab's page.
                 "split-tab" if self.unloaded_tab(argument).is_some() => {
@@ -1104,7 +1166,7 @@ impl Sidebar {
                         "title": self.workspaces.custom_title(id).cloned().or_else(|| webview.page_title()).unwrap_or_default(),
                         "url": webview.url().map(|url| url.to_string()).unwrap_or_default(),
                         "active": Some(id) == active_id,
-                        "loading": matches!(webview.load_status(), LoadStatus::Started | LoadStatus::HeadParsed),
+                        "loading": is_navigating(webview),
                         "favicon": self.favicons.get(&id),
                         "loaded": true,
                         "playing": self.playing_media.contains(&id),

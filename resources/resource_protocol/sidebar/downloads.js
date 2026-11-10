@@ -175,10 +175,8 @@
 
   function openPanel() {
     confirmOpen = null;
-    // Shown instead of settings (Ctrl+J can open it from anywhere).
-    const settings = $("settings");
-    if (settings) settings.hidden = true;
-    panel.hidden = false;
+    // In place of any other panel (Ctrl+J can open it from anywhere).
+    showPanel("downloads");
     send("dl-refresh");
     render();
   }
@@ -187,6 +185,7 @@
     panel.hidden = true;
     confirmOpen = null;
   }
+  panelClosers.downloads = closePanel;
 
   // Render after the rest of the sidebar whenever the state changes.
   const setState = window.sidebar.setState;

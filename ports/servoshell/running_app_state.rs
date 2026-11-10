@@ -913,6 +913,8 @@ impl WebViewDelegate for RunningAppState {
         // scriptlets ready before its document is created. Dropping load lets it proceed.
         #[cfg(not(any(target_os = "android", target_env = "ohos")))]
         if load.request.is_for_main_frame {
+            // The tab shows as loading from now until the page completes.
+            crate::desktop::sidebar::navigation_started(webview.id());
             self.adblock
                 .borrow_mut()
                 .on_main_frame_request(webview.id(), load.request.url.as_url());
@@ -936,6 +938,14 @@ impl WebViewDelegate for RunningAppState {
         {
             request.deny();
             return;
+        }
+        // A link or script navigation: show the tab as loading right away.
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        {
+            if !crate::desktop::sidebar::is_same_document(webview.url(), &request.url) {
+                crate::desktop::sidebar::navigation_started(webview.id());
+                self.window_for_webview(&webview).set_needs_update();
+            }
         }
         request.allow();
     }
@@ -1013,6 +1023,8 @@ impl WebViewDelegate for RunningAppState {
                 request.cancel();
                 return;
             }
+            // A link that turned out to be a file: the tab's page doesn't change.
+            crate::desktop::sidebar::navigation_finished(webview.id());
             self.downloads.borrow_mut().start(request);
             self.window_for_webview(&webview).set_needs_update();
         }
@@ -1068,6 +1080,8 @@ impl WebViewDelegate for RunningAppState {
 
     fn notify_closed(&self, webview: WebView) {
         let webview_id = webview.id();
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        crate::desktop::sidebar::navigation_finished(webview_id);
         self.playing_media.borrow_mut().remove(&webview_id);
         self.render_caches_stale.set(true);
         self.schedule_idle_gc();
@@ -1108,6 +1122,10 @@ impl WebViewDelegate for RunningAppState {
         }
         #[cfg(not(any(target_os = "android", target_env = "ohos")))]
         self.translation.borrow_mut().on_load(&webview, status);
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        if matches!(status, LoadStatus::Complete | LoadStatus::Stopped) {
+            crate::desktop::sidebar::navigation_finished(webview.id());
+        }
         if status == LoadStatus::Complete {
             self.schedule_idle_gc();
             #[cfg(not(any(target_os = "android", target_env = "ohos")))]

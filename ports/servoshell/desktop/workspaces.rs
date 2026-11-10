@@ -251,37 +251,45 @@ impl Workspaces {
         self
     }
 
-    /// Turn spaces on or off. Turning them off merges every space into the first, so no tab,
-    /// pinned tab or folder is lost.
+    /// Turn spaces on or off. Nothing is merged or deleted: with spaces off, every space's
+    /// tabs, pinned tabs and folders show in one list (new ones go to the first space), and
+    /// turning spaces back on shows each in its own space again.
     pub(crate) fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
-        if enabled || self.list.len() <= 1 {
-            return;
+        if !enabled {
+            self.current = self.list[0].id;
         }
-        let main = self.list[0].id;
-        let active = self.last_active.get(&self.current).copied();
-        let session_active = self.session_active.get(&self.current).copied();
-        for space in self.tab_workspace.values_mut() {
-            *space = main;
+    }
+
+    /// Whether the sidebar lists `space`'s tabs: the current space's, or every space's while
+    /// spaces are off. Essentials are never in the tab list.
+    fn in_view(&self, space: u32) -> bool {
+        if self.enabled {
+            space == self.current
+        } else {
+            space != ESSENTIALS
         }
-        for pin in &mut self.pins {
-            if pin.space != ESSENTIALS {
-                pin.space = main;
-            }
+    }
+
+    /// The tabs the sidebar lists (open and unloaded), in sidebar order.
+    fn view_entries(&self, window: &ServoShellWindow) -> Vec<TabEntry> {
+        if self.enabled {
+            return self.entries_in(window, self.current);
         }
-        for folder in &mut self.folders {
-            folder.space = main;
-        }
-        for tab in self.unloaded.iter_mut().chain(self.closed.iter_mut()) {
-            tab.space = main;
-        }
-        self.last_active.clear();
-        self.last_active.extend(active.map(|tab| (main, tab)));
-        self.session_active.clear();
-        self.session_active.extend(session_active.map(|tab| (main, tab)));
-        self.list.truncate(1);
-        self.current = main;
-        self.save();
+        let mut entries: Vec<(u64, TabEntry)> = window
+            .webview_ids()
+            .into_iter()
+            .filter(|id| self.tab_workspace.get(id).is_some_and(|space| self.in_view(*space)))
+            .map(|id| (self.order_of(id), TabEntry::Live(id)))
+            .collect();
+        entries.extend(
+            self.unloaded
+                .iter()
+                .filter(|tab| self.in_view(tab.space))
+                .map(|tab| (tab.order, TabEntry::Unloaded(tab.key))),
+        );
+        entries.sort_by_key(|(order, _)| *order);
+        entries.into_iter().map(|(_, entry)| entry).collect()
     }
 
     fn save(&self) {
@@ -426,6 +434,14 @@ impl Workspaces {
         if let Some(active) = window.active_webview().map(|webview| webview.id()) {
             self.last_used.insert(active, now);
             let workspace = self.tab_workspace[&active];
+            if !self.enabled {
+                // One list: stay in the first space, but remember each space's active tab
+                // for when spaces are turned back on.
+                if workspace != ESSENTIALS {
+                    self.last_active.insert(workspace, active);
+                }
+                return;
+            }
             // Essentials belong to every space, so they never switch spaces.
             if workspace != self.current && workspace != ESSENTIALS && !self.awaiting_new_tab {
                 self.current = workspace;
@@ -447,8 +463,12 @@ impl Workspaces {
         if window.active_webview().map(|webview| webview.id()) == Some(id) {
             let workspace = self.tab_workspace.get(&id).copied().unwrap_or(self.current);
             let workspace = if workspace == ESSENTIALS { self.current } else { workspace };
-            let siblings: Vec<_> = self
-                .entries_in(window, workspace)
+            let entries = if self.enabled {
+                self.entries_in(window, workspace)
+            } else {
+                self.view_entries(window)
+            };
+            let siblings: Vec<_> = entries
                 .into_iter()
                 .filter(|other| *other != TabEntry::Live(id))
                 .collect();
@@ -462,7 +482,7 @@ impl Workspaces {
 
     /// Activate the `index`-th tab of the current workspace (`usize::MAX` = last).
     pub(crate) fn activate_tab_index(&mut self, window: &ServoShellWindow, index: usize) {
-        let tabs = self.entries_in(window, self.current);
+        let tabs = self.view_entries(window);
         let tab = if index == usize::MAX { tabs.last() } else { tabs.get(index) };
         if let Some(tab) = tab.copied() {
             self.activate_entry(window, tab);
@@ -471,7 +491,7 @@ impl Workspaces {
 
     /// Activate the next (`delta` = 1) or previous (`delta` = -1) tab in the current workspace.
     pub(crate) fn cycle_tab(&mut self, window: &ServoShellWindow, delta: isize) {
-        let tabs = self.entries_in(window, self.current);
+        let tabs = self.view_entries(window);
         let Some(active) = window.active_webview().map(|webview| webview.id()) else {
             return;
         };
@@ -482,7 +502,7 @@ impl Workspaces {
     }
 
     pub(crate) fn switch_to(&mut self, window: &ServoShellWindow, workspace: u32) {
-        if workspace == self.current || self.get_mut(workspace).is_none() {
+        if !self.enabled || workspace == self.current || self.get_mut(workspace).is_none() {
             return;
         }
         self.current = workspace;
@@ -632,7 +652,7 @@ impl Workspaces {
 
     /// The current space's ordinary (unpinned) tabs, open or unloaded, in sidebar order.
     pub(crate) fn regular_entries(&self, window: &ServoShellWindow) -> Vec<TabEntry> {
-        self.entries_in(window, self.current)
+        self.view_entries(window)
             .into_iter()
             .filter(|entry| match entry {
                 TabEntry::Live(id) => self.pin_for_webview(*id).is_none(),
@@ -814,11 +834,20 @@ impl Workspaces {
 
     /// Put a pinned tab in a folder (`None` = take it out).
     pub(crate) fn move_pin_to_folder(&mut self, pin_id: u32, folder: Option<u32>) {
-        let folder = folder.filter(|id| self.folders.iter().any(|folder| folder.id == *id));
+        let folder = folder.and_then(|id| self.folders.iter().find(|folder| folder.id == id));
+        let (folder, folder_space) = (folder.map(|folder| folder.id), folder.map(|folder| folder.space));
         if let Some(pin) = self.pin_mut(pin_id) &&
             pin.space != ESSENTIALS
         {
             pin.folder = folder;
+            // With spaces off, folders of every space are listed: the pin joins its folder's.
+            if let Some(space) = folder_space {
+                pin.space = space;
+            }
+            let (webview, space) = (pin.webview, pin.space);
+            if let Some(webview) = webview {
+                self.tab_workspace.insert(webview, space);
+            }
             self.save();
         }
     }
@@ -830,7 +859,13 @@ impl Workspaces {
         };
         let (space, folder) = (self.pins[position].space, self.pins[position].folder);
         let neighbours: Vec<usize> = (0..self.pins.len())
-            .filter(|index| self.pins[*index].space == space && self.pins[*index].folder == folder)
+            .filter(|index| {
+                let other = &self.pins[*index];
+                // With spaces off, loose pins of every space show as one group.
+                let same_group = other.space == space ||
+                    (!self.enabled && space != ESSENTIALS && self.in_view(other.space));
+                same_group && other.folder == folder
+            })
             .collect();
         let Some(index) = neighbours.iter().position(|index| *index == position) else {
             return;
@@ -926,12 +961,12 @@ impl Workspaces {
         let folders: Vec<Value> = self
             .folders
             .iter()
-            .filter(|folder| folder.space == self.current)
+            .filter(|folder| self.in_view(folder.space))
             .map(|folder| {
                 let pins: Vec<Value> = self
                     .pins
                     .iter()
-                    .filter(|pin| pin.space == self.current && pin.folder == Some(folder.id))
+                    .filter(|pin| pin.space == folder.space && pin.folder == Some(folder.id))
                     .map(|pin| self.pin_json(pin, window, active))
                     .collect();
                 json!({ "folderId": folder.id, "name": folder.name, "collapsed": folder.collapsed, "pins": pins })
@@ -940,7 +975,7 @@ impl Workspaces {
         let loose: Vec<Value> = self
             .pins
             .iter()
-            .filter(|pin| pin.space == self.current && pin.folder.is_none())
+            .filter(|pin| self.in_view(pin.space) && pin.folder.is_none())
             .map(|pin| self.pin_json(pin, window, active))
             .collect();
         json!({ "folders": folders, "pins": loose })
@@ -994,7 +1029,9 @@ impl Workspaces {
         };
         crate::desktop::diagnostics::log(format!("reloading unloaded tab {}", tab.url));
         // Show the tab's space (it may be another one, e.g. when cycling tabs).
-        self.current = tab.space;
+        if self.enabled {
+            self.current = tab.space;
+        }
         self.pending_restore = Some(key);
         self.awaiting_new_tab = true;
         window.queue_user_interface_command(UserInterfaceCommand::NewWebViewWithUrl(url));
@@ -1273,6 +1310,10 @@ impl Workspaces {
         let space_name = |space: u32| {
             if space == ESSENTIALS {
                 return "Essentials".to_owned();
+            }
+            // One list of tabs: there's no space to name.
+            if !self.enabled {
+                return String::new();
             }
             self.list
                 .iter()

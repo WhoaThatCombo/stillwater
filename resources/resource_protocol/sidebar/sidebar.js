@@ -52,22 +52,37 @@ function iconButton(className, glyph, title, onClick) {
 }
 
 // ---- Double-click detection (Servo may not fire dblclick) ----
-function onDoubleClick(element, handler) {
-  let last = 0;
+// Timed per row (`key`), not per element: a state push between the two clicks rebuilds the
+// row, and the second click lands on a new element.
+const lastClicks = new Map();
+function onDoubleClick(element, key, handler) {
   element.addEventListener("click", (event) => {
     const now = Date.now();
-    if (now - last < 400) {
-      last = 0;
+    if (now - (lastClicks.get(key) || 0) < 400) {
+      lastClicks.delete(key);
       event.stopPropagation();
       handler(event);
     } else {
-      last = now;
+      lastClicks.set(key, now);
     }
   });
 }
 
+// The label of a row as it is now (rows are rebuilt by every state push, so a menu or click
+// handler must not hold on to the element it was made for).
+function rowLabel(selector) {
+  const row = document.querySelector(selector);
+  return row && row.querySelector(".tab-label");
+}
+const tabSelector = (id) => `#tabs .tab[data-tab="${id}"]`;
+const pinSelector = (pinId) => `#pinned .tab[data-pin="${pinId}"]`;
+const folderSelector = (folderId) => `#pinned .tab.folder[data-folder-id="${folderId}"]`;
+
 // ---- Inline rename: swap a label for a text field ----
+// `label` is an element or a selector for the row whose label to rename.
 function startRename(label, current, commit) {
+  if (typeof label === "string") label = rowLabel(label);
+  if (!label || !label.isConnected || document.querySelector(".rename-input")) return;
   const input = document.createElement("input");
   input.className = "rename-input";
   input.value = current;
@@ -80,11 +95,14 @@ function startRename(label, current, commit) {
     done = true;
     if (save) commit(input.value.trim());
     input.replaceWith(label);
+    // State pushes skipped the lists while the field was open: catch up.
+    setTimeout(render, 0);
   };
   input.addEventListener("click", (event) => event.stopPropagation());
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") finish(true);
-    else if (event.key === "Escape") finish(false);
+    if (event.key !== "Enter" && event.key !== "Escape") return;
+    event.stopPropagation(); // Escape ends the rename only, not also a panel around it
+    finish(event.key === "Enter");
   });
   input.addEventListener("blur", () => finish(true));
 }
@@ -96,6 +114,10 @@ function closeMenu() {
   menu.replaceChildren();
 }
 function openMenu(items, x, y) {
+  // No separator at either end or twice in a row (items are often optional).
+  items = items.filter((item, index) => item !== "-" || (index > 0 && items[index - 1] !== "-"));
+  while (items[0] === "-") items.shift();
+  while (items[items.length - 1] === "-") items.pop();
   menu.replaceChildren(...items.map((item) => {
     if (item === "-") {
       const line = document.createElement("div");
@@ -134,7 +156,10 @@ function openMenu(items, x, y) {
       shortcut.textContent = item.shortcut || "";
       button.append(glyph, label, shortcut);
     } else {
-      button.textContent = item.label;
+      const label = document.createElement("span");
+      label.className = "menu-label";
+      label.textContent = item.label;
+      button.append(label);
     }
     button.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -152,8 +177,14 @@ function openMenu(items, x, y) {
 document.addEventListener("mousedown", (event) => {
   if (!menu.hidden && !menu.contains(event.target)) closeMenu();
 });
+// Escape closes the menu and nothing else (not also the panel under it). Registered before
+// the panels' own Escape handlers, so stopping here keeps them from running.
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !menu.hidden) closeMenu();
+  if (event.key === "Escape" && !menu.hidden) {
+    closeMenu();
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
 });
 function attachMenu(element, itemsFor) {
   element.addEventListener("contextmenu", (event) => {
@@ -162,8 +193,25 @@ function attachMenu(element, itemsFor) {
   });
 }
 
+// ---- Side panels (passwords, history, downloads): one at a time ----
+// Each panel's module registers how to close it (resetting its own state).
+const panelClosers = {};
+function showPanel(id) {
+  for (const panel of document.querySelectorAll(".panel")) {
+    if (panel.id === id || panel.hidden) continue;
+    if (panelClosers[panel.id]) panelClosers[panel.id]();
+    else panel.hidden = true;
+  }
+  closeMenu();
+  $(id).hidden = false;
+}
+
+function spacesOn() {
+  return !!state.workspaces && state.workspaces.enabled !== false;
+}
+
 function otherSpaces() {
-  if (!state.workspaces) return [];
+  if (!spacesOn()) return [];
   return state.workspaces.list.filter((space) => space.id !== state.workspaces.current);
 }
 
@@ -172,11 +220,19 @@ function folderNames() {
 }
 
 // Menu for an ordinary tab.
-function tabMenu(tab, label) {
+function renameTab(tab) {
+  startRename(tabSelector(tab.id), tabLabel(tab), (title) => send("tab-rename", `${tab.id}\t${title}`));
+}
+
+function renamePin(pin) {
+  startRename(pinSelector(pin.pinId), pin.title, (title) => send("pin-rename", `${pin.pinId}\t${title}`));
+}
+
+function tabMenu(tab) {
   return [
     { label: "Pin tab", run: () => send("pin", tab.id) },
     { label: "Add to Essentials", run: () => send("essential", tab.id) },
-    { label: "Rename", run: () => startRename(label, tabLabel(tab), (title) => send("tab-rename", `${tab.id}\t${title}`)) },
+    { label: "Rename", run: () => renameTab(tab) },
     { label: "Open in split view", run: () => send("split-tab", tab.id) },
     ...otherSpaces().map((space) => ({ label: `Move to ${space.name}`, run: () => send("tab-move-space", `${tab.id}\t${space.id}`) })),
     ...(tab.active && /^https?:/.test(tab.url || "") ? [{ label: "Compare with Edge", run: () => send("compare") }] : []),
@@ -189,15 +245,22 @@ function tabMenu(tab, label) {
 }
 
 // Menu for a pinned tab or Essential.
-function pinMenu(pin, label, essential) {
+// How many pins share `pin`'s group (its folder, or the loose pins), as listed now.
+function pinGroupSize(pin) {
+  const pinned = state.pinned || { folders: [], pins: [] };
+  if (!pin.folder) return pinned.pins.length;
+  const folder = pinned.folders.find((other) => other.folderId === pin.folder);
+  return folder ? folder.pins.length : 1;
+}
+
+// Separators only go between groups: openMenu drops any at either end or doubled.
+function pinMenu(pin, essential) {
   const items = [];
   if (pin.loaded) items.push({ label: "Unload (free memory)", run: () => send("pin-unload", pin.pinId) });
   if (pin.changed) items.push({ label: "Back to pinned page", run: () => send("pin-reset", pin.pinId) });
-  if (label) {
-    items.push({ label: "Rename", run: () => startRename(label, pin.title, (title) => send("pin-rename", `${pin.pinId}\t${title}`)) });
-  }
   if (!essential) {
-    if (items.length) items.push("-");
+    items.push({ label: "Rename", run: () => renamePin(pin) });
+    items.push("-");
     for (const folder of folderNames()) {
       if (folder.folderId !== pin.folder) {
         items.push({ label: `Move to folder “${folder.name}”`, run: () => send("pin-folder", `${pin.pinId}\t${folder.folderId}`) });
@@ -205,11 +268,13 @@ function pinMenu(pin, label, essential) {
     }
     if (pin.folder) items.push({ label: "Remove from folder", run: () => send("pin-folder", `${pin.pinId}\t`) });
     items.push({ label: "New folder with this tab", run: () => send("folder-new", pin.pinId) });
-    items.push({ label: "Move up", run: () => send("pin-move", `${pin.pinId}\t-1`) });
-    items.push({ label: "Move down", run: () => send("pin-move", `${pin.pinId}\t1`) });
+    if (pinGroupSize(pin) > 1) {
+      items.push({ label: "Move up", run: () => send("pin-move", `${pin.pinId}\t-1`) });
+      items.push({ label: "Move down", run: () => send("pin-move", `${pin.pinId}\t1`) });
+    }
   }
   items.push("-", { label: "Open in split view", run: () => send("split-pin", pin.pinId) });
-  if (items.length) items.push("-");
+  items.push("-");
   items.push({
     label: essential ? "Remove from Essentials" : "Add to Essentials",
     run: () => send("pin-essential", pin.pinId),
@@ -238,12 +303,12 @@ function renderRow(item, isPin) {
   const label = document.createElement("span");
   label.className = "tab-label";
   label.textContent = tabLabel(item);
-  onDoubleClick(label, () => {
-    if (isPin) startRename(label, item.title, (title) => send("pin-rename", `${item.pinId}\t${title}`));
-    else startRename(label, tabLabel(item), (title) => send("tab-rename", `${item.id}\t${title}`));
+  onDoubleClick(label, isPin ? `pin:${item.pinId}` : `tab:${item.id}`, () => {
+    if (isPin) renamePin(item);
+    else renameTab(item);
   });
 
-  const items = () => (isPin ? pinMenu(item, label, false) : tabMenu(item, label));
+  const items = () => (isPin ? pinMenu(item, false) : tabMenu(item));
   const more = iconButton("tab-more", "", "More", () => {
     const box = more.getBoundingClientRect();
     openMenu(items(), box.left, box.bottom);
@@ -305,7 +370,7 @@ function renderEssentials() {
     tile.addEventListener("mouseup", (event) => {
       if (event.button === 1) send("pin-unload", pin.pinId);
     });
-    attachMenu(tile, () => pinMenu(pin, null, true));
+    attachMenu(tile, () => pinMenu(pin, true));
     return tile;
   }));
 }
@@ -329,8 +394,9 @@ function renderPinned() {
     count.textContent = folder.collapsed && folder.pins.length ? String(folder.pins.length) : "";
     header.append(icon, label, count);
     header.addEventListener("click", () => send("folder-toggle", folder.folderId));
-    const rename = () => startRename(label, folder.name, (name) => send("folder-rename", `${folder.folderId}\t${name}`));
-    onDoubleClick(label, rename);
+    const rename = () => startRename(folderSelector(folder.folderId), folder.name,
+      (name) => send("folder-rename", `${folder.folderId}\t${name}`));
+    onDoubleClick(label, `folder:${folder.folderId}`, rename);
     attachMenu(header, () => [
       { label: "Rename folder", run: rename },
       { label: folder.collapsed ? "Expand" : "Collapse", run: () => send("folder-toggle", folder.folderId) },
@@ -386,6 +452,42 @@ function renderWorkspaces() {
   add.addEventListener("click", () => send("ws-new"));
   $("workspaces").replaceChildren(...strip, add);
   root.style.setProperty("--sidebar-bg", state.background);
+  setFadeColours();
+}
+
+// Long labels fade out under a gradient of their row's background (zen-sidebar.css). Servo
+// blends gradient stops without premultiplying and can't mask text, so each gradient runs from
+// the row's exact (opaque) colour made transparent to that colour: work those colours out from
+// the sidebar background and the theme's translucent hover/selected colours.
+let fadeKey = "";
+function setFadeColours() {
+  const root = document.documentElement;
+  const style = getComputedStyle(root);
+  const parse = (text) => {
+    const match = /rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)/.exec(text || "");
+    return match ? [+match[1], +match[2], +match[3], match[4] === undefined ? 1 : +match[4]] : null;
+  };
+  const over = (top, under) => top ? under.map((value, i) => Math.round(top[i] * top[3] + value * (1 - top[3]))) : under;
+  const names = ["--sidebar-bg", "--toolbarbutton-background-color-hover", "--tab-selected-bgcolor",
+    "--zen-urlbar-background-focus", "--toolbarbutton-background-color-active"];
+  const values = names.map((name) => style.getPropertyValue(name).trim());
+  const key = values.join("|");
+  if (key === fadeKey) return;
+  fadeKey = key;
+  const [sidebarBg, hover, selected, menuBg, active] = values.map(parse);
+  if (!sidebarBg || !menuBg) return;
+  const base = sidebarBg.slice(0, 3);
+  const menuBase = menuBg.slice(0, 3);
+  const set = (name, rgb) => {
+    root.style.setProperty(`--fade-${name}`, `rgb(${rgb.join(", ")})`);
+    root.style.setProperty(`--fade-${name}-clear`, `rgba(${rgb.join(", ")}, 0)`);
+  };
+  set("row", base);
+  set("row-hover", over(hover, base));
+  set("row-selected", over(selected, base));
+  set("menu", menuBase);
+  set("menu-hover", over(hover, menuBase));
+  set("menu-active", over(active, menuBase));
 }
 
 function renderUpdate() {
@@ -417,7 +519,7 @@ function renderShield() {
   shield.classList.toggle("off", !adblock.site);
   $("shield-count").textContent = adblock.site && adblock.blocked ? String(adblock.blocked) : "";
   shield.title = adblock.site
-    ? ` blocked on this page`
+    ? `${adblock.blocked || 0} blocked on this page`
     : `Ad blocking is off for ${adblock.host}`;
 }
 
@@ -661,7 +763,7 @@ function renderPasswordList() {
 }
 
 function openPasswords() {
-  passwordsPanel.hidden = false;
+  showPanel("passwords");
   passwordSearch.value = "";
   passwordSearch.parentElement.classList.remove("has-value");
   openLogin = null;
@@ -674,6 +776,7 @@ function closePasswords() {
   openLogin = null;
   shownPassword = null;
 }
+panelClosers.passwords = closePasswords;
 
 // Compare with Edge: show progress; a finished message goes away after a few seconds.
 let compareHideTimer = 0;
@@ -692,6 +795,27 @@ function renderCompare() {
   line.classList.toggle("error", !!compare.error);
 }
 
+// When another tab becomes the active one, scroll its row into view. Only then: other state
+// pushes (titles, loading) mustn't pull the list away from where the user scrolled it.
+let revealedTab = null;
+function revealActiveRow() {
+  const active = state.tabs.find((tab) => tab.active);
+  const pin = !active && [...(state.pinned ? state.pinned.pins : []),
+    ...(state.pinned ? state.pinned.folders.flatMap((folder) => folder.pins) : [])].find((item) => item.active);
+  const key = active ? `tab:${active.id}` : pin ? `pin:${pin.pinId}` : null;
+  if (key === revealedTab) return;
+  revealedTab = key;
+  if (!key) return;
+  const row = document.querySelector(active ? tabSelector(active.id) : pinSelector(pin.pinId));
+  if (!row) return;
+  // By hand rather than scrollIntoView, so only the tab list scrolls and only as far as needed.
+  const area = $("tab-area");
+  const view = area.getBoundingClientRect();
+  const box = row.getBoundingClientRect();
+  if (box.top < view.top) area.scrollTop -= view.top - box.top + 4;
+  else if (box.bottom > view.bottom) area.scrollTop += box.bottom - view.bottom + 4;
+}
+
 function render() {
   renderCompare();
   renderPasswordOffer();
@@ -708,6 +832,7 @@ function render() {
     const rows = state.tabs.map((tab) => renderRow(tab, false));
     if (state.split) rows.push(renderSplitRow(state.split));
     tabs.replaceChildren(...rows);
+    revealActiveRow();
   }
   $("back").disabled = !state.canGoBack;
   $("forward").disabled = !state.canGoForward;
@@ -782,6 +907,16 @@ window.sidebar = {
     // Selecting an empty field would highlight its placeholder in Servo.
     if (url.value) url.select();
   },
+  // The keyboard focus moved to the page (Rust unfocused this WebView, which fires no blur
+  // here): leave the address bar, so it shows the page's address again and keeps following
+  // it. A rename field open in the list is committed, as a click elsewhere would.
+  leaveUrl() {
+    const focused = document.activeElement;
+    if (focused && focused !== document.body && focused.matches("input")) focused.blur();
+    urlbar.classList.remove("focused");
+    if (typeof closeSuggestions === "function") closeSuggestions();
+    showUrlHost();
+  },
 };
 
 function syncPlaceholder() {
@@ -820,6 +955,17 @@ $("reload").addEventListener("click", () => send("reload"));
 $("compact").addEventListener("click", () => send("toggle-compact"));
 $("new-tab").addEventListener("click", () => send("new-tab"));
 $("ws-new-folder").addEventListener("click", () => send("folder-new", 0));
+// Right-click the tab list's empty space or the New Tab row. This is also where New folder
+// lives when spaces are off (the space header holding its button is hidden then).
+$("tab-area").addEventListener("contextmenu", (event) => {
+  if (event.target.closest(".tab:not(.new-tab)")) return; // rows have their own menu
+  event.preventDefault();
+  openMenu([
+    { label: "New tab", run: () => send("new-tab") },
+    { label: "New folder", run: () => send("folder-new", 0) },
+    ...(state.session && state.session.closed ? [{ label: "Reopen closed tab", run: () => send("session-reopen") }] : []),
+  ], event.clientX, event.clientY);
+});
 
 // Frameless window: caption buttons, and dragging/double-clicking empty sidebar space.
 update.addEventListener("click", () => send("update"));

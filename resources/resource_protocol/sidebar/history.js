@@ -57,6 +57,7 @@ function renderSuggestions() {
   suggestionBox.style.left = `${box.left}px`;
   suggestionBox.style.width = `${box.width}px`;
   suggestionBox.style.top = `${box.bottom + 4}px`;
+  suggestionBox.style.maxHeight = `${Math.max(80, window.innerHeight - box.bottom - 12)}px`;
   suggestionBox.hidden = false;
   markSelected();
 }
@@ -289,7 +290,7 @@ function showHistoryView(view) {
 }
 
 function openHistory(view = "history") {
-  historyPanel.hidden = false;
+  showPanel("history");
   historySearch.value = "";
   historySearch.parentElement.classList.remove("has-value");
   $("clear-status").hidden = true;
@@ -300,6 +301,7 @@ function closeHistory() {
   historyPanel.hidden = true;
   closeClearOptions();
 }
+panelClosers.history = closeHistory;
 
 // Clearing: pick a range, optionally cookies and site data too, then confirm.
 let clearRange = "hour";

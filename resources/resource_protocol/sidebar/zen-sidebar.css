@@ -29,6 +29,23 @@
   --tab-selected-bgcolor: rgba(255, 255, 255, 0.95);
   --tab-selected-shadow: 0 1px 2px rgba(0, 0, 0, 0.09), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
 
+  /* The opaque row and menu colours that long labels fade into, and the same colours fully
+     transparent (Servo blends gradient stops without premultiplying, so fading from plain
+     transparent black would grey the middle). sidebar.js recomputes them from the space's
+     tint and the theme; these are the untinted light values. */
+  --fade-row: rgb(235, 235, 235);
+  --fade-row-clear: rgba(235, 235, 235, 0);
+  --fade-row-hover: rgb(219, 219, 219);
+  --fade-row-hover-clear: rgba(219, 219, 219, 0);
+  --fade-row-selected: rgb(254, 254, 254);
+  --fade-row-selected-clear: rgba(254, 254, 254, 0);
+  --fade-menu: rgb(255, 255, 255);
+  --fade-menu-clear: rgba(255, 255, 255, 0);
+  --fade-menu-hover: rgb(237, 237, 237);
+  --fade-menu-hover-clear: rgba(237, 237, 237, 0);
+  --fade-menu-active: rgb(230, 230, 230);
+  --fade-menu-active-clear: rgba(230, 230, 230, 0);
+
   font-family: 'Segoe UI Variable Text', 'Segoe UI', Tahoma, sans-serif;
   font-size: 13px;
 }
@@ -383,21 +400,52 @@ img.tab-icon {
   white-space: nowrap;
   text-overflow: ellipsis;
   line-height: 1.2;
+  position: relative;
 }
 
-/* tab-close-button: hidden until hover, like Zen */
+/* Servo has no text-overflow: ellipsis and masks only backgrounds, so a long title fades out
+   under a gradient of the row's own background (plain, hovered or selected). Over a short
+   title it covers empty space and can't be seen. */
+.tab-label::after,
+.menu-label::after,
+.suggestion-title::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 28px;
+  pointer-events: none;
+}
+
+.tab-label::after {
+  background: linear-gradient(to right, var(--fade-row-clear), var(--fade-row));
+}
+
+.tab:hover .tab-label::after {
+  background: linear-gradient(to right, var(--fade-row-hover-clear), var(--fade-row-hover));
+}
+
+.tab.selected .tab-label::after {
+  background: linear-gradient(to right, var(--fade-row-selected-clear), var(--fade-row-selected));
+}
+
+/* tab-close-button: only on the hovered or selected row, like Zen. Hidden ones take no room
+   (display: none, not visibility), so titles get the whole row. A row containing the keyboard
+   focus shows its buttons too. */
 .tab-close {
   width: 24px;
   height: 24px;
   flex-shrink: 0;
   border-radius: var(--toolbarbutton-border-radius);
   font-size: 10px;
-  visibility: hidden;
+  display: none;
 }
 
 .tab:hover .tab-close,
+.tab:focus-within .tab-close,
 .tab.selected .tab-close {
-  visibility: visible;
+  display: block;
 }
 
 .tab-close:hover {
@@ -709,13 +757,15 @@ button.secondary:hover {
   flex-shrink: 0;
   border-radius: var(--toolbarbutton-border-radius);
   font-size: 11px;
-  visibility: hidden;
+  display: none;
 }
 
 .tab:hover .tab-more,
 .tab:hover .tab-reset,
+.tab:focus-within .tab-more,
+.tab:focus-within .tab-reset,
 .tab.selected .tab-reset {
-  visibility: visible;
+  display: block;
 }
 
 .tab-more:hover,
@@ -757,6 +807,13 @@ button.secondary:hover {
   border: 1px solid var(--zen-pinned-separator-color);
   display: flex;
   flex-direction: column;
+  /* A short window: the menu scrolls rather than running off the bottom. */
+  max-height: calc(100vh - 8px);
+  overflow-y: auto;
+}
+
+#menu > * {
+  flex-shrink: 0;
 }
 
 #menu[hidden] {
@@ -764,6 +821,8 @@ button.secondary:hover {
 }
 
 .menu-item {
+  display: flex;
+  align-items: center;
   height: 30px;
   padding: 0 10px;
   border-radius: 7px;
@@ -775,6 +834,22 @@ button.secondary:hover {
 
 .menu-item:hover {
   background: var(--toolbarbutton-background-color-hover);
+}
+
+/* Long labels fade out (see .tab-label::after). */
+.menu-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.menu-label::after {
+  background: linear-gradient(to right, var(--fade-menu-clear), var(--fade-menu));
+}
+
+.menu-item:hover .menu-label::after {
+  background: linear-gradient(to right, var(--fade-menu-hover-clear), var(--fade-menu-hover));
 }
 
 .menu-separator {
@@ -950,8 +1025,11 @@ button.primary:disabled {
   display: none;
 }
 
+/* Side panels cover the sidebar, one at a time (showPanel): above the lists, below the menu
+   (z-index 10) so a right-click menu inside a panel shows. */
 .panel {
   position: fixed;
+  z-index: 5;
   inset: 0;
   display: flex;
   flex-direction: column;
@@ -1163,17 +1241,15 @@ button.secondary.armed {
   opacity: 0.8;
 }
 
-.menu-label {
-  flex: 1;
-}
-
 .menu-shortcut {
-  margin-left: 16px;
+  margin-left: 8px;
   font-size: 11.5px;
   opacity: 0.55;
 }
 
-/* Spaces turned off (Settings → Tabs and memory): no switcher, no space name, icon or colour. */
+/* Spaces turned off (Settings → Tabs and memory): no switcher and no space header (its New
+   folder button moves to the tab list's right-click menu). */
+body.no-spaces #workspace-header,
 body.no-spaces #workspaces,
 body.no-spaces #ws-icon,
 body.no-spaces #ws-name,

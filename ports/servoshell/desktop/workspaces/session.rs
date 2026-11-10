@@ -114,9 +114,20 @@ impl Workspaces {
             .as_ref()
             .and_then(|view| self.pin_for_webview(view.id()))
             .map(|pin| pin.id);
+        // With spaces off the sidebar stays in the first space, but the active tab may belong
+        // to another: save that one, so its tab comes back first.
+        let current = if self.enabled {
+            self.current
+        } else {
+            active
+                .as_ref()
+                .and_then(|view| self.tab_workspace.get(&view.id()).copied())
+                .filter(|space| *space != ESSENTIALS)
+                .unwrap_or(self.current)
+        };
         Some(json!({
             "version": 1,
-            "current": self.current,
+            "current": current,
             "activeUrl": active.and_then(|view| view.url()).map(|url| url.to_string()),
             "activePin": active_pin,
             "spaces": spaces,
@@ -131,13 +142,15 @@ impl Workspaces {
         mut next_key: impl FnMut() -> u32,
     ) {
         let data = &session.data;
-        if let Some(current) = data["current"]
+        let saved_current = data["current"]
             .as_u64()
             .map(|id| id as u32)
-            .filter(|id| self.space_exists(*id))
-        {
+            .filter(|id| self.space_exists(*id));
+        // With spaces off, the sidebar stays in the first space.
+        if let Some(current) = saved_current.filter(|_| self.enabled) {
             self.current = current;
         }
+        let shown_space = saved_current.unwrap_or(self.current);
         let mut first_tab = None;
         for space in data["spaces"].as_array().into_iter().flatten() {
             // Tabs of a space that's gone (spaces were merged) come back in the current one.
@@ -167,7 +180,7 @@ impl Workspaces {
                 // With spaces merged, the first space's active tab wins.
                 if active == Some(index) && !self.session_active.contains_key(&id) {
                     self.session_active.insert(id, key);
-                    if id == self.current {
+                    if id == shown_space {
                         first_tab = Some(key);
                     }
                 }
@@ -343,7 +356,12 @@ impl Workspaces {
         folder: Option<u32>,
         before: Option<u32>,
     ) {
-        let space = if essential { ESSENTIALS } else { self.current };
+        // With spaces off every space's folders are listed: dropping in one joins its space.
+        let folder_space = folder
+            .filter(|_| !self.enabled)
+            .and_then(|id| self.folders.iter().find(|folder| folder.id == id))
+            .map(|folder| folder.space);
+        let space = if essential { ESSENTIALS } else { folder_space.unwrap_or(self.current) };
         let folder = folder.filter(|_| !essential).filter(|id| {
             self.folders
                 .iter()

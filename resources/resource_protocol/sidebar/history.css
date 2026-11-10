@@ -39,6 +39,8 @@
   background: var(--zen-urlbar-background-focus);
   box-shadow: var(--zen-big-shadow);
   border: 1px solid var(--zen-pinned-separator-color);
+  /* max-height is set from its position (history.js); a short window scrolls the list. */
+  overflow-y: auto;
 }
 
 #suggestions[hidden] {
@@ -46,6 +48,7 @@
 }
 
 .suggestion {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -91,6 +94,19 @@
 .suggestion-detail {
   font-size: 11px;
   opacity: 0.6;
+}
+
+/* Long titles fade out (see .tab-label::after in zen-sidebar.css). */
+.suggestion-title {
+  position: relative;
+}
+
+.suggestion-title::after {
+  background: linear-gradient(to right, var(--fade-menu-clear), var(--fade-menu));
+}
+
+.suggestion.selected .suggestion-title::after {
+  background: linear-gradient(to right, var(--fade-menu-active-clear), var(--fade-menu-active));
 }
 
 .suggestion-star {
