@@ -69,11 +69,16 @@ pub fn main() {
 
     // Keep a disk cache so revisiting sites doesn't re-download everything. Servo only
     // enables its HTTP disk cache when it's given a folder.
-    if preferences.network_http_disk_cache.is_empty() &&
-        let Some(dir) = dirs::data_local_dir()
-    {
-        preferences.network_http_disk_cache =
-            dir.join("Stillwater").join("cache").to_string_lossy().into_owned();
+    // A scratch STILLWATER_CONFIG_DIR profile keeps its cache to itself as well.
+    if preferences.network_http_disk_cache.is_empty() {
+        let scratch = env::var_os("STILLWATER_CONFIG_DIR")
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| std::path::PathBuf::from(dir).join("cache"));
+        if let Some(dir) =
+            scratch.or_else(|| Some(dirs::data_local_dir()?.join("Stillwater").join("cache")))
+        {
+            preferences.network_http_disk_cache = dir.to_string_lossy().into_owned();
+        }
     }
 
     diagnostics::init();
