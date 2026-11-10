@@ -706,6 +706,13 @@ impl WebView {
         self.servo().paint().page_zoom(self.id())
     }
 
+    /// Whether this [`WebView`]'s current page has painted contentful content (text,
+    /// images, ...: see <https://w3c.github.io/paint-timing/#first-contentful-paint>).
+    /// Before that its frames are blank.
+    pub fn has_contentful_paint(&self) -> bool {
+        self.servo().paint().has_contentful_paint(self.id())
+    }
+
     /// Adjust the pinch zoom on this [`WebView`] multiplying the current pinch zoom
     /// level with the provided `pinch_zoom_delta`.
     ///

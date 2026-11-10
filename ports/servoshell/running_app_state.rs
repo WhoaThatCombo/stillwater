@@ -248,6 +248,9 @@ pub(crate) struct RunningAppState {
     /// When to run an idle garbage collection: a few seconds after pages finish loading or
     /// close, once things have settled.
     gc_due: Cell<Option<std::time::Instant>>,
+    /// Page loads in progress (any tab), from their `LoadStatus::Started`: the idle garbage
+    /// collection waits for them, since it stalls frames for tens of milliseconds.
+    loads_in_progress: RefCell<HashMap<WebViewId, std::time::Instant>>,
     /// Whether a page was replaced or a tab closed since the renderer's caches were last dropped.
     render_caches_stale: Cell<bool>,
 
@@ -349,6 +352,7 @@ impl RunningAppState {
             playing_media: Default::default(),
             color_scheme_hint: Cell::new(None),
             gc_due: Default::default(),
+            loads_in_progress: Default::default(),
             render_caches_stale: Default::default(),
             experimental_preferences_enabled,
             accessibility_active: Cell::new(false),
@@ -888,6 +892,17 @@ impl RunningAppState {
             .get()
             .is_some_and(|due| std::time::Instant::now() >= due)
         {
+            // Not while a page loads (the load's own completion schedules it again). A load
+            // that never finishes stops holding it back after a while.
+            let loading = {
+                let mut loads = self.loads_in_progress.borrow_mut();
+                loads.retain(|_, started| started.elapsed() < MAX_LOAD_HOLDING_GC);
+                !loads.is_empty()
+            };
+            if loading {
+                self.schedule_idle_gc();
+                return;
+            }
             self.gc_due.set(None);
             #[cfg(not(any(target_os = "android", target_env = "ohos")))]
             crate::desktop::diagnostics::log("idle garbage collection");
@@ -906,6 +921,8 @@ impl RunningAppState {
 
 /// How long after the last page load (or tab close) to collect garbage.
 const IDLE_GC_DELAY: std::time::Duration = std::time::Duration::from_secs(8);
+/// A page load older than this no longer postpones the idle garbage collection.
+const MAX_LOAD_HOLDING_GC: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl WebViewDelegate for RunningAppState {
     fn load_web_resource(&self, webview: WebView, load: servo::WebResourceLoad) {
@@ -1083,6 +1100,7 @@ impl WebViewDelegate for RunningAppState {
         #[cfg(not(any(target_os = "android", target_env = "ohos")))]
         crate::desktop::sidebar::navigation_finished(webview_id);
         self.playing_media.borrow_mut().remove(&webview_id);
+        self.loads_in_progress.borrow_mut().remove(&webview_id);
         self.render_caches_stale.set(true);
         self.schedule_idle_gc();
         self.pending_webdriver_events
@@ -1119,6 +1137,16 @@ impl WebViewDelegate for RunningAppState {
         if status == LoadStatus::Started {
             self.playing_media.borrow_mut().remove(&webview.id());
             self.render_caches_stale.set(true);
+            self.loads_in_progress
+                .borrow_mut()
+                .insert(webview.id(), std::time::Instant::now());
+            // An idle collection from an earlier load would land in the middle of this one.
+            if self.gc_due.get().is_some() {
+                self.schedule_idle_gc();
+            }
+        }
+        if matches!(status, LoadStatus::Complete | LoadStatus::Stopped) {
+            self.loads_in_progress.borrow_mut().remove(&webview.id());
         }
         #[cfg(not(any(target_os = "android", target_env = "ohos")))]
         self.translation.borrow_mut().on_load(&webview, status);

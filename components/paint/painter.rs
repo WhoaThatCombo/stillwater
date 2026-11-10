@@ -353,6 +353,21 @@ impl Painter {
         self.webview_renderers.get(&webview_id)
     }
 
+    /// Whether a frame with contentful content (text, images, ... see
+    /// <https://w3c.github.io/paint-timing/#first-contentful-paint>) of the page that
+    /// `webview_id` shows has been painted.
+    pub(crate) fn has_contentful_paint(&self, webview_id: WebViewId) -> bool {
+        self.webview_renderers
+            .get(&webview_id)
+            .and_then(|renderer| {
+                let root = renderer.root_pipeline_id?;
+                renderer.pipelines.get(&root)
+            })
+            .is_some_and(|pipeline| {
+                pipeline.first_contentful_paint_metric == PaintMetricState::Sent
+            })
+    }
+
     pub(crate) fn webview_renderer_mut(
         &mut self,
         webview_id: WebViewId,

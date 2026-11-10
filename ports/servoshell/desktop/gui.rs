@@ -953,12 +953,23 @@ impl Gui {
                 }
             }
             // A page's render surface is white until the page first draws; show the window
-            // background instead of a white flash until then (once per tab).
+            // background instead of a white flash until then (once per tab): from the page's
+            // first contentful frame, not only once it has fully loaded.
             let active = window.active_webview();
+            // (The page was just rendered above, so a first contentful frame shows at once.)
             if let Some(webview) = &active &&
-                webview.load_status() == LoadStatus::Complete
+                !painted_webviews.contains(&webview.id())
             {
-                painted_webviews.insert(webview.id());
+                let complete = webview.load_status() == LoadStatus::Complete;
+                if complete || webview.has_contentful_paint() {
+                    painted_webviews.insert(webview.id());
+                    if !complete {
+                        crate::desktop::diagnostics::log(format!(
+                            "tab shows its page from its first contentful frame: {}",
+                            webview.url().map(|url| url.to_string()).unwrap_or_default()
+                        ));
+                    }
+                }
             }
             painted_webviews.retain(|id| window.webview_by_id(*id).is_some());
             let content_ready = active.is_some_and(|webview| painted_webviews.contains(&webview.id()));

@@ -750,6 +750,12 @@ impl Paint {
         self.painter(webview_id.into()).page_zoom(webview_id)
     }
 
+    /// Whether the page `webview_id` shows has painted contentful content yet.
+    pub fn has_contentful_paint(&self, webview_id: WebViewId) -> bool {
+        self.painter(webview_id.into())
+            .has_contentful_paint(webview_id)
+    }
+
     /// Render the WebRender scene to the active `RenderingContext`.
     pub fn render(&self, webview_id: WebViewId) {
         self.painter_mut(webview_id.into())
