@@ -786,20 +786,31 @@ impl TextInputSelectionDragHandler {
             return false;
         }
 
+        let text_control: &dyn TextControlElement =
+            if let Some(input) = self.0.downcast::<HTMLInputElement>() {
+                input
+            } else if let Some(text_area) = self.0.downcast::<HTMLTextAreaElement>() {
+                text_area
+            } else {
+                return false;
+            };
+        let selection_before = text_control.text_input().selection_state();
         if let Some(input) = self.0.downcast::<HTMLInputElement>() {
             input
                 .text_input_mut()
                 .drag_moved(cx, input, hit_test_result);
-            input.maybe_update_shared_selection();
-            true
         } else if let Some(text_area) = self.0.downcast::<HTMLTextAreaElement>() {
             text_area
                 .text_input_mut()
                 .drag_moved(cx, text_area, hit_test_result);
-            text_area.maybe_update_shared_selection();
-            true
-        } else {
-            false
         }
+        text_control.maybe_update_shared_selection();
+        // Stillwater: a selection made by dragging fires `select`, as in Chrome and Firefox.
+        if text_control.text_input().selection_state() != selection_before &&
+            text_control.has_uncollapsed_selection()
+        {
+            text_control.queue_select_event();
+        }
+        true
     }
 }

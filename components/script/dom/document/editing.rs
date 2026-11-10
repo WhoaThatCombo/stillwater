@@ -549,6 +549,17 @@ impl Document {
             }
         }
 
+        // Stillwater: <https://w3c.github.io/selection-api/#selectstart-event>: a cancelable
+        // `selectstart` fires where the selection starts; cancelling it leaves the
+        // selection alone (sites use this to make content unselectable).
+        if !boundary
+            .container
+            .upcast::<EventTarget>()
+            .fire_bubbling_cancelable_event(cx, atom!("selectstart"))
+        {
+            return;
+        }
+
         let segment_data = match action {
             MouseButtonSelectionAction::MoveCursor => {
                 selection.collapse_to_dom_position(cx, &boundary);
@@ -604,6 +615,10 @@ impl TextControlElementEditingContext {
             hit_test_result,
         ) {
             text_control.maybe_update_shared_selection();
+            // Stillwater: a double or triple click that selects text fires `select`.
+            if text_control.has_uncollapsed_selection() {
+                text_control.queue_select_event();
+            }
             mouse_event.upcast::<Event>().mark_as_handled();
         }
     }
