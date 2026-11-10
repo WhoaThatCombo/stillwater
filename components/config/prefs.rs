@@ -630,7 +630,9 @@ impl Preferences {
             shell_background_color_rgba: [1.0, 1.0, 1.0, 1.0],
             log_filter: String::new(),
             thread_pool_workers_max: 4,
-            thread_pool_async_runtime_workers_max: 2,
+            // The network runtime also resumes every disk cache read: with 2 threads busy
+            // with other responses, cache hits waited up to a second to be picked up.
+            thread_pool_async_runtime_workers_max: 6,
             thread_pool_fallback_workers: 3,
             // <https://github.com/linebender/vello/blob/c95b228e1cf73bf96338e8c8ae0d145553f8f99c/sparse_strips/vello_cpu/examples/basic.rs#L51>
             // According to this example 2-4 give the best results.
