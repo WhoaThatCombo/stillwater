@@ -616,10 +616,9 @@ impl Preferences {
             network_http_proxy_uri: String::new(),
             network_https_proxy_uri: String::new(),
             network_http_no_proxy: String::new(),
-            // Stillwater: entries count the same whatever their size, so 5000 kept hundreds of
-            // megabytes of old pages' scripts and images in memory. Older entries move to the
-            // disk cache, which revisits still read quickly.
-            network_http_cache_size: 128,
+            // Stillwater: the most entries the memory cache keeps. Its bytes are capped
+            // separately (32 MB, bodies over 2 MB never kept), so many small entries can stay.
+            network_http_cache_size: 5000,
             network_local_directory_listing_enabled: true,
             network_use_webpki_roots: false,
             network_max_content_length: 5 * 1024 * 1024,

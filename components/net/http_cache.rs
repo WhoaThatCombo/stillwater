@@ -7,6 +7,7 @@
 //! A memory cache implementing the logic specified in <http://tools.ietf.org/html/rfc7234>
 //! and <http://tools.ietf.org/html/rfc7232>.
 
+use std::hash::{Hash, Hasher};
 use std::ops::Bound;
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -321,9 +322,9 @@ impl HttpCache {
             .expect("http_cache_size needs to fit into u64");
         let size = size.max(1);
         let (disk_cache, lifecycle) = DiskCache::new(assignment);
-        // At most 32 items per shard (quick_cache's own minimum), so that every shard can hold
-        // an entry of up to MEMORY_CACHE_MAX_ENTRY_BYTES.
-        let shards = size.div_ceil(32).next_power_of_two();
+        // Each shard holds an equal part of MEMORY_CACHE_BYTES and must be able to hold an
+        // entry of up to MEMORY_CACHE_MAX_ENTRY_BYTES (plus overhead), whatever the entry count.
+        let shards = (MEMORY_CACHE_BYTES / (MEMORY_CACHE_MAX_ENTRY_BYTES * 4)).max(1) as usize;
         let options = OptionsBuilder::new()
             .estimated_items_capacity(size)
             .weight_capacity(MEMORY_CACHE_BYTES)
@@ -381,11 +382,43 @@ impl Lifecycle<CacheKey, CacheEntry> for MemoryCacheLifecycle {
 
     fn on_evict(&self, _state: &mut Self::RequestState, key: CacheKey, value: CacheEntry) {
         info!("Evicting {key:?} from memory cache");
-        if let Some(disk_cache_data) = &self.disk_cache {
-            let disk_cache_data = disk_cache_data.clone();
-            tokio::spawn(async move { disk_cache_data.store(key, value).await });
+        // Complete entries are normally on disk already (see `update_awaiting_consumers`);
+        // the disk cache only writes this one if it differs from what it has.
+        if let Some(disk_cache) = &self.disk_cache {
+            disk_cache.store(&key, value);
         }
     }
+}
+
+/// Identifies a version of a cache entry's complete responses without serializing them: a
+/// response that is stored, refreshed (304) or invalidated changes its validation time,
+/// expiry or body. Never 0, which the disk cache uses for "unknown".
+pub(crate) fn entry_fingerprint(resources: &[CachedResource]) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    for resource in resources.iter().filter(|resource| resource.is_done()) {
+        let body_len = match &*resource.body.lock() {
+            ResponseBody::Receiving(body) | ResponseBody::Done(body) => body.len(),
+            ResponseBody::Empty => 0,
+        };
+        body_len.hash(&mut hasher);
+        resource.last_validated.hash(&mut hasher);
+        resource.expires.0.hash(&mut hasher);
+        resource.stale_while_revalidate.0.hash(&mut hasher);
+        resource.metadata.headers.read().len().hash(&mut hasher);
+        resource.aborted.load(Ordering::Acquire).hash(&mut hasher);
+    }
+    hasher.finish() | 1
+}
+
+/// The bytes of response bodies a cache entry holds.
+pub(crate) fn entry_body_bytes(resources: &[CachedResource]) -> usize {
+    resources
+        .iter()
+        .map(|resource| match &*resource.body.lock() {
+            ResponseBody::Receiving(body) | ResponseBody::Done(body) => body.len(),
+            ResponseBody::Empty => 0,
+        })
+        .sum()
 }
 
 /// Audio and video bodies (and any range request) are streamed to their consumer and not kept
@@ -1097,6 +1130,11 @@ impl HttpCache {
             let _ = self
                 .entries
                 .replace(entry_key.clone(), cached_resources.clone(), true);
+            // Keep the disk copy up to date (it survives restarts); nothing is written if the
+            // disk already has this version, as after a cache hit.
+            if let Some(disk_cache) = &self.disk_cache {
+                disk_cache.store(&entry_key, cached_resources.clone());
+            }
         }
 
         // Ensure we only wake-up consumers of relevant resources,
@@ -1204,6 +1242,12 @@ impl HttpCache {
         if let Some(entry) = self.entries.get(key) {
             let mut guarded_resources = entry.write().await;
             invalidate_cached_resources(guarded_resources.as_mut_slice());
+            drop(guarded_resources);
+            if let Some(disk_cache) = &self.disk_cache {
+                disk_cache.store(key, entry);
+            }
+        } else if let Some(disk_cache) = &self.disk_cache {
+            disk_cache.remove(key);
         }
     }
 
@@ -1211,14 +1255,32 @@ impl HttpCache {
     /// If the guard is alive, all other accesses to this function will block.
     #[servo_tracing::instrument(skip(self))]
     pub async fn get_or_guard(&self, entry_key: CacheKey) -> CachedResourcesOrGuard<'_> {
+        let start = std::time::Instant::now();
         let guard_or_value = self.entries.get_value_or_guard_async(&entry_key).await;
         if let Ok(value) = guard_or_value {
-            return CachedResourcesOrGuard::Value(value.write_owned().await);
+            let value = value.write_owned().await;
+            info!(
+                target: "cache_timing",
+                "memory {}us {}",
+                start.elapsed().as_micros(),
+                entry_key.as_ref()
+            );
+            return CachedResourcesOrGuard::Value(value);
         }
         let guard = guard_or_value.unwrap_err();
 
         if let Some(disk_cache) = &self.disk_cache {
-            if let Some(response) = disk_cache.get(entry_key).await {
+            let disk_start = std::time::Instant::now();
+            let from_disk = disk_cache.get(entry_key.clone()).await;
+            info!(
+                target: "cache_timing",
+                "disk-{} {}us (disk {}us) {}",
+                if from_disk.is_some() { "hit" } else { "miss" },
+                start.elapsed().as_micros(),
+                disk_start.elapsed().as_micros(),
+                entry_key.as_ref()
+            );
+            if let Some(response) = from_disk {
                 if guard.insert(response.clone()).is_err() {
                     error!(
                         "Cache guard is invalid. This should not happen. Cache will be in inconsistent state."

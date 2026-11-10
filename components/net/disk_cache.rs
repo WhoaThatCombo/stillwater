@@ -2,81 +2,187 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::collections::VecDeque;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+//! The HTTP disk cache: an SQLite file that keeps complete responses across restarts.
+//!
+//! Nothing here blocks a fetch on disk I/O it doesn't need:
+//! - Which keys are on disk, their sizes and their age live in memory (`State`), loaded once
+//!   when the cache opens from a small metadata table that holds no bodies. A miss is answered
+//!   from that index without touching SQLite.
+//! - Writes (and evictions to keep the cache under its size limit) happen on one writer
+//!   thread with its own connection. Entries waiting to be written are served from memory.
+//! - Reads run on the blocking thread pool with their own connections; with WAL they never
+//!   wait behind a write.
+//! - Reading an entry leaves it on disk, and an entry is only written again when it changed
+//!   (see `entry_fingerprint`).
 
-use log::error;
-use malloc_size_of_derive::MallocSizeOf;
-use rusqlite::Row;
-use sea_query::{ColumnDef, Expr, ExprTrait, Iden, OnConflict, Query, SqliteQueryBuilder, Table};
-use sea_query_rusqlite::RusqliteBinder;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use log::{error, info};
+use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
+use parking_lot::Mutex;
+use rusqlite::{Connection, OptionalExtension, params};
 use servo_config::pref;
-use servo_url::ServoUrl;
-use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
+use tokio::sync::RwLock as TokioRwLock;
 
 use crate::http_cache::{
     CacheEntry, CacheKey, CachedResource, HttpCacheAssignment, MemoryCacheLifecycle,
+    entry_body_bytes, entry_fingerprint,
 };
 
-#[derive(MallocSizeOf)]
-pub(crate) struct DiskCacheMetadata {
-    key: CacheKey,
-    /// The size of the serialization or the exact size from the cache metadata.
-    size: usize,
+/// Bodies, one row per URL. This is the table earlier versions used (they also read their
+/// metadata from it, which meant reading every body); its layout is unchanged so that their
+/// cache files keep working.
+const CREATE_DATA_TABLE: &str = "CREATE TABLE IF NOT EXISTS disk_cache (
+    key TEXT NOT NULL PRIMARY KEY,
+    data BLOB NOT NULL,
+    size INTEGER NOT NULL,
+    insertion_timestamp INTEGER NOT NULL)";
+
+/// Everything but the bodies: read once at startup to build the in-memory index.
+/// `seq` orders entries from oldest to newest; `fingerprint` identifies the stored version
+/// (0: unknown, for entries carried over from an older cache file).
+const CREATE_META_TABLE: &str = "CREATE TABLE IF NOT EXISTS disk_cache_meta (
+    key TEXT NOT NULL PRIMARY KEY,
+    size INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    fingerprint INTEGER NOT NULL) WITHOUT ROWID";
+
+/// Write at most this many entries, or about this many bytes, per transaction, so newly queued
+/// small entries don't wait long behind big ones.
+const ENTRIES_PER_TRANSACTION: usize = 16;
+const BYTES_PER_TRANSACTION: usize = 2 * 1024 * 1024;
+
+/// What a round of writing left to do.
+#[derive(Default)]
+struct WriteProgress {
+    /// More entries are queued.
+    more: bool,
+    /// Some entries are locked by a fetch: retry soon.
+    busy: bool,
+}
+/// Read connections kept open for reuse.
+const IDLE_READERS: usize = 4;
+
+struct IndexEntry {
+    size: u64,
+    seq: u64,
+    fingerprint: u64,
 }
 
-impl From<&Row<'_>> for DiskCacheMetadata {
-    fn from(row: &Row) -> Self {
-        let s: String = row.get_unwrap("key");
-        Self {
-            key: CacheKey::from_url(ServoUrl::parse(&s).unwrap()),
-            size: row.get_unwrap("size"),
+#[derive(Default)]
+struct State {
+    /// The entries on disk.
+    index: HashMap<String, IndexEntry>,
+    /// The keys of `index`, oldest (least recently stored or read) first.
+    order: BTreeMap<u64, String>,
+    /// The sum of the sizes in `index`.
+    total: u64,
+    next_seq: u64,
+    /// Entries waiting for the writer, with the sequence number they were queued at (their
+    /// age once written).
+    pending: HashMap<String, (CacheEntry, u64)>,
+}
+
+impl State {
+    fn take_seq(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        seq
+    }
+
+    fn insert(&mut self, key: String, size: u64, seq: u64, fingerprint: u64) {
+        self.remove(&key);
+        self.next_seq = self.next_seq.max(seq + 1);
+        self.order.insert(seq, key.clone());
+        self.total += size;
+        self.index.insert(
+            key,
+            IndexEntry {
+                size,
+                seq,
+                fingerprint,
+            },
+        );
+    }
+
+    fn remove(&mut self, key: &str) {
+        if let Some(entry) = self.index.remove(key) {
+            self.order.remove(&entry.seq);
+            self.total -= entry.size;
         }
+    }
+
+    /// Mark `key` as the most recently used entry.
+    fn touch(&mut self, key: &str) {
+        let seq = self.take_seq();
+        if let Some(entry) = self.index.get_mut(key) {
+            self.order.remove(&entry.seq);
+            entry.seq = seq;
+            self.order.insert(seq, key.to_owned());
+        }
+    }
+
+    fn clear_index(&mut self) {
+        self.index.clear();
+        self.order.clear();
+        self.total = 0;
+    }
+
+    /// Remove the oldest entries from the index until the total fits `max_size`; returns
+    /// their keys so their rows can be deleted.
+    fn evict_to(&mut self, max_size: u64) -> Vec<String> {
+        let mut evicted = vec![];
+        while self.total > max_size {
+            let Some((_, key)) = self.order.pop_first() else {
+                error!("Disk cache size accounting is off by {} bytes", self.total);
+                self.total = 0;
+                break;
+            };
+            if let Some(entry) = self.index.remove(&key) {
+                self.total -= entry.size;
+            }
+            evicted.push(key);
+        }
+        evicted
     }
 }
 
-/// This data structure will be per [`HttpCacheAssignment`]. Currently, we only store HttpCacheAssignment::Public and otherwise return zero.
-/// As this data structure stores the state of the cache, if other instances share the same sqlite database, special care has to be taken
-/// to ensure conistency.
-#[derive(MallocSizeOf)]
-struct DiskCacheInner {
-    entries: VecDeque<DiskCacheMetadata>,
-    size: usize,
-    #[ignore_malloc_size_of = "Find a better way"]
-    db: rusqlite::Connection,
-    cache_assignment: HttpCacheAssignment,
-}
-
-#[derive(MallocSizeOf)]
-/// A struct representing the disk cache.
-pub(crate) struct DiskCache {
+/// What is shared between the cache, its writer thread and its readers.
+struct Shared {
     path: PathBuf,
-    max_size: usize,
-    // the non constant data.
-    inner: TokioMutex<DiskCacheInner>,
+    max_size: u64,
+    state: Mutex<State>,
+    readers: Mutex<Vec<Connection>>,
 }
 
-/// Identifications for sea_query of the cache table.
-enum DiskCacheTable {
-    Table,
-    Key,
-    Data,
-    Size,
-    InsertionTimestamp,
+enum Command {
+    /// Entries were added to `State::pending`.
+    Store,
+    /// Delete everything.
+    Clear,
+    /// Delete one entry (already gone from the index).
+    Delete(String),
 }
 
-// Mapping between Enum variant and its corresponding string value
-impl Iden for DiskCacheTable {
-    fn unquoted(&self) -> &str {
-        match self {
-            DiskCacheTable::Table => "disk_cache",
-            DiskCacheTable::Key => "key",
-            DiskCacheTable::Data => "data",
-            DiskCacheTable::Size => "size",
-            DiskCacheTable::InsertionTimestamp => "insertion_timestamp",
-        }
+/// The disk cache.
+pub(crate) struct DiskCache {
+    shared: Arc<Shared>,
+    commands: Mutex<Sender<Command>>,
+}
+
+impl MallocSizeOf for DiskCache {
+    fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
+        // The index: a key and a few numbers per entry, in a hash map and a tree.
+        let state = self.shared.state.lock();
+        state
+            .index
+            .keys()
+            .map(|key| key.capacity() * 2 + 96)
+            .sum()
     }
 }
 
@@ -104,294 +210,562 @@ fn storage_dir() -> Option<PathBuf> {
     }
 }
 
+fn open_reader(path: &Path) -> rusqlite::Result<Connection> {
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    Ok(connection)
+}
+
+fn open_writer(path: &Path) -> rusqlite::Result<Connection> {
+    let connection = open_reader(path)?;
+    connection.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
+    // With WAL, NORMAL only risks losing the last writes on power loss, never corruption.
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    connection.query_row("PRAGMA journal_size_limit = 16777216", [], |_| Ok(()))?;
+    connection.execute_batch(CREATE_DATA_TABLE)?;
+    connection.execute_batch(CREATE_META_TABLE)?;
+    Ok(connection)
+}
+
+/// Make the metadata table describe exactly the rows of the data table. A cache file from an
+/// older version has no metadata yet: build it from the data table without reading bodies
+/// (`length()` of a blob comes from the row header, and `key` precedes `data`).
+fn sync_metadata(connection: &mut Connection) -> rusqlite::Result<()> {
+    let missing_meta: i64 = connection.query_row(
+        "SELECT count(*) FROM disk_cache AS d WHERE NOT EXISTS
+            (SELECT 1 FROM disk_cache_meta AS m WHERE m.key = d.key)",
+        [],
+        |row| row.get(0),
+    )?;
+    let missing_data: i64 = connection.query_row(
+        "SELECT count(*) FROM disk_cache_meta AS m WHERE NOT EXISTS
+            (SELECT 1 FROM disk_cache AS d WHERE d.key = m.key)",
+        [],
+        |row| row.get(0),
+    )?;
+    if missing_meta == 0 && missing_data == 0 {
+        return Ok(());
+    }
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "DELETE FROM disk_cache_meta WHERE NOT EXISTS
+            (SELECT 1 FROM disk_cache AS d WHERE d.key = disk_cache_meta.key)",
+        [],
+    )?;
+    transaction.execute(
+        "INSERT INTO disk_cache_meta (key, size, seq, fingerprint)
+            SELECT key, length(data), rowid, 0 FROM disk_cache AS d WHERE NOT EXISTS
+                (SELECT 1 FROM disk_cache_meta AS m WHERE m.key = d.key)",
+        [],
+    )?;
+    transaction.commit()
+}
+
+fn load_index(connection: &Connection) -> rusqlite::Result<State> {
+    let mut state = State::default();
+    let mut statement =
+        connection.prepare("SELECT key, size, seq, fingerprint FROM disk_cache_meta")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (key, size, seq, fingerprint) = row?;
+        state.insert(key, size.max(0) as u64, seq.max(0) as u64, fingerprint as u64);
+    }
+    Ok(state)
+}
+
 impl DiskCache {
-    /// Creates a new [`DiskCache`] if the preference if set.
-    /// Creates the sqlite table if it does not exist and starts the db connection.
-    /// TODO: Implement WAL and other sqlite pragma.
+    /// Opens the disk cache if the preference is set: creates or upgrades its tables, loads
+    /// the index and starts the writer thread.
     pub(crate) fn new(
         cache_assignment: HttpCacheAssignment,
     ) -> (Option<Arc<DiskCache>>, MemoryCacheLifecycle) {
         // For private browsing we currently do not want to store any disk cache.
-        let disk_cache_path = storage_dir();
-
-        if let Some(disk_cache_path) = disk_cache_path &&
-            cache_assignment == HttpCacheAssignment::Public
-        {
-            let Ok(max_disk_cache_size) = pref!(network_http_disk_cache_size).try_into() else {
+        if cache_assignment != HttpCacheAssignment::Public {
+            return (None, MemoryCacheLifecycle::empty());
+        }
+        let Some(path) = storage_dir() else {
+            return (None, MemoryCacheLifecycle::empty());
+        };
+        let max_size: u64 = pref!(network_http_disk_cache_size);
+        let start = Instant::now();
+        let opened = open_writer(&path).and_then(|mut connection| {
+            sync_metadata(&mut connection)?;
+            let state = load_index(&connection)?;
+            Ok((connection, state))
+        });
+        let (connection, state) = match opened {
+            Ok(opened) => opened,
+            Err(error) => {
+                error!("Could not open the disk cache: {error}");
                 return (None, MemoryCacheLifecycle::empty());
-            };
-
-            let Ok(db) = rusqlite::Connection::open(&disk_cache_path) else {
-                error!("Could not open disk cache database");
-                return (None, MemoryCacheLifecycle::empty());
-            };
-
-            let _ = db.execute("PRAGMA journal_mode = WAL;", ());
-            let query = Table::create()
-                .table(DiskCacheTable::Table)
-                .if_not_exists()
-                .col(
-                    ColumnDef::new(DiskCacheTable::Key)
-                        .text()
-                        .not_null()
-                        .primary_key(),
-                )
-                .col(ColumnDef::new(DiskCacheTable::Data).blob().not_null())
-                .col(ColumnDef::new(DiskCacheTable::Size).integer().not_null())
-                .col(
-                    ColumnDef::new(DiskCacheTable::InsertionTimestamp)
-                        .integer()
-                        .not_null(),
-                )
-                .build(SqliteQueryBuilder);
-            if let Err(e) = db.execute(query.as_str(), ()) {
-                error!("Could not create table. DB Error {:?}", e);
-                return (None, MemoryCacheLifecycle::empty());
-            }
-
-            let (query, values) = Query::select()
-                .columns([DiskCacheTable::Key, DiskCacheTable::Size])
-                .from(DiskCacheTable::Table)
-                .build_rusqlite(SqliteQueryBuilder);
-
-            let (entries, size) = {
-                let Ok(mut st) = db.prepare(query.as_str()) else {
-                    error!("Could not get disk data");
-                    return (None, MemoryCacheLifecycle::empty());
-                };
-                let entries = st
-                    .query_map(&*values.as_params(), |row| Ok(DiskCacheMetadata::from(row)))
-                    .unwrap()
-                    .map(|entry| entry.unwrap())
-                    .collect::<VecDeque<_>>();
-
-                let size = entries.iter().map(|entry| entry.size).sum();
-                (entries, size)
-            };
-            let inner = DiskCacheInner {
-                entries,
-                size,
-                db,
-                cache_assignment,
-            };
-            let disk_cache_data = std::sync::Arc::new(DiskCache {
-                inner: TokioMutex::new(inner),
-                path: disk_cache_path,
-                max_size: max_disk_cache_size,
-            });
-
-            (
-                Some(disk_cache_data.clone()),
-                MemoryCacheLifecycle {
-                    disk_cache: Some(disk_cache_data),
-                },
-            )
-        } else {
-            (None, MemoryCacheLifecycle::empty())
-        }
-    }
-
-    /// Restores a cache entry from the disk if it exists.
-    /// Deletes the entry from the disk cache
-    #[servo_tracing::instrument(skip(self))]
-    pub(crate) async fn get(&self, key: CacheKey) -> Option<Arc<TokioRwLock<Vec<CachedResource>>>> {
-        let bytes = {
-            // we lock the metadata before we update the sqlite database so that
-            // the database and metadata are consistent when this lock is released.
-            let mut inner = self.inner.lock().await;
-            let (bytes, new_size) = {
-                let _span = profile_traits::trace_span!("query disk cache").entered();
-                let (query, query_values) = Query::select()
-                    .columns([DiskCacheTable::Data])
-                    .from(DiskCacheTable::Table)
-                    .and_where(Expr::col(DiskCacheTable::Key).eq(key.as_ref()))
-                    .build_rusqlite(SqliteQueryBuilder);
-                let (delete, delete_values) = Query::delete()
-                    .from_table(DiskCacheTable::Table)
-                    .and_where(Expr::col(DiskCacheTable::Key).eq(key.as_ref()))
-                    .build_rusqlite(SqliteQueryBuilder);
-
-                let mut st = inner.db.prepare(query.as_str()).ok()?;
-                let data: Vec<u8> = st
-                    .query_one(&*query_values.as_params(), |row| Ok(row.get_unwrap("data")))
-                    .ok()?;
-
-                if inner
-                    .db
-                    .execute(delete.as_str(), &*delete_values.as_params())
-                    .is_err()
-                {
-                    error!("Could not delete cached data from disk");
-                    return None;
-                }
-
-                (data, self.get_disk_cache_total_size(&inner.db))
-            };
-
-            {
-                // update the metadata
-                let entry_index = inner
-                    .entries
-                    .iter()
-                    .position(|metadata| metadata.key == key);
-                if let Some(entry_index) = entry_index {
-                    inner.entries.remove(entry_index);
-                }
-                if let Some(new_size) = new_size {
-                    inner.size = new_size;
-                } else {
-                    error!("Could not get disk cache size");
-                }
-            }
-            bytes
+            },
         };
-        let _span = profile_traits::trace_span!("deserialize cache request").entered();
-        let Ok(value) = postcard::from_bytes(&bytes) else {
-            error!("Could not deserialize cached resource");
-            return None;
-        };
-        let deserialized_vec_cached_response = std::sync::Arc::new(TokioRwLock::new(value));
+        info!(
+            target: "cache_timing",
+            "disk cache opened: {} entries, {} bytes, {} us",
+            state.index.len(),
+            state.total,
+            start.elapsed().as_micros()
+        );
 
-        Some(deserialized_vec_cached_response)
-    }
-
-    /// Stores a [`CacheEntry`]` to disk.
-    #[servo_tracing::instrument(skip(self))]
-    pub(crate) async fn store(&self, key: CacheKey, entry: CacheEntry) {
-        let entry = entry.read().await;
-        let data_to_serialize: Vec<&CachedResource> = entry
-            .iter()
-            .filter(|cached_resource| cached_resource.is_done())
-            .collect();
-        if data_to_serialize.is_empty() {
-            return;
-        }
-        // Size the buffer exactly: growing it while serializing (`to_stdvec`) briefly needs up
-        // to twice the body on top of the body itself.
-        let Ok(size) =
-            postcard::serialize_with_flavor(&*data_to_serialize, postcard::ser_flavors::Size::default())
-        else {
-            error!("Could not serialize value");
-            return;
-        };
-        let Ok(data) = postcard::to_extend(&*data_to_serialize, Vec::with_capacity(size)) else {
-            error!("Could not serialize value");
-            return;
-        };
-
+        // Ready for the first lookup.
+        let readers = open_reader(&path).into_iter().collect();
+        let shared = Arc::new(Shared {
+            path,
+            max_size,
+            state: Mutex::new(state),
+            readers: Mutex::new(readers),
+        });
+        let (sender, receiver) = channel();
+        let writer_shared = shared.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("DiskCacheWriter".into())
+            .spawn(move || writer_shared.run_writer(connection, receiver))
         {
-            let mut inner = self.inner.lock().await;
-            let data_size = data.len();
-
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_secs())
-                .unwrap_or(0);
-            let (query, params) = Query::insert()
-                .into_table(DiskCacheTable::Table)
-                .columns([
-                    DiskCacheTable::Key,
-                    DiskCacheTable::Data,
-                    DiskCacheTable::Size,
-                    DiskCacheTable::InsertionTimestamp,
-                ])
-                .on_conflict(
-                    OnConflict::column(DiskCacheTable::Key)
-                        .update_columns([
-                            DiskCacheTable::Data,
-                            DiskCacheTable::Data,
-                            DiskCacheTable::Size,
-                            DiskCacheTable::InsertionTimestamp,
-                        ])
-                        .to_owned(),
-                )
-                .values_panic([
-                    key.as_ref().into(),
-                    data.into(),
-                    (data_size as u32).into(),
-                    timestamp.into(),
-                ])
-                .build_rusqlite(SqliteQueryBuilder);
-
-            if let Err(e) = inner.db.execute(query.as_str(), &*params.as_params()) {
-                error!("Could not insert cache data. Error {}", e);
-            }
-            inner.entries.push_back(DiskCacheMetadata {
-                key,
-                size: data_size,
-            });
-            if let Some(new_cache_size) = self.get_disk_cache_total_size(&inner.db) {
-                inner.size = new_cache_size;
-            }
+            error!("Could not start the disk cache writer: {error}");
+            return (None, MemoryCacheLifecycle::empty());
         }
-        self.delete_until_cache_size().await;
+
+        let disk_cache = Arc::new(DiskCache {
+            shared,
+            commands: Mutex::new(sender),
+        });
+        (
+            Some(disk_cache.clone()),
+            MemoryCacheLifecycle {
+                disk_cache: Some(disk_cache),
+            },
+        )
     }
 
-    /// Deletes data from the cache until the size is <= max_size
+    /// Returns the entry for `key` if the disk cache has it. The entry stays on disk.
     #[servo_tracing::instrument(skip(self))]
-    async fn delete_until_cache_size(&self) {
-        let mut inner = self.inner.lock().await;
-        let mut keys_to_delete = vec![];
-        while self.max_size < inner.size {
-            if let Some(metadata) = inner.entries.pop_back() {
-                keys_to_delete.push(metadata.key);
-                inner.size -= metadata.size;
-            }
-        }
-
-        let keys_ref = keys_to_delete.iter().map(|key| key.as_ref());
-        let (query, values) = Query::delete()
-            .from_table(DiskCacheTable::Table)
-            .and_where(Expr::col(DiskCacheTable::Key).is_in(keys_ref))
-            .build_rusqlite(SqliteQueryBuilder);
-
-        if inner
-            .db
-            .execute(query.as_str(), &*values.as_params())
-            .is_err()
+    pub(crate) async fn get(&self, key: CacheKey) -> Option<CacheEntry> {
+        let key = key.as_ref().to_owned();
         {
-            error!("Could not delete old disk cache entries");
+            let state = self.shared.state.lock();
+            if let Some((entry, _)) = state.pending.get(&key) {
+                return Some(entry.clone());
+            }
+            if !state.index.contains_key(&key) {
+                return None;
+            }
         }
+        let shared = self.shared.clone();
+        tokio::task::spawn_blocking(move || shared.read(&key))
+            .await
+            .ok()
+            .flatten()
     }
 
-    /// Queries the current disk cache size from the sql database.
-    #[servo_tracing::instrument(skip(self))]
-    fn get_disk_cache_total_size(&self, conn: &rusqlite::Connection) -> Option<usize> {
-        let (size, size_values) = Query::select()
-            .expr(Expr::col(DiskCacheTable::Size).sum())
-            .from(DiskCacheTable::Table)
-            .build_rusqlite(SqliteQueryBuilder);
-        let Ok(mut st) = conn.prepare(size.as_str()) else {
-            return None;
-        };
-
-        // According to the sqlite documentation we will return NULL on an empty table.
-        let query_result =
-            st.query_one(&*size_values.as_params(), |row| Ok(row.get(0).unwrap_or(0)));
-        if let Err(query_result) = query_result {
-            error!("Could nto get new sum size {}", query_result);
-            None
-        } else {
-            query_result.ok()
+    /// Queue `entry` to be written to disk, unless the disk already has this version of it.
+    pub(crate) fn store(&self, key: &CacheKey, entry: CacheEntry) {
+        {
+            let mut state = self.shared.state.lock();
+            let generation = state.take_seq();
+            state
+                .pending
+                .insert(key.as_ref().to_owned(), (entry, generation));
         }
+        let _ = self.commands.lock().send(Command::Store);
+    }
+
+    /// Removes the entry for `key`, if any.
+    pub(crate) fn remove(&self, key: &CacheKey) {
+        let key = key.as_ref();
+        {
+            let mut state = self.shared.state.lock();
+            if !state.index.contains_key(key) && !state.pending.contains_key(key) {
+                return;
+            }
+            state.pending.remove(key);
+            state.remove(key);
+        }
+        let _ = self.commands.lock().send(Command::Delete(key.to_owned()));
     }
 
     /// Clears the disk cache.
-    /// Should only be called in sync context and will panic.
     #[servo_tracing::instrument(skip(self))]
     pub(crate) fn clear(&self) {
-        let mut inner = self.inner.blocking_lock();
-        let (query, params) = Query::delete()
-            .from_table(DiskCacheTable::Table)
-            .build_rusqlite(SqliteQueryBuilder);
-        if inner
-            .db
-            .execute(query.as_str(), &*params.as_params())
-            .is_err()
         {
-            error!("Could not clear disk cache");
+            let mut state = self.shared.state.lock();
+            state.clear_index();
+            state.pending.clear();
         }
-        inner.entries.clear();
-        inner.size = 0;
+        let _ = self.commands.lock().send(Command::Clear);
     }
+}
+
+impl Shared {
+    fn read(&self, key: &str) -> Option<CacheEntry> {
+        let _span = profile_traits::trace_span!("query disk cache").entered();
+        let pooled = self.readers.lock().pop();
+        let connection = match pooled {
+            Some(connection) => connection,
+            None => match open_reader(&self.path) {
+                Ok(connection) => connection,
+                Err(error) => {
+                    error!("Could not open the disk cache for reading: {error}");
+                    return None;
+                },
+            },
+        };
+        let bytes = connection
+            .prepare_cached("SELECT data FROM disk_cache WHERE key = ?1")
+            .and_then(|mut statement| {
+                statement
+                    .query_row([key], |row| row.get::<_, Vec<u8>>(0))
+                    .optional()
+            });
+        {
+            let mut readers = self.readers.lock();
+            if readers.len() < IDLE_READERS {
+                readers.push(connection);
+            }
+        }
+        let bytes = match bytes {
+            Ok(bytes) => bytes?,
+            Err(error) => {
+                error!("Could not read from the disk cache: {error}");
+                return None;
+            },
+        };
+
+        let _span = profile_traits::trace_span!("deserialize cache request").entered();
+        let Ok(resources) = postcard::from_bytes::<Vec<CachedResource>>(&bytes) else {
+            error!("Could not deserialize cached resource");
+            return None;
+        };
+        drop(bytes);
+        {
+            let mut state = self.state.lock();
+            state.touch(key);
+            // Entries from an older cache file have no fingerprint yet: this is the version
+            // on disk, so storing it unchanged later writes nothing.
+            if let Some(entry) = state.index.get_mut(key) &&
+                entry.fingerprint == 0
+            {
+                entry.fingerprint = entry_fingerprint(&resources);
+            }
+        }
+        Some(std::sync::Arc::new(TokioRwLock::new(resources)))
+    }
+
+    fn run_writer(&self, mut connection: Connection, commands: Receiver<Command>) {
+        self.trim(&mut connection);
+        let mut progress = WriteProgress::default();
+        loop {
+            let mut received = vec![];
+            let next = if progress.more {
+                commands.try_recv().map_err(|error| match error {
+                    TryRecvError::Empty => RecvTimeoutError::Timeout,
+                    TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
+                })
+            } else if progress.busy {
+                commands.recv_timeout(Duration::from_millis(50))
+            } else {
+                commands.recv().map_err(|_| RecvTimeoutError::Disconnected)
+            };
+            match next {
+                Ok(command) => received.push(command),
+                Err(RecvTimeoutError::Timeout) => {},
+                Err(RecvTimeoutError::Disconnected) => {
+                    while self.write_some(&mut connection).more {}
+                    self.trim(&mut connection);
+                    return;
+                },
+            }
+            received.extend(commands.try_iter());
+            // Deletions were requested before the entries now queued were stored, so they go
+            // first.
+            for command in received {
+                match command {
+                    Command::Store => {},
+                    Command::Clear => self.clear_disk(&connection),
+                    Command::Delete(key) => {
+                        let result = connection.transaction().and_then(|transaction| {
+                            delete_rows(&transaction, std::slice::from_ref(&key))?;
+                            transaction.commit()
+                        });
+                        if let Err(error) = result {
+                            error!("Could not delete a disk cache entry: {error}");
+                        }
+                        // A write that was under way when it was removed may have put it back.
+                        let mut state = self.state.lock();
+                        if !state.pending.contains_key(&key) {
+                            state.remove(&key);
+                        }
+                    },
+                }
+            }
+            progress = self.write_some(&mut connection);
+        }
+    }
+
+    fn clear_disk(&self, connection: &Connection) {
+        if let Err(error) =
+            connection.execute_batch("DELETE FROM disk_cache; DELETE FROM disk_cache_meta;")
+        {
+            error!("Could not clear the disk cache: {error}");
+        }
+        self.state.lock().clear_index();
+    }
+
+    /// Write one transaction's worth of the queued entries, smallest first: on a slow disk
+    /// a page's scripts and stylesheets shouldn't wait behind big downloads (entries still
+    /// queued when the browser exits are lost).
+    fn write_some(&self, connection: &mut Connection) -> WriteProgress {
+        let start = Instant::now();
+        let queued: Vec<(String, CacheEntry, u64)> = self
+            .state
+            .lock()
+            .pending
+            .iter()
+            .map(|(key, (entry, generation))| (key.clone(), entry.clone(), *generation))
+            .collect();
+        if queued.is_empty() {
+            return WriteProgress::default();
+        }
+        let mut busy = false;
+        let mut sized: Vec<(usize, (String, CacheEntry, u64))> = queued
+            .into_iter()
+            .filter_map(|item| {
+                let bytes = item.1.try_read().map(|resources| entry_body_bytes(&resources));
+                match bytes {
+                    Ok(bytes) => Some((bytes, item)),
+                    Err(_) => {
+                        busy = true;
+                        None
+                    },
+                }
+            })
+            .collect();
+        sized.sort_by_key(|(bytes, (_, _, generation))| (*bytes, *generation));
+        let mut bytes = 0;
+        let mut chunk = vec![];
+        let mut rest = sized.into_iter();
+        for (size, item) in rest.by_ref() {
+            bytes += size;
+            chunk.push(item);
+            if chunk.len() >= ENTRIES_PER_TRANSACTION || bytes >= BYTES_PER_TRANSACTION {
+                break;
+            }
+        }
+        let more = rest.next().is_some();
+        let (written, chunk_busy) = self.write_chunk(connection, &chunk);
+        if written > 0 {
+            info!(
+                target: "cache_timing",
+                "disk write: {written} of {} entries, {bytes} bytes, {} us, total {} bytes",
+                chunk.len(),
+                start.elapsed().as_micros(),
+                self.state.lock().total
+            );
+        }
+        WriteProgress {
+            more,
+            busy: busy || chunk_busy,
+        }
+    }
+
+    /// Returns how many entries were written, and whether some were busy.
+    fn write_chunk(
+        &self,
+        connection: &mut Connection,
+        chunk: &[(String, CacheEntry, u64)],
+    ) -> (usize, bool) {
+        enum Outcome {
+            /// Nothing to write: the disk has this version, or nothing in it is complete.
+            Unchanged,
+            Stored { size: u64, seq: u64, fingerprint: u64 },
+            Removed,
+            /// Locked by a fetch; try again later.
+            Busy,
+        }
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0) as i64;
+        let transaction = match connection.transaction() {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                error!("Could not write to the disk cache: {error}");
+                self.forget_pending(chunk);
+                return (0, false);
+            },
+        };
+        let mut outcomes = Vec::with_capacity(chunk.len());
+        for (key, entry, generation) in chunk {
+            let Ok(resources) = entry.try_read() else {
+                outcomes.push(Outcome::Busy);
+                continue;
+            };
+            let fingerprint = entry_fingerprint(&resources);
+            let complete: Vec<&CachedResource> = resources
+                .iter()
+                .filter(|resource| resource.is_done())
+                .collect();
+            let unchanged = self
+                .state
+                .lock()
+                .index
+                .get(key)
+                .is_some_and(|stored| stored.fingerprint == fingerprint);
+            if complete.is_empty() || unchanged {
+                outcomes.push(Outcome::Unchanged);
+                continue;
+            }
+            // Size the buffer exactly: growing it while serializing briefly needs up to twice
+            // the body on top of the body itself.
+            let data = postcard::serialize_with_flavor(
+                &*complete,
+                postcard::ser_flavors::Size::default(),
+            )
+            .and_then(|size| postcard::to_extend(&*complete, Vec::with_capacity(size)));
+            drop(complete);
+            drop(resources);
+            let Ok(data) = data else {
+                error!("Could not serialize a cache entry");
+                outcomes.push(Outcome::Unchanged);
+                continue;
+            };
+            let size = data.len() as u64;
+            let result = if size > self.max_size {
+                transaction
+                    .execute("DELETE FROM disk_cache WHERE key = ?1", [key])
+                    .and_then(|_| {
+                        transaction.execute("DELETE FROM disk_cache_meta WHERE key = ?1", [key])
+                    })
+                    .map(|_| Outcome::Removed)
+            } else {
+                // Entries age from when they were last stored or used, not from when the
+                // writer got to them.
+                let seq = *generation;
+                transaction
+                    .prepare_cached(
+                        "INSERT INTO disk_cache (key, data, size, insertion_timestamp)
+                            VALUES (?1, ?2, ?3, ?4)
+                            ON CONFLICT(key) DO UPDATE SET data = excluded.data,
+                                size = excluded.size,
+                                insertion_timestamp = excluded.insertion_timestamp",
+                    )
+                    .and_then(|mut statement| {
+                        statement.execute(params![key, data, size as i64, timestamp])
+                    })
+                    .and_then(|_| {
+                        transaction
+                            .prepare_cached(
+                                "INSERT INTO disk_cache_meta (key, size, seq, fingerprint)
+                                    VALUES (?1, ?2, ?3, ?4)
+                                    ON CONFLICT(key) DO UPDATE SET size = excluded.size,
+                                        seq = excluded.seq, fingerprint = excluded.fingerprint",
+                            )?
+                            .execute(params![key, size as i64, seq as i64, fingerprint as i64])
+                    })
+                    .map(|_| Outcome::Stored {
+                        size,
+                        seq,
+                        fingerprint,
+                    })
+            };
+            outcomes.push(result.unwrap_or_else(|error| {
+                error!("Could not write a cache entry: {error}");
+                Outcome::Unchanged
+            }));
+        }
+        // Update the index and delete the oldest entries in the same transaction, so the
+        // file never holds more than the size limit. (Until the commit, lookups of these
+        // entries are answered from `pending`.)
+        let mut written = 0;
+        let mut busy = false;
+        let evicted = {
+            let mut state = self.state.lock();
+            for ((key, _, _), outcome) in chunk.iter().zip(&outcomes) {
+                match *outcome {
+                    Outcome::Stored {
+                        size,
+                        seq,
+                        fingerprint,
+                    } => {
+                        written += 1;
+                        state.insert(key.clone(), size, seq, fingerprint)
+                    },
+                    Outcome::Removed => state.remove(key),
+                    Outcome::Busy => busy = true,
+                    Outcome::Unchanged => {},
+                }
+            }
+            state.evict_to(self.max_size)
+        };
+        let deleted = delete_rows(&transaction, &evicted);
+        if let Err(error) = deleted.and_then(|_| transaction.commit()) {
+            error!("Could not write to the disk cache: {error}");
+            self.forget_pending(chunk);
+            return (0, false);
+        }
+
+        let mut state = self.state.lock();
+        for ((key, _, generation), outcome) in chunk.iter().zip(outcomes) {
+            // An entry queued again meanwhile (it may have changed) stays queued.
+            if !matches!(outcome, Outcome::Busy) &&
+                state
+                    .pending
+                    .get(key)
+                    .is_some_and(|(_, queued)| queued == generation)
+            {
+                state.pending.remove(key);
+            }
+        }
+        (written, busy)
+    }
+
+    fn forget_pending(&self, chunk: &[(String, CacheEntry, u64)]) {
+        let mut state = self.state.lock();
+        for (key, _, generation) in chunk {
+            if state
+                .pending
+                .get(key)
+                .is_some_and(|(_, queued)| queued == generation)
+            {
+                state.pending.remove(key);
+            }
+        }
+    }
+
+    /// Delete the oldest entries until the cache fits its size limit (when the limit was
+    /// lowered, or an older version left the cache over it).
+    fn trim(&self, connection: &mut Connection) {
+        let evicted = self.state.lock().evict_to(self.max_size);
+        if evicted.is_empty() {
+            return;
+        }
+        let result = connection.transaction().and_then(|transaction| {
+            delete_rows(&transaction, &evicted)?;
+            transaction.commit()
+        });
+        if let Err(error) = result {
+            error!("Could not delete old disk cache entries: {error}");
+        }
+        info!(target: "cache_timing", "disk trim: {} entries deleted", evicted.len());
+    }
+}
+
+fn delete_rows(connection: &Connection, keys: &[String]) -> rusqlite::Result<()> {
+    for key in keys {
+        connection
+            .prepare_cached("DELETE FROM disk_cache WHERE key = ?1")?
+            .execute([key])?;
+        connection
+            .prepare_cached("DELETE FROM disk_cache_meta WHERE key = ?1")?
+            .execute([key])?;
+    }
+    Ok(())
 }
