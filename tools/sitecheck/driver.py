@@ -78,6 +78,8 @@ class Stillwater:
         environment = dict(os.environ if env is None else env)
         environment["STILLWATER_CONFIG_DIR"] = str(profile)
         environment["STILLWATER_NO_UPDATE_CHECK"] = "1"
+        # A test copy never hands its URL to (or takes over from) a Stillwater the user is running.
+        environment.setdefault("STILLWATER_NO_SINGLE_INSTANCE", "1")
         # Automated runs are silent and never steal focus (STILLWATER_TEST_SOUND=1 keeps audio).
         if "STILLWATER_TEST_SOUND" not in environment:
             environment["STILLWATER_MUTE_AUDIO"] = "1"
