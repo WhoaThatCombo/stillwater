@@ -31,7 +31,7 @@ FileDescription = "Stillwater"
 LegalCopyright = "© The Servo Project Developers and Stillwater contributors"
 OriginalFilename = "Stillwater.exe"
 ProductName = "Stillwater"
-ProductVersion = "0.8.3"
+ProductVersion = "0.8.4"
 
 [features]
 # Don't add new features to `default` directly. Add to `default_base` instead.
