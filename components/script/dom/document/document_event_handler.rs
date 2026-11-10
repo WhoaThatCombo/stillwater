@@ -82,6 +82,7 @@ use crate::dom::types::{
     HTMLElement, HTMLLabelElement, MouseEvent, Touch, TouchEvent, TouchList, WheelEvent, Window,
 };
 use crate::dom::window::scrolling_box::{ScrollAxisState, ScrollRequirement, ScrollingBoxAxis};
+use crate::event_loop::timers::OneshotTimerCallback;
 use crate::dom::window::windowproxy::WindowOpenType;
 use crate::drag::drag_gesture::DragGesture;
 use crate::navigation::navigate;
@@ -271,6 +272,12 @@ pub(crate) struct DocumentEventHandler {
     /// The current drag gesture, if one exists. Events that affect this drag
     /// gesture will be forwarded to it.
     drag_gesture: DomRefCell<Option<DragGesture>>,
+    /// Stillwater: while a selection drag is held near or past the top or bottom edge of the
+    /// viewport, the last pointer position; the page auto-scrolls toward it.
+    #[no_trace]
+    selection_autoscroll_point: Cell<Option<Point2D<f32, CSSPixel>>>,
+    /// Whether a [`SelectionAutoscroll`] timer is pending.
+    selection_autoscroll_scheduled: Cell<bool>,
 }
 
 impl DocumentEventHandler {
@@ -298,6 +305,8 @@ impl DocumentEventHandler {
             pending_pointer_capture: Default::default(),
             pointer_capture_target: Default::default(),
             drag_gesture: Default::default(),
+            selection_autoscroll_point: Default::default(),
+            selection_autoscroll_scheduled: Cell::new(false),
         }
     }
 
@@ -700,6 +709,7 @@ impl DocumentEventHandler {
                 *maybe_drag_gesture = None;
             }
         }
+        self.update_selection_autoscroll(hit_test_result.point_in_frame);
 
         let old_mouse_move_point = self
             .most_recent_mousemove_point
@@ -3096,6 +3106,88 @@ impl DocumentEventHandler {
     }
 
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
+    /// Stillwater: start or stop auto-scrolling for a selection drag at `point`: within
+    /// [`SELECTION_AUTOSCROLL_EDGE`] of the top or bottom of the viewport (or past it) the page
+    /// scrolls toward the pointer while the button is held, even when the pointer does not
+    /// move, and the selection follows.
+    fn update_selection_autoscroll(&self, point: Point2D<f32, CSSPixel>) {
+        let selecting = self
+            .drag_gesture
+            .borrow()
+            .as_ref()
+            .is_some_and(DragGesture::is_document_selection);
+        let height = self.window.InnerHeight() as f32;
+        let at_edge = point.y < SELECTION_AUTOSCROLL_EDGE ||
+            point.y > height - SELECTION_AUTOSCROLL_EDGE;
+        if !selecting || !at_edge {
+            self.selection_autoscroll_point.set(None);
+            return;
+        }
+        self.selection_autoscroll_point.set(Some(point));
+        self.schedule_selection_autoscroll();
+    }
+
+    fn schedule_selection_autoscroll(&self) {
+        if self.selection_autoscroll_scheduled.replace(true) {
+            return;
+        }
+        self.window.upcast::<GlobalScope>().schedule_callback(
+            OneshotTimerCallback::SelectionAutoscroll(SelectionAutoscroll),
+            Duration::from_millis(16),
+        );
+    }
+
+    /// One step of selection auto-scrolling.
+    pub(crate) fn selection_autoscroll_step(&self, cx: &mut JSContext) {
+        self.selection_autoscroll_scheduled.set(false);
+        let Some(point) = self.selection_autoscroll_point.get() else {
+            return;
+        };
+        if !self
+            .drag_gesture
+            .borrow()
+            .as_ref()
+            .is_some_and(DragGesture::is_document_selection)
+        {
+            self.selection_autoscroll_point.set(None);
+            return;
+        }
+
+        // Speed grows with how far into the edge zone (or past it) the pointer is.
+        let height = self.window.InnerHeight() as f32;
+        let delta = if point.y < SELECTION_AUTOSCROLL_EDGE {
+            point.y - SELECTION_AUTOSCROLL_EDGE
+        } else {
+            point.y - (height - SELECTION_AUTOSCROLL_EDGE)
+        };
+        let step = (delta.abs() / 2.0).clamp(2.0, 60.0).copysign(delta);
+        let before = self.window.ScrollY(cx);
+        self.window.ScrollBy_(cx, 0.0, step as f64);
+        let scrolled = self.window.ScrollY(cx) != before;
+
+        // Extend the selection to what is now under the (held) pointer.
+        let clamped = Point2D::new(point.x, point.y.clamp(1.0, (height - 2.0).max(1.0)));
+        if let Some(hit_test_result) = self.window.hit_test_from_point_in_viewport(
+            cx,
+            HitTestFlags::IncludeDomPosition,
+            clamped,
+        ) {
+            let mut maybe_drag_gesture = self.drag_gesture.borrow_mut();
+            if maybe_drag_gesture.as_ref().is_some_and(|drag_gesture| {
+                !drag_gesture.handle_autoscroll(cx, &hit_test_result)
+            }) {
+                *maybe_drag_gesture = None;
+            }
+        }
+
+        if scrolled {
+            self.schedule_selection_autoscroll();
+        } else {
+            // At the end of the page: wait for the pointer to move again.
+            self.selection_autoscroll_point.set(None);
+        }
+    }
+
     pub(crate) fn install_drag_gesture(&self, drag_gesture: DragGesture) {
         *self.drag_gesture.borrow_mut() = Some(drag_gesture);
     }
@@ -3246,4 +3338,23 @@ pub(crate) fn character_to_code(character: char) -> Option<Code> {
         ' ' => Code::Space,
         _ => return None,
     })
+}
+
+/// Stillwater: how close to the top or bottom of the viewport a selection drag starts
+/// auto-scrolling, in CSS pixels.
+const SELECTION_AUTOSCROLL_EDGE: f32 = 20.0;
+
+/// The timer callback for one step of selection auto-scrolling.
+#[derive(JSTraceable, MallocSizeOf)]
+pub(crate) struct SelectionAutoscroll;
+
+impl SelectionAutoscroll {
+    pub(crate) fn invoke(self, cx: &mut JSContext, global: &GlobalScope) {
+        if let Some(window) = global.downcast::<Window>() {
+            window
+                .Document()
+                .event_handler()
+                .selection_autoscroll_step(cx);
+        }
+    }
 }

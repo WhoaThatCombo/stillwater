@@ -39,6 +39,7 @@ use crate::dom::bindings::root::{AsHandleValue, Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::csp::CspReporting;
 use crate::dom::document::RefreshRedirectDue;
+use crate::dom::document_event_handler::SelectionAutoscroll;
 use crate::dom::eventsource::EventSourceTimeoutCallback;
 use crate::dom::geolocation::geolocation::GeolocationTimeoutCallback;
 use crate::dom::globalscope::GlobalScope;
@@ -213,6 +214,8 @@ pub(crate) enum OneshotTimerCallback {
     #[cfg(feature = "testbinding")]
     TestBindingCallback(TestBindingCallback),
     RefreshRedirectDue(RefreshRedirectDue),
+    /// Stillwater: one step of auto-scrolling during a selection drag.
+    SelectionAutoscroll(SelectionAutoscroll),
     /// <https://html.spec.whatwg.org/multipage/#run-steps-after-a-timeout>
     RunStepsAfterTimeout {
         /// Step 1. timerKey
@@ -237,6 +240,7 @@ impl OneshotTimerCallback {
             #[cfg(feature = "testbinding")]
             OneshotTimerCallback::TestBindingCallback(callback) => callback.invoke(cx),
             OneshotTimerCallback::RefreshRedirectDue(callback) => callback.invoke(cx, global),
+            OneshotTimerCallback::SelectionAutoscroll(callback) => callback.invoke(cx, global),
             OneshotTimerCallback::RunStepsAfterTimeout { completion, .. } => {
                 // <https://html.spec.whatwg.org/multipage/#run-steps-after-a-timeout>
                 // Step 4.4 Perform completionSteps.
