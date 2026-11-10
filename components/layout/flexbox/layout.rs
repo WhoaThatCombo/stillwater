@@ -2774,42 +2774,35 @@ impl FlexItemBox {
         automatic_inline_size: Size<Au>,
         intrinsic_sizing_mode: IntrinsicSizingMode,
     ) -> Au {
-        let content_block_size = || {
-            let mut positioning_context = PositioningContext::default();
-
+        // TODO: This is wrong if the item writing mode is different from the flex
+        // container's writing mode.
+        let inline_size = LazyCell::new(|| {
             // We are computing the intrinsic block size, so the tentative block size that we use
             // as an input to the intrinsic inline sizes needs to ignore the values of the sizing
             // properties in the block axis.
             let tentative_block_size = SizeConstraint::default();
-
-            // TODO: This is wrong if the item writing mode is different from the flex
-            // container's writing mode.
-            let inline_size = {
-                let stretch_size = flex_context
-                    .containing_block
-                    .inline_stretch_size(pbm_auto_is_zero.cross);
-                let get_content_size = || {
-                    self.inline_content_sizes(
-                        flex_context,
-                        tentative_block_size,
-                        preferred_aspect_ratio,
-                    )
-                };
-                content_box_sizes.inline.resolve(
-                    LogicalAxis::Inline,
-                    automatic_inline_size,
-                    Au::zero,
-                    stretch_size,
-                    get_content_size,
-                    false,
-                )
+            let stretch_size = flex_context
+                .containing_block
+                .inline_stretch_size(pbm_auto_is_zero.cross);
+            let get_content_size = || {
+                self.inline_content_sizes(flex_context, tentative_block_size, preferred_aspect_ratio)
             };
-
+            content_box_sizes.inline.resolve(
+                LogicalAxis::Inline,
+                automatic_inline_size,
+                Au::zero,
+                stretch_size,
+                get_content_size,
+                false,
+            )
+        });
+        let content_block_size = || {
+            let mut positioning_context = PositioningContext::default();
             self.independent_formatting_context
                 .content_block_size_under_default_constraint(
                     flex_context.layout_context,
                     &mut positioning_context,
-                    inline_size,
+                    *inline_size,
                     flex_context.containing_block,
                     preferred_aspect_ratio,
                     &LazySize::intrinsic(),
@@ -2820,7 +2813,33 @@ impl FlexItemBox {
                 let stretch_size = flex_context
                     .containing_block
                     .block_stretch_size(pbm_auto_is_zero.main);
-                let inner_block_size = content_box_sizes.block.resolve(
+                // The block size contribution of a non-replaced item with `aspect-ratio` and an
+                // automatic block size is the size transferred from its inline size, as when it
+                // is laid out (`FlexItem::aspect_ratio_block_sizes`, case B of the flex base
+                // size), growing to fit its contents only when `min-block-size` is `auto` and
+                // overflow is visible. Without this, an empty or abspos-filled ratio box (X's
+                // media boxes, `flex flex-col` > `relative` + `aspect-ratio`) contributes 0,
+                // the column container sizes itself to 0, and the item is shrunk to 0.
+                // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-size-transfers>
+                let mut block_sizes = content_box_sizes.block.clone();
+                let context = &self.independent_formatting_context;
+                if let Some(ratio) = preferred_aspect_ratio &&
+                    !context.is_replaced() &&
+                    !context.is_table() &&
+                    block_sizes.preferred.is_initial()
+                {
+                    block_sizes.preferred = Size::Numeric(
+                        ratio.compute_dependent_size(LogicalAxis::Block, *inline_size),
+                    );
+                    if block_sizes.min.is_initial() &&
+                        !context
+                            .style()
+                            .establishes_scroll_container(self.base_fragment_info().flags)
+                    {
+                        block_sizes.min = Size::MinContent;
+                    }
+                }
+                let inner_block_size = block_sizes.resolve(
                     LogicalAxis::Block,
                     Size::FitContent,
                     Au::zero,
