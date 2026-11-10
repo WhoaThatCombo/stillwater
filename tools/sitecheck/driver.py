@@ -40,12 +40,40 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
+def remove_old_test_profiles(days: float = 1) -> None:
+    """Scratch profiles left in the temp folder by earlier test runs add up to gigabytes.
+
+    Removes those older than `days`: only folders directly in the temp folder that hold a
+    Stillwater profile (its history database or engine folder), so nothing else is touched.
+    """
+    import shutil
+    cutoff = time.time() - days * 86400
+    try:
+        folders = list(Path(tempfile.gettempdir()).iterdir())
+    except OSError:
+        return
+    for folder in folders:
+        try:
+            if (folder.is_dir() and not folder.is_symlink() and folder.stat().st_mtime < cutoff and
+                    folder.name != "stillwater-test-adblock" and
+                    ((folder / "stillwater-history.sqlite").exists() or
+                     (folder / "engine" / "cookie_jar.json").exists())):
+                shutil.rmtree(folder, ignore_errors=True)
+        except OSError:
+            pass
+
+
 class Stillwater:
+    _cleaned = False
+
     def __init__(self, exe: Path, profile: Path, log_file: Path | None = None, *,
                  args: list[str] = (), env: dict[str, str] | None = None, output=None,
                  headless: bool = True, window_size: str = "1280x800",
                  page_load_seconds: float = 30, script_seconds: float = 10,
                  slow_script_seconds: float | None = None):
+        if not Stillwater._cleaned:
+            Stillwater._cleaned = True
+            remove_old_test_profiles()
         self.port = free_port()
         environment = dict(os.environ if env is None else env)
         environment["STILLWATER_CONFIG_DIR"] = str(profile)
