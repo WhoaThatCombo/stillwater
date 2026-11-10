@@ -121,12 +121,54 @@ pub struct HeadedWindow {
     last_gutter_press: Cell<Option<std::time::Instant>>,
     /// Light/dark chosen in Stillwater's settings; `None` follows Windows.
     theme_override: Cell<Option<Theme>>,
+    /// Mouse buttons pressed on the page whose release the page hasn't seen yet. The release
+    /// always goes to the page, wherever the cursor is, and is synthesized when the window
+    /// loses focus first (Alt+Tab mid-press: Windows gives the release to the other app), so
+    /// a drag-selection can never outlive the real button press.
+    page_buttons_held: RefCell<Vec<MouseButton>>,
+    /// The same for the split view and Glance panes: the pane, the button, and the last point
+    /// inside the pane (where a release that happens elsewhere is delivered).
+    pane_buttons_held: RefCell<Vec<(PaneKind, MouseButton, Point2D<f32, DevicePixel>)>>,
+    /// While dragging the sidebar's right edge: the cursor's x offset from that edge.
+    sidebar_resize_grab: Cell<Option<f32>>,
+    /// The cursor is on the sidebar's resize edge.
+    over_sidebar_handle: Cell<bool>,
+    /// The last press on the sidebar's edge, to reset the width on double-click.
+    last_sidebar_handle_press: Cell<Option<std::time::Instant>>,
 }
 
 /// `STILLWATER_BACKGROUND_WINDOW`: for automated tests, the window opens off-screen, out of the
 /// taskbar, and never takes keyboard focus from other programs.
 pub(crate) fn background_window() -> bool {
     std::env::var_os("STILLWATER_BACKGROUND_WINDOW").is_some()
+}
+
+/// The longest gap between the two presses of a double-click (the Windows setting).
+fn double_click_time() -> std::time::Duration {
+    let millis = crate::prefs::system_double_click().map_or(500, |(time, _)| time);
+    std::time::Duration::from_millis(millis.into())
+}
+
+/// The nearest point inside `rect` (a release outside the page is delivered at its edge).
+fn clamp_to_rect(
+    point: Point2D<f32, DevicePixel>,
+    rect: &Rect<f32, DevicePixel>,
+) -> Point2D<f32, DevicePixel> {
+    Point2D::new(
+        point.x.clamp(rect.min_x(), (rect.max_x() - 1.0).max(rect.min_x())),
+        point.y.clamp(rect.min_y(), (rect.max_y() - 1.0).max(rect.min_y())),
+    )
+}
+
+fn servo_mouse_button(button: MouseButton) -> ServoMouseButton {
+    match button {
+        MouseButton::Left => ServoMouseButton::Primary,
+        MouseButton::Right => ServoMouseButton::Secondary,
+        MouseButton::Middle => ServoMouseButton::Auxiliary,
+        MouseButton::Back => ServoMouseButton::Back,
+        MouseButton::Forward => ServoMouseButton::Forward,
+        MouseButton::Other(value) => ServoMouseButton::Other(value),
+    }
 }
 
 impl HeadedWindow {
@@ -276,6 +318,11 @@ impl HeadedWindow {
             last_paint: Cell::new(None),
             last_gutter_press: Cell::new(None),
             theme_override: Cell::new(None),
+            page_buttons_held: Default::default(),
+            pane_buttons_held: Default::default(),
+            sidebar_resize_grab: Cell::new(None),
+            over_sidebar_handle: Cell::new(false),
+            last_sidebar_handle_press: Cell::new(None),
         })
     }
 
@@ -417,10 +464,32 @@ impl HeadedWindow {
         action: ElementState,
     ) {
         // `point` can be outside viewport, such as at toolbar with negative y-coordinate.
-        let point = self.webview_relative_mouse_point.get();
+        let mut point = self.webview_relative_mouse_point.get();
         let webview_rect: Rect<_, _> = webview.size().into();
-        if !webview_rect.contains(point) {
-            return;
+        match action {
+            ElementState::Pressed => {
+                if !webview_rect.contains(point) {
+                    return;
+                }
+                let mut held = self.page_buttons_held.borrow_mut();
+                if !held.contains(&button) {
+                    held.push(button);
+                }
+            },
+            ElementState::Released => {
+                let was_held = {
+                    let mut held = self.page_buttons_held.borrow_mut();
+                    let index = held.iter().position(|held| *held == button);
+                    index.map(|index| held.remove(index)).is_some()
+                };
+                if !was_held && !webview_rect.contains(point) {
+                    return;
+                }
+                // A press on the page is always released on the page, even when the cursor
+                // has wandered over the sidebar, the margins or out of the window; otherwise
+                // the page keeps extending its selection on every later mouse move.
+                point = clamp_to_rect(point, &webview_rect);
+            },
         }
 
         if self
@@ -434,14 +503,7 @@ impl HeadedWindow {
             return;
         }
 
-        let mouse_button = match &button {
-            MouseButton::Left => ServoMouseButton::Primary,
-            MouseButton::Right => ServoMouseButton::Secondary,
-            MouseButton::Middle => ServoMouseButton::Auxiliary,
-            MouseButton::Back => ServoMouseButton::Back,
-            MouseButton::Forward => ServoMouseButton::Forward,
-            MouseButton::Other(value) => ServoMouseButton::Other(*value),
-        };
+        let mouse_button = servo_mouse_button(button);
 
         let action = match action {
             ElementState::Pressed => MouseButtonAction::Down,
@@ -455,10 +517,188 @@ impl HeadedWindow {
         )));
     }
 
+    /// Send the page a release for every button it still thinks is held. Used when the window
+    /// loses focus mid-press, and when the OS says the button is no longer down.
+    fn release_held_page_buttons(&self, webview: &WebView) {
+        let held = std::mem::take(&mut *self.page_buttons_held.borrow_mut());
+        if held.is_empty() {
+            return;
+        }
+        let webview_rect: Rect<_, _> = webview.size().into();
+        let point = clamp_to_rect(self.webview_relative_mouse_point.get(), &webview_rect);
+        for button in held {
+            diagnostics::log(format!("mouse: releasing stuck {button:?} on the page"));
+            webview.notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                MouseButtonAction::Up,
+                servo_mouse_button(button),
+                point.into(),
+            )));
+        }
+    }
+
+    /// Release, in the panes, every button pressed there whose release they haven't seen.
+    fn release_held_pane_buttons(&self) {
+        let held = std::mem::take(&mut *self.pane_buttons_held.borrow_mut());
+        let gui = self.gui.borrow();
+        for (kind, button, point) in held {
+            if let Some(webview) = gui.pane_webview(kind) {
+                diagnostics::log(format!("mouse: releasing stuck {button:?} in the {kind:?} pane"));
+                webview.notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                    MouseButtonAction::Up,
+                    servo_mouse_button(button),
+                    point.into(),
+                )));
+            }
+        }
+    }
+
+    /// A release of a button pressed in a pane goes to that pane, wherever the cursor is.
+    /// Returns true if `button` was held in a pane.
+    fn release_pane_button(&self, button: MouseButton) -> bool {
+        let entry = {
+            let mut held = self.pane_buttons_held.borrow_mut();
+            let index = held.iter().position(|(_, held, _)| *held == button);
+            index.map(|index| held.remove(index))
+        };
+        let Some((kind, _, last_point)) = entry else {
+            return false;
+        };
+        let point = match self.pane_mouse.get() {
+            Some((over, point)) if over == kind => point,
+            _ => last_point,
+        };
+        if let Some(webview) = self.gui.borrow().pane_webview(kind) {
+            webview.notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                MouseButtonAction::Up,
+                servo_mouse_button(button),
+                point.into(),
+            )));
+        }
+        true
+    }
+
+    /// Resize the sidebar by dragging its right edge. Returns true if the event was consumed.
+    fn handle_sidebar_resize_event(
+        &self,
+        window: &Rc<ServoShellWindow>,
+        event: &WindowEvent,
+    ) -> bool {
+        let scale = self.hidpi_scale_factor();
+        let window_width = self.winit_window.inner_size().width as f32 / scale.get();
+        match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                let point = winit_position_to_euclid_point(*position).to_f32() / scale;
+                if let Some(grab) = self.sidebar_resize_grab.get() {
+                    if self.gui.borrow().sidebar.drag_width(point.x - grab, window_width) {
+                        // The page and sidebar resize on the next frame (see Gui::update).
+                        window.set_needs_update();
+                        self.winit_window.request_redraw();
+                    }
+                    return true;
+                }
+                // A press that began elsewhere (a selection drag on the page, a tab drag in
+                // the sidebar) passes over the edge without turning into a resize.
+                // While a dialog (the page's context menu, an alert) is open it owns the mouse.
+                let dialog_open = window
+                    .active_webview()
+                    .is_some_and(|webview| self.has_active_dialog_for_webview(webview.id()));
+                let over = !dialog_open &&
+                    self.page_buttons_held.borrow().is_empty() &&
+                    !(cfg!(target_os = "windows") && crate::desktop::gui::left_button_held()) &&
+                    self.gui.borrow().sidebar_resize_handle_contains(point);
+                if self.over_sidebar_handle.replace(over) != over {
+                    let icon = if over {
+                        winit::window::CursorIcon::ColResize
+                    } else {
+                        winit::window::CursorIcon::Default
+                    };
+                    self.winit_window.set_cursor(icon);
+                    if over {
+                        // Leave hover state on whichever side the cursor came from.
+                        if let Some(active) = window.active_webview() {
+                            active.notify_input_event(InputEvent::MouseLeftViewport(
+                                MouseLeftViewportEvent::default(),
+                            ));
+                        }
+                        if self.sidebar_mouse_point.take().is_some() &&
+                            let Some(sidebar) = self.gui.borrow().sidebar.webview()
+                        {
+                            sidebar.notify_input_event(InputEvent::MouseLeftViewport(
+                                MouseLeftViewportEvent::default(),
+                            ));
+                        }
+                    }
+                }
+                if over {
+                    // egui still needs the pointer position for tooltips and the top bar.
+                    let _ = self.gui.borrow_mut().on_window_event(&self.winit_window, event);
+                }
+                over
+            },
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } if self.over_sidebar_handle.get() => {
+                let now = std::time::Instant::now();
+                let double = self
+                    .last_sidebar_handle_press
+                    .replace(Some(now))
+                    .is_some_and(|last| now.duration_since(last) < double_click_time());
+                let gui = self.gui.borrow();
+                if double {
+                    self.last_sidebar_handle_press.set(None);
+                    gui.sidebar.reset_width();
+                    window.set_needs_update();
+                    self.winit_window.request_redraw();
+                } else if let Some(point) = self.last_mouse_position.get() {
+                    let edge = gui.sidebar.width_for(window_width);
+                    self.sidebar_resize_grab.set(Some(point.x - edge));
+                }
+                true
+            },
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } if self.sidebar_resize_grab.get().is_some() => {
+                self.sidebar_resize_grab.set(None);
+                self.gui.borrow().sidebar.commit_width();
+                true
+            },
+            // Other presses and wheel turns on the edge reach neither side.
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                ..
+            } |
+            WindowEvent::MouseWheel { .. }
+                if self.over_sidebar_handle.get() =>
+            {
+                true
+            },
+            WindowEvent::Focused(false) if self.sidebar_resize_grab.get().is_some() => {
+                // Alt+Tab mid-drag: keep the width reached so far.
+                self.sidebar_resize_grab.set(None);
+                self.gui.borrow().sidebar.commit_width();
+                false
+            },
+            _ => false,
+        }
+    }
+
     /// Helper function to handle mouse move events.
     fn handle_mouse_move_event(&self, webview: &WebView, position: PhysicalPosition<f64>) {
         let mut point = winit_position_to_euclid_point(position).to_f32();
         point -= self.content_origin() * self.hidpi_scale_factor();
+
+        // Belt and braces: if the page thinks the primary button is down but it physically
+        // isn't (its release went to another window), end the press before moving, so the
+        // move can't extend a selection.
+        if self.page_buttons_held.borrow().contains(&MouseButton::Left) &&
+            !crate::desktop::gui::left_button_held()
+        {
+            self.release_held_page_buttons(webview);
+        }
 
         let previous_point = self.webview_relative_mouse_point.get();
         self.webview_relative_mouse_point.set(point);
@@ -575,6 +815,11 @@ impl HeadedWindow {
             .shortcut(CMD_OR_CONTROL, '9', || post("tab-index\tlast"))
             .shortcut(Modifiers::CONTROL, Key::Named(NamedKey::PageDown), || {
                 post("tab-next")
+            })
+            // Ctrl+Tab / Ctrl+Shift+Tab: the next / previous tab in sidebar order, wrapping.
+            .shortcut(Modifiers::CONTROL, Key::Named(NamedKey::Tab), || post("tab-next"))
+            .shortcut(Modifiers::CONTROL | Modifiers::SHIFT, Key::Named(NamedKey::Tab), || {
+                post("tab-prev")
             })
             .shortcut(Modifiers::CONTROL, Key::Named(NamedKey::PageUp), || {
                 post("tab-prev")
@@ -915,6 +1160,22 @@ impl HeadedWindow {
                             ));
                         }
                         self.pane_mouse.set(Some((kind, local)));
+                        let stale = {
+                            let mut held = self.pane_buttons_held.borrow_mut();
+                            for (held_kind, _, point) in held.iter_mut() {
+                                if *held_kind == kind {
+                                    *point = local;
+                                }
+                            }
+                            held.iter().any(|(_, button, _)| *button == MouseButton::Left) &&
+                                !crate::desktop::gui::left_button_held()
+                        };
+                        if stale {
+                            // The release went to another window (see `release_held_page_buttons`).
+                            drop(gui);
+                            self.release_held_pane_buttons();
+                            return self.handle_pane_event(state, window, event);
+                        }
                         if let Some(cursor) = gui.pane_cursor(kind) {
                             self.set_cursor(cursor);
                         }
@@ -971,13 +1232,26 @@ impl HeadedWindow {
                             _ => {},
                         }
                     }
-                    let action = if pressed {
-                        MouseButtonAction::Down
-                    } else {
-                        MouseButtonAction::Up
-                    };
+                    if !pressed {
+                        // A release whose press happened elsewhere (matched ones were delivered
+                        // by `release_pane_button`).
+                        webview.notify_input_event(InputEvent::MouseButton(
+                            MouseButtonEvent::new(
+                                MouseButtonAction::Up,
+                                to_servo_button(button),
+                                local.into(),
+                            ),
+                        ));
+                        return true;
+                    }
+                    {
+                        let mut held = self.pane_buttons_held.borrow_mut();
+                        if !held.iter().any(|(_, held, _)| held == button) {
+                            held.push((kind, *button, local));
+                        }
+                    }
                     webview.notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
-                        action,
+                        MouseButtonAction::Down,
                         to_servo_button(button),
                         local.into(),
                     )));
@@ -1136,6 +1410,50 @@ impl HeadedWindow {
             window.set_needs_update();
         }
 
+        // Keep modifier state in sync no matter who consumes the event (it used to be updated
+        // only when a page was active and egui didn't consume it), and forget held keys and
+        // buttons when focus leaves: Alt+Tab mid-press gives the releases to another app.
+        if let WindowEvent::ModifiersChanged(modifiers) = &event {
+            self.modifiers_state.set(modifiers.state());
+        }
+        if let WindowEvent::Focused(false) = event {
+            self.modifiers_state.set(ModifiersState::empty());
+            if let Some(webview) = window.active_webview() {
+                self.release_held_page_buttons(&webview);
+            }
+            self.release_held_pane_buttons();
+        }
+
+        // Implicit capture: a button pressed on the page is released on the page, wherever the
+        // cursor is now (the sidebar, a pane, the top bar, the margins, a dialog), none of which
+        // saw the press. Without this the page never sees the release and keeps selecting.
+        if let WindowEvent::MouseInput {
+            state: ElementState::Released,
+            button,
+            ..
+        } = event &&
+            self.page_buttons_held.borrow().contains(&button) &&
+            let Some(webview) = window.active_webview()
+        {
+            self.handle_mouse_button_event(&webview, button, ElementState::Released);
+            return;
+        }
+        if let WindowEvent::MouseInput {
+            state: ElementState::Released,
+            button,
+            ..
+        } = event &&
+            self.release_pane_button(button)
+        {
+            return;
+        }
+
+        // Drag the docked sidebar's right edge to resize it; double-click it to reset. Input on
+        // the edge never reaches the page or the sidebar page.
+        if self.handle_sidebar_resize_event(&window, &event) {
+            return;
+        }
+
         // Compact mode: the hidden sidebar slides out when the mouse touches the left edge.
         // Check this before the resize edges, which also cover the left few pixels.
         if let WindowEvent::CursorMoved { position, .. } = &event {
@@ -1228,7 +1546,7 @@ impl HeadedWindow {
             let double = self
                 .last_gutter_press
                 .replace(Some(now))
-                .is_some_and(|last| now.duration_since(last) < std::time::Duration::from_millis(400));
+                .is_some_and(|last| now.duration_since(last) < double_click_time());
             if double {
                 self.last_gutter_press.set(None);
                 self.winit_window
@@ -1267,7 +1585,12 @@ impl HeadedWindow {
                     .borrow()
                     .set_zoom_factor(effective_egui_zoom_factor);
 
-                window.hidpi_scale_factor_changed();
+                // Stillwater: the pages are told about the new scale factor in the next GUI
+                // update (`Gui::update`), together with the new size of their area. Telling
+                // them here, before Windows has resized the window for the new DPI, made each
+                // tab lay out once for the old size at the new scale (shown magnified or
+                // shrunk) and again for the new size.
+                diagnostics::log(format!("window scale factor changed to {scale_factor}"));
 
                 // Request a winit redraw event, so we can recomposite, update and paint
                 // the GUI, and present the new frame.
@@ -1324,6 +1647,7 @@ impl HeadedWindow {
 
                 if let WindowEvent::Focused(focused) = event {
                     state.set_window_has_focus(window.clone(), *focused);
+                    self.gui.borrow().apply_window_focus(&window);
                 }
 
                 // All CursorMoved events, even when forwarded to the WebView, are also

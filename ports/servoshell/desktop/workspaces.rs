@@ -468,12 +468,17 @@ impl Workspaces {
             } else {
                 self.view_entries(window)
             };
-            let siblings: Vec<_> = entries
-                .into_iter()
-                .filter(|other| *other != TabEntry::Live(id))
-                .collect();
-            match siblings.last() {
-                Some(sibling) => self.activate_entry(window, *sibling),
+            // Like Firefox and Chrome: the tab below the closed one, or the one above if it
+            // was the last (not the bottom of the list, which may be far away and unloaded).
+            let position = entries.iter().position(|other| *other == TabEntry::Live(id));
+            let neighbour = match position {
+                Some(position) => entries
+                    .get(position + 1)
+                    .or_else(|| position.checked_sub(1).and_then(|above| entries.get(above))),
+                None => entries.iter().rev().find(|other| **other != TabEntry::Live(id)),
+            };
+            match neighbour.copied() {
+                Some(sibling) => self.activate_entry(window, sibling),
                 None => self.open_tab(window),
             }
         }
@@ -495,9 +500,15 @@ impl Workspaces {
         let Some(active) = window.active_webview().map(|webview| webview.id()) else {
             return;
         };
-        if let Some(position) = tabs.iter().position(|entry| *entry == TabEntry::Live(active)) {
-            let next = (position as isize + delta).rem_euclid(tabs.len() as isize);
-            self.activate_entry(window, tabs[next as usize]);
+        let next = match tabs.iter().position(|entry| *entry == TabEntry::Live(active)) {
+            Some(position) => Some((position as isize + delta).rem_euclid(tabs.len() as isize) as usize),
+            // From a pinned tab or an Essential (not in this list): the first or last tab.
+            None if tabs.is_empty() => None,
+            None if delta > 0 => Some(0),
+            None => Some(tabs.len() - 1),
+        };
+        if let Some(next) = next {
+            self.activate_entry(window, tabs[next]);
         }
     }
 

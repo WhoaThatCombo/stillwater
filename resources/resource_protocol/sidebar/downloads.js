@@ -141,6 +141,20 @@
     text.append(actions);
 
     row.append(icon, text);
+    attachMenu(row, () => {
+      const items = [];
+      if (item.state === "done" && !item.missing && !item.executable) {
+        items.push({ label: "Open", run: () => send("dl-open", item.key) });
+      }
+      if (item.state === "done" && !item.missing) {
+        items.push({ label: "Show in folder", run: () => send("dl-show", item.key) });
+      }
+      items.push(...copyLinkItem(item.url, "Copy download link"));
+      if (item.state !== "downloading") {
+        items.push("-", { label: "Remove from list", run: () => send("dl-remove", item.key) });
+      }
+      return items;
+    });
     return row;
   }
 

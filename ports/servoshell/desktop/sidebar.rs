@@ -39,8 +39,11 @@ use crate::window::ServoShellWindow;
 /// Session restore, reopening closed tabs, drag and drop.
 mod session;
 
-/// Width of the expanded sidebar, in device-independent pixels.
+/// Default width of the expanded sidebar, in device-independent pixels. The user can drag
+/// the sidebar's right edge between `MIN_SIDEBAR_WIDTH` and `MAX_SIDEBAR_FRACTION` of the window.
 pub(crate) const SIDEBAR_WIDTH: f32 = 240.0;
+pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 180.0;
+pub(crate) const MAX_SIDEBAR_FRACTION: f32 = 0.4;
 /// Gap between the window edge / sidebar and the rounded web content card.
 pub(crate) const CONTENT_MARGIN: f32 = 8.0;
 /// Corner radius of the web content card.
@@ -210,6 +213,8 @@ pub(crate) struct Sidebar {
     favicons: HashMap<WebViewId, String>,
     compact: Cell<bool>,
     peek: Cell<bool>,
+    /// The width the user chose (unclamped to the current window; see `width_for`).
+    width: Cell<f32>,
     focused: Cell<bool>,
     workspaces: Workspaces,
     theme: Theme,
@@ -275,6 +280,7 @@ impl Sidebar {
                 settings.compact || std::env::var_os("STILLWATER_START_COMPACT").is_some(),
             ),
             peek: Cell::new(false),
+            width: Cell::new(settings.sidebar_width),
             focused: Cell::new(false),
             workspaces,
             theme: Theme::Light,
@@ -597,19 +603,20 @@ impl Sidebar {
             return (None, full);
         }
         let m = CONTENT_MARGIN;
+        let width = self.width_for(full.width());
         if self.compact.get() {
             let content = full.shrink(m);
             let sidebar = self.peek.get().then(|| {
                 egui::Rect::from_min_max(
                     egui::pos2(full.min.x + m, full.min.y + m),
-                    egui::pos2(full.min.x + m + SIDEBAR_WIDTH, full.max.y - m),
+                    egui::pos2(full.min.x + m + width, full.max.y - m),
                 )
             });
             (sidebar, content)
         } else {
             let sidebar = egui::Rect::from_min_max(
                 full.min,
-                egui::pos2(full.min.x + SIDEBAR_WIDTH, full.max.y),
+                egui::pos2(full.min.x + width, full.max.y),
             );
             let content = egui::Rect::from_min_max(
                 egui::pos2(sidebar.max.x, full.min.y + m),
@@ -652,11 +659,40 @@ impl Sidebar {
             return false;
         }
         let peek = if self.peek.get() {
-            point.x <= CONTENT_MARGIN + SIDEBAR_WIDTH + 12.0
+            point.x <= CONTENT_MARGIN + self.width.get() + 12.0
         } else {
             point.x <= PEEK_EDGE
         };
         self.peek.replace(peek) != peek
+    }
+
+    /// The sidebar width to use in a window `window_width` wide.
+    pub(crate) fn width_for(&self, window_width: f32) -> f32 {
+        let max = (window_width * MAX_SIDEBAR_FRACTION).max(MIN_SIDEBAR_WIDTH);
+        self.width.get().clamp(MIN_SIDEBAR_WIDTH, max)
+    }
+
+    /// Whether the sidebar is docked (not compact), so its right edge can be dragged.
+    pub(crate) fn is_resizable(&self) -> bool {
+        !self.compact.get()
+    }
+
+    /// Live resize while dragging the edge. Returns true if the width changed.
+    pub(crate) fn drag_width(&self, width: f32, window_width: f32) -> bool {
+        let max = (window_width * MAX_SIDEBAR_FRACTION).max(MIN_SIDEBAR_WIDTH);
+        let width = width.clamp(MIN_SIDEBAR_WIDTH, max).round();
+        self.width.replace(width) != width
+    }
+
+    /// Save the width once the drag ends (not on every mouse move).
+    pub(crate) fn commit_width(&self) {
+        self.settings.borrow_mut().set_sidebar_width(self.width.get());
+    }
+
+    /// Double-click on the edge: back to the default width.
+    pub(crate) fn reset_width(&self) {
+        self.width.set(SIDEBAR_WIDTH);
+        self.commit_width();
     }
 
     pub(crate) fn is_focused(&self) -> bool {
@@ -674,11 +710,13 @@ impl Sidebar {
         if self.focused.replace(focused) == focused {
             return;
         }
+        // Neither side counts as focused while Stillwater isn't the active window.
+        let window_focused = window.has_system_focus();
         if let Some(webview) = &self.webview {
-            webview.set_focused(focused);
+            webview.set_focused(focused && window_focused);
         }
         if let Some(active) = window.active_webview() {
-            active.set_focused(!focused);
+            active.set_focused(!focused && window_focused);
         }
     }
 
@@ -967,6 +1005,29 @@ impl Sidebar {
                     } else if let Some(key) = self.unloaded_tab(argument) {
                         self.remember_closed(window, TabEntry::Unloaded(key));
                         self.workspaces.close_unloaded(key);
+                    }
+                },
+                // The tab menu's Reload and Duplicate.
+                "tab-reload" => {
+                    if let Some(id) = self.webview_for_tab(window, argument) &&
+                        let Some(webview) = window.webview_by_id(id)
+                    {
+                        navigation_started(id);
+                        webview.reload();
+                    }
+                },
+                "tab-duplicate" => {
+                    let url = match self.webview_for_tab(window, argument) {
+                        Some(id) => window.webview_by_id(id).and_then(|webview| webview.url()),
+                        None => self
+                            .unloaded_tab(argument)
+                            .and_then(|key| self.workspaces.unloaded_json(key))
+                            .and_then(|tab| url::Url::parse(tab["url"].as_str()?).ok()),
+                    };
+                    if let Some(url) = url {
+                        window.queue_user_interface_command(UserInterfaceCommand::NewWebViewWithUrl(
+                            url,
+                        ));
                     }
                 },
                 "tab-unload" => {

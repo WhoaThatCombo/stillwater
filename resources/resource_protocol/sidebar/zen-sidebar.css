@@ -711,7 +711,8 @@ button.secondary:hover {
 /* ---- Essentials (zen-essentials): favicon tiles shared by every space ---- */
 #essentials {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  /* Three tiles at the default width; more as the sidebar is dragged wider, two when narrow. */
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
   gap: 6px;
   margin: 0 0 6px;
 }
@@ -794,12 +795,19 @@ button.secondary:hover {
   padding-left: 26px;
 }
 
+/* Where a tab closed with the mouse was, until the mouse leaves the list (sidebar.js). */
+.tab.closed-gap {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 /* ---- Context menu ---- */
 #menu {
   position: fixed;
   z-index: 10;
-  min-width: 190px;
-  max-width: 226px;
+  /* The sidebar can be dragged as narrow as 180 px: never wider than it. */
+  min-width: min(190px, calc(100vw - 8px));
+  max-width: min(226px, calc(100vw - 8px));
   padding: 4px;
   border-radius: var(--border-radius-medium);
   background: var(--zen-urlbar-background-focus);

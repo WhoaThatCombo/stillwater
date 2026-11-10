@@ -359,6 +359,23 @@ impl Gui {
         !self.content_rect.contains(pos2(position.x, position.y))
     }
 
+    /// Whether `position` is on the docked sidebar's right edge, which drags to resize it:
+    /// a 6 px zone straddling the sidebar/page boundary, below the top bar.
+    pub(crate) fn sidebar_resize_handle_contains(
+        &self,
+        position: Point2D<f32, DeviceIndependentPixel>,
+    ) -> bool {
+        const HALF_GRAB: f32 = 3.0;
+        let Some(rect) = self.sidebar_rect else {
+            return false;
+        };
+        self.sidebar.is_resizable() &&
+            !self.top_bar_contains(position) &&
+            (position.x - rect.max.x).abs() <= HALF_GRAB &&
+            position.y >= rect.min.y + crate::desktop::sidebar::CONTENT_MARGIN &&
+            position.y <= rect.max.y - crate::desktop::sidebar::CONTENT_MARGIN
+    }
+
     /// If `position` is over the visible sidebar, return it relative to the sidebar's origin.
     /// Whether `position` is over the top bar (window buttons), while it's showing.
     pub(crate) fn top_bar_contains(&self, position: Point2D<f32, DeviceIndependentPixel>) -> bool {
@@ -413,13 +430,43 @@ impl Gui {
     /// Give keyboard focus to a pane, or to the active tab (`None`).
     pub(crate) fn set_pane_focus(&self, focus: Option<PaneKind>, window: &ServoShellWindow) {
         self.pane_focus.set(focus);
+        let window_focused = window.has_system_focus();
         if let Some(active) = window.active_webview() {
-            active.set_focused(focus.is_none());
+            active.set_focused(focus.is_none() && window_focused);
         }
         for kind in [PaneKind::Split, PaneKind::Glance] {
             if let Some(pane) = self.pane(kind) {
-                pane.webview.set_focused(focus == Some(kind));
+                pane.webview.set_focused(focus == Some(kind) && window_focused);
             }
+        }
+    }
+
+    /// The window became active or inactive: exactly one of Stillwater's WebViews (the one
+    /// with keyboard focus) counts as focused while the window is active, and none while it
+    /// isn't, so every page, pane, the sidebar and the command bar paint their selection in
+    /// the inactive colour and hide their caret while another app is in front.
+    pub(crate) fn apply_window_focus(&self, window: &ServoShellWindow) {
+        let window_focused = window.has_system_focus();
+        let bar = self.command_bar.webview();
+        let sidebar = bar.is_none() && self.sidebar.is_focused();
+        let pane = if bar.is_some() || sidebar {
+            None
+        } else {
+            self.pane_focus()
+        };
+        if let Some(bar) = bar {
+            bar.set_focused(window_focused);
+        }
+        if let Some(webview) = self.sidebar.webview() {
+            webview.set_focused(sidebar && window_focused);
+        }
+        for kind in [PaneKind::Split, PaneKind::Glance] {
+            if let Some(pane_view) = self.pane(kind) {
+                pane_view.webview.set_focused(pane == Some(kind) && window_focused);
+            }
+        }
+        if let Some(active) = window.active_webview() {
+            active.set_focused(bar.is_none() && !sidebar && pane.is_none() && window_focused);
         }
     }
 
@@ -454,6 +501,21 @@ impl Gui {
     ) {
         if let Some(url) = crate::desktop::panes::take_glance_url() {
             self.pane_requests.borrow_mut().push(PaneRequest::Open(PaneKind::Glance, url));
+        }
+        // The page context menu's link entries.
+        for (action, url) in crate::desktop::dialog::take_link_actions() {
+            use crate::desktop::dialog::LinkAction;
+            match action {
+                LinkAction::Glance => {
+                    self.pane_requests.borrow_mut().push(PaneRequest::Open(PaneKind::Glance, url))
+                },
+                LinkAction::Split => {
+                    self.pane_requests.borrow_mut().push(PaneRequest::Open(PaneKind::Split, url))
+                },
+                LinkAction::BackgroundTab => window.queue_user_interface_command(
+                    UserInterfaceCommand::NewBackgroundWebViewWithUrl(url),
+                ),
+            }
         }
         let requests = std::mem::take(&mut *self.pane_requests.borrow_mut());
         for request in requests {
@@ -936,6 +998,15 @@ impl Gui {
                 }
             }
 
+            // Stillwater: a new scale factor (the window moved to a monitor with another DPI)
+            // reaches the tabs right before the size change it comes with, so that the messages
+            // are adjacent and the page lays out once, at the new size and scale.
+            if window.active_webview().is_some_and(|webview| {
+                webview.hidpi_scale_factor() != window.platform_window().hidpi_scale_factor()
+            }) {
+                window.hidpi_scale_factor_changed();
+            }
+
             // If the layout changed size, then update the size of the WebView and also
             // the size of its RenderingContext.
             let size = Size2D::new(new_content_rect.width(), new_content_rect.height()) * scale;
@@ -1140,7 +1211,7 @@ impl Gui {
             let sidebar_paint_rect = new_sidebar_rect.unwrap_or_else(|| {
                 egui::Rect::from_min_size(
                     full_rect.min,
-                    egui::vec2(crate::desktop::sidebar::SIDEBAR_WIDTH, full_rect.height()),
+                    egui::vec2(sidebar.width_for(full_rect.width()), full_rect.height()),
                 )
             });
             sidebar.paint(sidebar_paint_rect, scale);
@@ -1552,7 +1623,7 @@ fn pane_controls(
 }
 
 /// Whether the (primary) mouse button is physically held down right now.
-fn left_button_held() -> bool {
+pub(crate) fn left_button_held() -> bool {
     #[cfg(target_os = "windows")]
     {
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};

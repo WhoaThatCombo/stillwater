@@ -209,6 +209,31 @@ pub fn default_config_dir() -> Option<PathBuf> {
     Some(config_dir)
 }
 
+/// The system's double-click time (ms) and how far (px, from the first click) the second
+/// click may land, if the platform says.
+pub(crate) fn system_double_click() -> Option<(u32, u32)> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, SM_CXDOUBLECLK, SM_CYDOUBLECLK,
+        };
+        // Safety: plain Win32 queries with no pointers.
+        let (time, width, height) = unsafe {
+            (
+                GetDoubleClickTime(),
+                GetSystemMetrics(SM_CXDOUBLECLK),
+                GetSystemMetrics(SM_CYDOUBLECLK),
+            )
+        };
+        // The metrics are the size of the box centred on the first click.
+        let distance = (width.max(height) / 2).max(1) as u32;
+        return Some((time.clamp(100, 5000), distance));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
 /// Get a Servo [`Preferences`] to use when initializing Servo by first reading the user
 /// preferences file and then overriding these preferences with the ones from the `--prefs-file`
 /// command-line argument, if given.
@@ -233,6 +258,13 @@ fn get_preferences(prefs_files: &[PathBuf], config_dir: &Option<PathBuf>) -> Pre
         };
 
     let mut preferences = Preferences::default();
+    // Double-clicks follow the Windows mouse settings (500 ms and a 4 px box by default),
+    // not Servo's 300 ms and 1 px, which missed slower or slightly shaky double-clicks.
+    // Preference files and --pref still override this.
+    if let Some((time, distance)) = system_double_click() {
+        preferences.dom_document_dblclick_timeout = time.into();
+        preferences.dom_document_dblclick_dist = distance.into();
+    }
     apply_preferences(&mut preferences, user_prefs_hash);
     for pref_file_path in prefs_files.iter() {
         apply_preferences(&mut preferences, read_prefs_file(pref_file_path))

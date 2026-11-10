@@ -16,13 +16,33 @@ use log::{error, warn};
 use rfd::AsyncFileDialog;
 use servo::{
     AlertDialog, AuthenticationRequest, BluetoothDeviceSelectionRequest, ColorPicker,
-    ConfirmDialog, ContextMenu, ContextMenuItem, DeviceIndependentPixel, EmbedderControlId,
+    ConfirmDialog, ContextMenu, ContextMenuAction, ContextMenuItem, DeviceIndependentPixel,
+    EmbedderControlId,
     FilePicker, PermissionRequest, PromptDialog, RgbColor, SelectElement, SelectElementOption,
     SelectElementOptionOrOptgroup, SimpleDialog,
 };
 use winit::window::Window as WinitWindow;
 
 use crate::desktop::event_loop::RepaintEventLoopWaker;
+
+/// Stillwater's own entries in the page's context menu, handled by the shell (see
+/// `take_link_actions`), not by Servo.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum LinkAction {
+    BackgroundTab,
+    Glance,
+    Split,
+}
+
+thread_local! {
+    static LINK_ACTIONS: std::cell::RefCell<Vec<(LinkAction, url::Url)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Link actions picked in the page's context menu since the last call.
+pub(crate) fn take_link_actions() -> Vec<(LinkAction, url::Url)> {
+    LINK_ACTIONS.with(|actions| std::mem::take(&mut *actions.borrow_mut()))
+}
 
 /// The minimum width of many UI elements including dialog boxes and menus,
 /// for the sake of consistency.
@@ -668,6 +688,13 @@ impl Dialog {
                 let mut is_open = true;
                 if let Some(context_menu) = menu {
                     let mut selected_action = None;
+                    let mut link_action = None;
+                    // Stillwater's link entries go after Servo's own (after "Copy Link").
+                    let link = context_menu
+                        .element_info()
+                        .link_url
+                        .clone()
+                        .filter(|url| matches!(url.scheme(), "http" | "https"));
                     let mut position = context_menu.position();
                     position.min.x += toolbar_offset.x as i32;
                 position.max.x += toolbar_offset.x as i32;
@@ -712,6 +739,16 @@ impl Dialog {
                                                 widgets.noninteractive.bg_stroke = Stroke::NONE;
                                             }
 
+                                            // Servo's wording, in Stillwater's terms.
+                                            let label = match action {
+                                                ContextMenuAction::OpenLinkInNewWebView => {
+                                                    "Open link in new tab"
+                                                },
+                                                ContextMenuAction::OpenImageInNewView => {
+                                                    "Open image in new tab"
+                                                },
+                                                _ => label.as_str(),
+                                            };
                                             let button =
                                                 Button::new(RichText::new(label).color(color))
                                                     .sense(sense)
@@ -725,6 +762,30 @@ impl Dialog {
                                             if ui.add(button).clicked() {
                                                 selected_action = Some(*action);
                                                 ui.close();
+                                            }
+                                            if *action == ContextMenuAction::CopyLink &&
+                                                let Some(link) = &link
+                                            {
+                                                for (label, kind) in [
+                                                    ("Open link in background tab", LinkAction::BackgroundTab),
+                                                    ("Open link in Glance", LinkAction::Glance),
+                                                    ("Open link in split view", LinkAction::Split),
+                                                ] {
+                                                    let button = Button::new(
+                                                        RichText::new(label)
+                                                            .color(ui.visuals().strong_text_color()),
+                                                    )
+                                                    .corner_radius(CornerRadius::ZERO)
+                                                    .wrap_mode(egui::TextWrapMode::Extend)
+                                                    .min_size(Vec2 {
+                                                        x: MINIMUM_UI_ELEMENT_WIDTH,
+                                                        y: 0.0,
+                                                    });
+                                                    if ui.add(button).clicked() {
+                                                        link_action = Some((kind, link.clone()));
+                                                        ui.close();
+                                                    }
+                                                }
                                             }
                                         },
                                         ContextMenuItem::Separator => {
@@ -743,6 +804,14 @@ impl Dialog {
                         let Some(context_menu) = menu.take()
                     {
                         context_menu.select(action);
+                        return false;
+                    }
+                    if let Some(picked) = link_action {
+                        crate::desktop::diagnostics::log(format!("context menu: {:?}", picked.0));
+                        LINK_ACTIONS.with(|actions| actions.borrow_mut().push(picked));
+                        if let Some(context_menu) = menu.take() {
+                            context_menu.dismiss();
+                        }
                         return false;
                     }
                 }

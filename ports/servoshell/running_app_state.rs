@@ -59,7 +59,6 @@ unsafe extern "C" {
     fn __llvm_profile_write_file();
 }
 
-#[derive(Default)]
 pub struct WebViewCollection {
     /// List of top-level browsing contexts.
     /// Modified by EmbedderMsg::WebViewOpened and EmbedderMsg::WebViewClosed,
@@ -75,6 +74,20 @@ pub struct WebViewCollection {
 
     /// Whether or not the active WebView in this collection has system focus.
     has_system_focus: bool,
+}
+
+impl Default for WebViewCollection {
+    fn default() -> Self {
+        Self {
+            webviews: Default::default(),
+            creation_order: Default::default(),
+            active_webview_id: None,
+            // A real window learns it has focus when it is first shown. Automated tests' windows
+            // never take focus (`STILLWATER_BACKGROUND_WINDOW`), so their pages count as focused
+            // until told otherwise, as they always have.
+            has_system_focus: std::env::var_os("STILLWATER_BACKGROUND_WINDOW").is_some(),
+        }
+    }
 }
 
 impl WebViewCollection {
@@ -140,15 +153,14 @@ impl WebViewCollection {
 
         self.active_webview_id = Some(id_to_activate);
         for (webview_id, webview) in self.all_in_creation_order() {
+            // WebViews start out "focused", so set this both ways: a tab opened or switched to
+            // while Stillwater is in the background must paint its selection inactive (grey)
+            // and must not show a caret, like Chrome and Firefox.
             if id_to_activate == webview_id {
-                if self.has_system_focus {
-                    webview.set_focused(true);
-                }
+                webview.set_focused(self.has_system_focus);
                 webview.show();
             } else {
-                if self.has_system_focus {
-                    webview.set_focused(false);
-                }
+                webview.set_focused(false);
                 webview.hide();
             }
         }
@@ -161,6 +173,11 @@ impl WebViewCollection {
             return;
         };
         self.activate_webview(*webview_id);
+    }
+
+    /// Whether the window holding these WebViews is the active window.
+    pub(crate) fn has_system_focus(&self) -> bool {
+        self.has_system_focus
     }
 
     pub(crate) fn set_focused(&mut self, focused: bool) {
@@ -182,6 +199,9 @@ pub(crate) enum UserInterfaceCommand {
     NewWebView,
     /// Open a new tab at the given URL (e.g. loading a pinned tab).
     NewWebViewWithUrl(Url),
+    /// A new tab that loads in the background (the page context menu's "Open link in
+    /// background tab").
+    NewBackgroundWebViewWithUrl(Url),
     CloseWebView(WebViewId),
     NewWindow(TopLevelWebViewCreationRequest),
 }

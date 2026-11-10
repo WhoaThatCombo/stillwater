@@ -179,6 +179,12 @@ impl ServoShellWindow {
         self.webview_collection.borrow().get(id).cloned()
     }
 
+    /// Whether this is the active window. While it isn't, none of its WebViews may count as
+    /// focused, so selections paint in the inactive colour and no caret shows.
+    pub(crate) fn has_system_focus(&self) -> bool {
+        self.webview_collection.borrow().has_system_focus()
+    }
+
     pub(crate) fn set_needs_update(&self) {
         self.needs_update.set(true);
     }
@@ -396,6 +402,15 @@ impl ServoShellWindow {
                         state.clone(),
                         TopLevelWebViewCreationRequest::WithUrl(url),
                     );
+                },
+                UserInterfaceCommand::NewBackgroundWebViewWithUrl(url) => {
+                    self.set_needs_update();
+                    let webview = self.create_toplevel_webview(
+                        state.clone(),
+                        TopLevelWebViewCreationRequest::WithUrl(url),
+                    );
+                    webview.set_focused(false);
+                    webview.hide();
                 },
                 UserInterfaceCommand::CloseWebView(id) => {
                     self.set_needs_update();

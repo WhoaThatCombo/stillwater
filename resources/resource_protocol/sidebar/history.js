@@ -225,6 +225,8 @@ function renderHistoryList() {
       rows.push(entryRow(entry, `${pad(time.getHours())}:${pad(time.getMinutes())} · ${hostOf(entry.url)}`,
         remove, "Delete from history", () => [
           { label: "Open", run: () => send("go", entry.url) },
+          ...copyLinkItem(entry.url),
+          "-",
           { label: "Delete from history", run: remove },
         ]));
     }
@@ -248,6 +250,7 @@ function renderHistoryList() {
       const detail = bookmark.folder ? `${hostOf(bookmark.url)} · ${bookmark.folder}` : hostOf(bookmark.url);
       const row = entryRow(bookmark, detail, remove, "Delete bookmark", () => [
         { label: "Open", run: () => send("go", bookmark.url) },
+        ...copyLinkItem(bookmark.url),
         { label: "Rename", run: () => startRename(row.querySelector(".hist-title"), bookmark.title, (title) => {
           if (!title) return;
           bookmark.title = title;

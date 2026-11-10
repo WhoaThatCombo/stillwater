@@ -110,6 +110,8 @@ pub(crate) struct Settings {
     pub(crate) spaces: bool,
     /// Play the short animation that covers the window while Stillwater starts.
     pub(crate) startup_animation: bool,
+    /// Width of the docked sidebar in device-independent pixels (dragged by its right edge).
+    pub(crate) sidebar_width: f32,
     path: Option<PathBuf>,
 }
 
@@ -142,6 +144,11 @@ impl Settings {
             new_tab_bar: saved["newTabBar"].as_bool().unwrap_or(true),
             spaces: saved["spaces"].as_bool().unwrap_or(false),
             startup_animation: saved["startupAnimation"].as_bool().unwrap_or(true),
+            sidebar_width: saved["sidebarWidth"]
+                .as_f64()
+                .map(|width| width as f32)
+                .filter(|width| width.is_finite())
+                .unwrap_or(crate::desktop::sidebar::SIDEBAR_WIDTH),
             path,
         };
         settings.publish_search_template();
@@ -162,6 +169,7 @@ impl Settings {
             "newTabBar": self.new_tab_bar,
             "spaces": self.spaces,
             "startupAnimation": self.startup_animation,
+            "sidebarWidth": self.sidebar_width,
         });
         let result = path
             .parent()
@@ -202,6 +210,13 @@ impl Settings {
     pub(crate) fn set_compact(&mut self, compact: bool) {
         if self.compact != compact {
             self.compact = compact;
+            self.save();
+        }
+    }
+
+    pub(crate) fn set_sidebar_width(&mut self, width: f32) {
+        if self.sidebar_width != width {
+            self.sidebar_width = width;
             self.save();
         }
     }

@@ -52,13 +52,15 @@ function iconButton(className, glyph, title, onClick) {
 }
 
 // ---- Double-click detection (Servo may not fire dblclick) ----
-// Timed per row (`key`), not per element: a state push between the two clicks rebuilds the
-// row, and the second click lands on a new element.
+// A real click carries its click count (`detail`), counted with the Windows double-click time
+// and distance. Clicks made by script have none: those are timed per row (`key`), not per
+// element, since a state push between the two clicks rebuilds the row.
 const lastClicks = new Map();
 function onDoubleClick(element, key, handler) {
   element.addEventListener("click", (event) => {
     const now = Date.now();
-    if (now - (lastClicks.get(key) || 0) < 400) {
+    const double = event.detail > 0 ? event.detail === 2 : now - (lastClicks.get(key) || 0) < 400;
+    if (double) {
       lastClicks.delete(key);
       event.stopPropagation();
       handler(event);
@@ -233,8 +235,28 @@ function renamePin(pin) {
   startRename(pinSelector(pin.pinId), pin.title, (title) => send("pin-rename", `${pin.pinId}\t${title}`));
 }
 
+// The link of a tab, page or download, as text on the clipboard.
+function copyLinkItem(link, label = "Copy link") {
+  return link && link !== "servo:newtab" ? [{ label, run: () => send("clip-copy", link) }] : [];
+}
+
+// Close several tabs at once, keeping `keep` (made active first if the active tab is among the
+// closed ones, so closing doesn't hop from neighbour to neighbour).
+function closeTabs(closing, keep) {
+  if (closing.length === 0) return;
+  if (closing.some((tab) => tab.active)) send("activate", keep.id);
+  for (const tab of closing) send("close", tab.id);
+}
+
 function tabMenu(tab) {
+  const index = state.tabs.findIndex((other) => other.id === tab.id);
+  const others = state.tabs.filter((other) => other.id !== tab.id);
+  const below = index < 0 ? [] : state.tabs.slice(index + 1);
   return [
+    ...(tab.loaded !== false ? [{ label: "Reload", run: () => send("tab-reload", tab.id) }] : []),
+    ...(tab.url && tab.url !== "servo:newtab" ? [{ label: "Duplicate", run: () => send("tab-duplicate", tab.id) }] : []),
+    ...copyLinkItem(tab.url),
+    "-",
     { label: "Pin tab", run: () => send("pin", tab.id) },
     { label: "Add to Essentials", run: () => send("essential", tab.id) },
     { label: "Rename", run: () => renameTab(tab) },
@@ -245,6 +267,8 @@ function tabMenu(tab) {
     "-",
     ...(tab.loaded && !tab.active ? [{ label: "Unload (free memory)", run: () => send("tab-unload", tab.id) }] : []),
     { label: "Close tab", run: () => send("close", tab.id) },
+    ...(others.length ? [{ label: "Close other tabs", run: () => closeTabs(others, tab) }] : []),
+    ...(below.length ? [{ label: "Close tabs below", run: () => closeTabs(below, tab) }] : []),
     ...(state.session && state.session.closed ? [{ label: "Reopen closed tab", run: () => send("session-reopen") }] : []),
   ];
 }
@@ -278,7 +302,7 @@ function pinMenu(pin, essential) {
       items.push({ label: "Move down", run: () => send("pin-move", `${pin.pinId}\t1`) });
     }
   }
-  items.push("-", { label: "Open in split view", run: () => send("split-pin", pin.pinId) });
+  items.push("-", ...copyLinkItem(pin.url), { label: "Open in split view", run: () => send("split-pin", pin.pinId) });
   items.push("-");
   items.push({
     label: essential ? "Remove from Essentials" : "Add to Essentials",
@@ -288,6 +312,42 @@ function pinMenu(pin, essential) {
   if (pin.loaded) items.push({ label: "Report site isn't working", run: () => send("report-site", "") });
   return items;
 }
+
+// ---- Rows hold still under the cursor after a tab is closed with the mouse (like Firefox
+// and Zen): an invisible placeholder keeps the closed row's place until the mouse leaves the
+// list, so the next row's close button doesn't slide under the cursor. ----
+const closedGaps = []; // {id, after}: the closed tab and the row that was above it, in order
+function closeByMouse(id, row) {
+  const above = row && row.previousElementSibling;
+  const after = !above ? null : above.dataset.gap ? `gap:${above.dataset.gap}` : above.dataset.tab || null;
+  closedGaps.push({ id: String(id), after });
+  send("close", id);
+}
+function withClosedGaps(rows) {
+  const keyOf = (row) => (row.dataset.gap ? `gap:${row.dataset.gap}` : row.dataset.tab);
+  let pending = closedGaps.filter((gap) => !state.tabs.some((tab) => String(tab.id) === gap.id));
+  // A placeholder can sit under another one (two rows closed in a row), so place them in passes.
+  while (pending.length) {
+    const left = pending.filter((gap) => {
+      const at = gap.after === null ? 0 : rows.findIndex((row) => keyOf(row) === gap.after) + 1;
+      if (at === 0 && gap.after !== null) return true;
+      const placeholder = document.createElement("div");
+      placeholder.className = "tab closed-gap";
+      placeholder.dataset.gap = gap.id;
+      rows.splice(at, 0, placeholder);
+      return false;
+    });
+    if (left.length === pending.length) break; // the row above is gone too: let it collapse
+    pending = left;
+  }
+  return rows;
+}
+tabs.addEventListener("mouseout", (event) => {
+  if (closedGaps.length && !tabs.contains(event.relatedTarget)) {
+    closedGaps.length = 0;
+    render();
+  }
+});
 
 // One row for an ordinary tab ({id, …}) or a pinned tab ({pinId, …}).
 function renderRow(item, isPin) {
@@ -325,7 +385,7 @@ function renderRow(item, isPin) {
   }
   parts.push(more);
   if (!isPin) {
-    parts.push(iconButton("tab-close", "", "Close tab", () => send("close", item.id)));
+    parts.push(iconButton("tab-close", "", "Close tab", () => closeByMouse(item.id, row)));
   } else if (item.loaded) {
     parts.push(iconButton("tab-close", "", "Unload tab", () => send("pin-unload", item.pinId)));
   }
@@ -335,7 +395,7 @@ function renderRow(item, isPin) {
   row.addEventListener("mouseup", (event) => {
     if (event.button !== 1) return; // middle click closes / unloads
     if (isPin) send("pin-unload", item.pinId);
-    else send("close", item.id);
+    else closeByMouse(item.id, row);
   });
   attachMenu(row, items);
   return row;
@@ -834,7 +894,7 @@ function render() {
   if (!document.querySelector(".rename-input")) {
     renderEssentials();
     renderPinned();
-    const rows = state.tabs.map((tab) => renderRow(tab, false));
+    const rows = withClosedGaps(state.tabs.map((tab) => renderRow(tab, false)));
     if (state.split) rows.push(renderSplitRow(state.split));
     tabs.replaceChildren(...rows);
     revealActiveRow();

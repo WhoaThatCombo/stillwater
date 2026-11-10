@@ -214,7 +214,7 @@ impl CommandBar {
         }
         if let Some(webview) = &self.webview {
             webview.show();
-            webview.set_focused(true);
+            webview.set_focused(window.has_system_focus());
         }
         if self.ready {
             self.send_open();
@@ -243,7 +243,7 @@ impl CommandBar {
             webview.hide();
         }
         if let Some(active) = window.active_webview() {
-            active.set_focused(true);
+            active.set_focused(window.has_system_focus());
         }
         crate::desktop::diagnostics::log(format!("command bar: closed (picked: {picked})"));
     }
