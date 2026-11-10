@@ -329,6 +329,13 @@ pub struct Preferences {
     // feature: Largest Contentful Paint | #42000 | Web/API/LargestContentfulPaint
     pub largest_contentful_paint_enabled: bool,
     pub layout_animations_test_enabled: bool,
+    /// Stillwater: the default selection highlight (the system Highlight colour) when a page
+    /// doesn't style `::selection`. The default is Windows' `COLOR_HIGHLIGHT`; an embedder
+    /// can pass the user's `GetSysColor(COLOR_HIGHLIGHT)`.
+    pub layout_selection_background_rgba: [f64; 4],
+    /// Stillwater: the text colour on the default selection highlight (HighlightText,
+    /// `GetSysColor(COLOR_HIGHLIGHTTEXT)`).
+    pub layout_selection_text_rgba: [f64; 4],
     pub layout_css_backdrop_filter_enabled: bool,
     // feature: CSS Multicol | #22397 | Web/CSS/Guides/Multicol_layout
     pub layout_css_columns_enabled: bool,
@@ -600,6 +607,8 @@ impl Preferences {
             container_timing_enabled: false,
             largest_contentful_paint_enabled: false,
             layout_animations_test_enabled: false,
+            layout_selection_background_rgba: [0.0, 120.0 / 255.0, 215.0 / 255.0, 1.0],
+            layout_selection_text_rgba: [1.0, 1.0, 1.0, 1.0],
             layout_css_backdrop_filter_enabled: false,
             layout_css_columns_enabled: false,
             layout_css_masking_enabled: true,

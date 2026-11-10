@@ -4,7 +4,7 @@
 
 use std::cell::{OnceCell, RefCell};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use app_units::{AU_PER_PX, Au};
 use clip::Clip;
@@ -17,6 +17,7 @@ use paint_api::display_list::{PaintDisplayListInfo, SpatialTreeNodeInfo};
 use servo_arc::Arc as ServoArc;
 use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_base::id::{PipelineId, ScrollTreeNodeId};
+use servo_base::text::Utf32CodeUnits;
 use servo_config::opts::{DiagnosticsLogging, DiagnosticsLoggingOption};
 use servo_config::{pref, prefs};
 use servo_url::ServoUrl;
@@ -87,13 +88,6 @@ pub(crate) use paint_timing_handler::{
 pub(crate) use stacking_context::*;
 
 const INSERTION_POINT_LOGICAL_WIDTH: Au = Au(AU_PER_PX);
-
-/// A color to use for the selection rectangle when the document isn't focused (does not
-/// have system focus or its frame itself does not have focus).
-///
-/// TODO: This should eventually come from the system theme.
-static UNFOCUSED_SELECTION_COLOR: LazyLock<AbsoluteColor> =
-    LazyLock::new(|| AbsoluteColor::srgb_legacy(200, 200, 200, 1.0));
 
 pub(crate) struct DisplayListBuilder<'a> {
     /// The [`FragmentTree`] that we are building a display list for.
@@ -992,12 +986,13 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             // If there is no selected style, just fall back to using the unfocused selection color,
             // which is strictly better than not drawing a selection highlight.
             let selected_style = fragment.selected_style.borrow();
-            let mut background_color =
-                if self.frame_focused && !ServoArc::ptr_eq(&*selected_style, &*style) {
-                    selected_style.resolve_color(&selected_style.get_background().background_color)
-                } else {
-                    *UNFOCUSED_SELECTION_COLOR
-                };
+            let mut background_color = selection_colors(
+                self.frame_focused,
+                &style,
+                &selected_style,
+                !ServoArc::ptr_eq(&*selected_style, &*style),
+            )
+            .background;
 
             if !background_color.is_transparent() {
                 background_color.alpha *= 0.5;
@@ -1203,6 +1198,10 @@ impl Fragment {
 
         Self::build_display_list_for_find_highlights(fragment, builder, state, line_box_rect);
 
+        // Stillwater: the selection highlight is painted before the shadows are pushed, so a
+        // `text-shadow` does not also shadow the highlight rectangle.
+        Self::build_display_list_for_text_selection(fragment, builder, state, line_box_rect);
+
         // Shadows. According to CSS-BACKGROUNDS, text shadows render in *reverse* order (front to
         // back).
         let shadows = &parent_style.get_inherited_text().text_shadow;
@@ -1221,8 +1220,6 @@ impl Fragment {
             );
         }
 
-        Self::build_display_list_for_text_selection(fragment, builder, state, line_box_rect);
-
         for decoration in [
             TextDecorationLine::UNDERLINE,
             TextDecorationLine::SPELLING_ERROR,
@@ -1239,14 +1236,38 @@ impl Fragment {
             );
         }
 
-        builder.webrender_display_list_builder.push_text(
-            &common,
-            glyph_bounds,
-            &builder.glyph_buffer,
-            fragment.font_key,
-            rgba(*parent_style.get_color()),
-            None,
-        );
+        // Stillwater: selected glyphs are drawn in the selection's text colour (an author
+        // `::selection { color }`, or HighlightText on the default highlight), the rest in the
+        // text's own colour.
+        let text_color = rgba(*parent_style.get_color());
+        match Self::selected_text_color_and_range(fragment, builder, &parent_style) {
+            None => builder.webrender_display_list_builder.push_text(
+                &common,
+                glyph_bounds,
+                &builder.glyph_buffer,
+                fragment.font_key,
+                text_color,
+                None,
+            ),
+            Some((selected_range, selected_color)) => {
+                let glyphs = std::mem::take(&mut builder.glyph_buffer);
+                let (selected, unselected) =
+                    split_glyphs_by_selection(&glyphs, fragment, &selected_range);
+                for (glyphs, color) in [(unselected, text_color), (selected, selected_color)] {
+                    if !glyphs.is_empty() {
+                        builder.webrender_display_list_builder.push_text(
+                            &common,
+                            glyph_bounds,
+                            &glyphs,
+                            fragment.font_key,
+                            color,
+                            None,
+                        );
+                    }
+                }
+                builder.glyph_buffer = glyphs;
+            },
+        }
 
         if builder
             .paint_timing_handler
@@ -1545,6 +1566,35 @@ impl Fragment {
 
     // TODO: This caret/text selection implementation currently does not account for vertical text
     // and RTL text properly.
+    /// Stillwater: the part of `fragment` that is selected (post-transform character
+    /// offsets) and the colour to draw its glyphs with, if that differs from the text's own.
+    fn selected_text_color_and_range(
+        fragment: &TextFragment,
+        builder: &DisplayListBuilder<'_>,
+        parent_style: &ServoArc<ComputedValues>,
+    ) -> Option<(std::ops::Range<Utf32CodeUnits>, wr::ColorF)> {
+        let selection = (*fragment.run_data.selection.borrow())?;
+        let range = fragment.run_data.map_dom_range_to_transformed_range(selection);
+        if range.start >= range.end ||
+            range.start >= fragment.character_range_in_dom_node.end ||
+            range.end <= fragment.character_range_in_dom_node.start
+        {
+            return None;
+        }
+        let selected_style = fragment.selected_style();
+        let text = selection_colors(
+            builder.frame_focused,
+            parent_style,
+            &selected_style,
+            !ServoArc::ptr_eq(&*selected_style, parent_style),
+        )
+        .text?;
+        if text == *parent_style.get_color() {
+            return None;
+        }
+        Some((range, rgba(text)))
+    }
+
     fn build_display_list_for_text_selection(
         fragment: &TextFragment,
         builder: &mut DisplayListBuilder<'_>,
@@ -1631,21 +1681,19 @@ impl Fragment {
             )
             .to_webrender();
 
-            let unfocused_color = *UNFOCUSED_SELECTION_COLOR;
             let selected_style = fragment.selected_style();
-            let selection_color = if builder.frame_focused {
-                selected_style
-                    .get_background_color()
-                    .as_absolute()
-                    .unwrap_or(&unfocused_color)
-            } else {
-                &unfocused_color
-            };
+            let selection_color = selection_colors(
+                builder.frame_focused,
+                &parent_style,
+                &selected_style,
+                !ServoArc::ptr_eq(&*selected_style, &*parent_style),
+            )
+            .background;
 
             let selection_common = builder.common_properties(state, selection_rect, &parent_style);
             builder
                 .wr()
-                .push_rect(&selection_common, selection_rect, rgba(*selection_color));
+                .push_rect(&selection_common, selection_rect, rgba(selection_color));
 
             return;
         }
@@ -2668,6 +2716,120 @@ impl<'a> BuilderForBoxFragment<'a> {
             );
         }
     }
+}
+
+/// Stillwater: whether `color` is the placeholder background of the UA `*::selection` rule
+/// (`rgb(1 2 3 / 0.5)` in servo.css), which stands for the system highlight colour.
+fn is_default_selection_placeholder(color: &AbsoluteColor) -> bool {
+    let color = color.to_color_space(ColorSpace::Srgb);
+    let byte = |value: f32| (value * 255.0).round() as i32;
+    byte(color.components.0) == 1 &&
+        byte(color.components.1) == 2 &&
+        byte(color.components.2) == 3 &&
+        (color.alpha - 0.5).abs() < 0.01
+}
+
+fn color_from_pref(rgba: [f64; 4]) -> AbsoluteColor {
+    AbsoluteColor::new(
+        ColorSpace::Srgb,
+        rgba[0] as f32,
+        rgba[1] as f32,
+        rgba[2] as f32,
+        rgba[3] as f32,
+    )
+    .into_srgb_legacy()
+}
+
+/// The colours a selection is painted with.
+struct SelectionColors {
+    background: AbsoluteColor,
+    /// The colour of selected text, when it isn't the text's own colour.
+    text: Option<AbsoluteColor>,
+}
+
+/// Stillwater: the selection colours for content with the style `style` and the
+/// `::selection` style `selected_style` (`has_selection_style` is false when there is none).
+///
+/// * The UA default is the system highlight with HighlightText (prefs
+///   `layout_selection_background_rgba` and `layout_selection_text_rgba`), readable on light
+///   and dark pages alike.
+/// * An author `::selection` background is used as is, and so is an author `color`; when the
+///   author sets only a background the text keeps its colour, as in Chrome.
+/// * In an inactive window the default highlight turns grey: dark grey under light text and
+///   light grey under dark text, so the text stays readable. Author colours stay.
+fn selection_colors(
+    frame_focused: bool,
+    style: &ComputedValues,
+    selected_style: &ComputedValues,
+    has_selection_style: bool,
+) -> SelectionColors {
+    let text_color = *style.get_color();
+    let (background, selected_text) = if has_selection_style {
+        let background =
+            selected_style.resolve_color(&selected_style.get_background().background_color);
+        let selected_text = *selected_style.get_color();
+        (
+            (!is_default_selection_placeholder(&background)).then_some(background),
+            (selected_text != text_color).then_some(selected_text),
+        )
+    } else {
+        (None, None)
+    };
+
+    if let Some(background) = background {
+        return SelectionColors {
+            background,
+            text: selected_text,
+        };
+    }
+    if !frame_focused {
+        let text = text_color.to_color_space(ColorSpace::Srgb);
+        let luminance = 0.2126 * text.components.0 +
+            0.7152 * text.components.1 +
+            0.0722 * text.components.2;
+        let background = if luminance > 0.5 {
+            AbsoluteColor::srgb_legacy(85, 85, 85, 1.0)
+        } else {
+            AbsoluteColor::srgb_legacy(200, 200, 200, 1.0)
+        };
+        return SelectionColors {
+            background,
+            text: selected_text,
+        };
+    }
+    SelectionColors {
+        background: color_from_pref(pref!(layout_selection_background_rgba)),
+        text: Some(
+            selected_text.unwrap_or_else(|| color_from_pref(pref!(layout_selection_text_rgba))),
+        ),
+    }
+}
+
+/// Stillwater: split the glyphs of `fragment` (as collected by [`collect_glyphs`], in the same
+/// order) into those of the characters in `range` and the rest.
+fn split_glyphs_by_selection(
+    glyphs: &[GlyphInstance],
+    fragment: &TextFragment,
+    range: &std::ops::Range<Utf32CodeUnits>,
+) -> (Vec<GlyphInstance>, Vec<GlyphInstance>) {
+    let mut selected = Vec::new();
+    let mut unselected = Vec::new();
+    let mut character_index = fragment.character_range_in_dom_node.start;
+    let mut instances = glyphs.iter();
+    for shaped_text_slice in fragment.glyphs.iter() {
+        for glyph in shaped_text_slice.glyphs() {
+            let Some(instance) = instances.next() else {
+                return (selected, unselected);
+            };
+            if character_index >= range.start && character_index < range.end {
+                selected.push(*instance);
+            } else {
+                unselected.push(*instance);
+            }
+            character_index += glyph.character_count();
+        }
+    }
+    (selected, unselected)
 }
 
 fn rgba(color: AbsoluteColor) -> wr::ColorF {
