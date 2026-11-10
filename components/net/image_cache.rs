@@ -582,9 +582,95 @@ struct ImageCacheStore {
 
     /// Stillwater: when [`Self::evict_unused_images`] last ran.
     last_unused_image_sweep: Instant,
+
+    /// Stillwater: the picture last handed to layout for each inline `<svg>` (by its id). When
+    /// the `<svg>` changes, layout keeps drawing this one until the new one is ready, instead
+    /// of drawing nothing in between.
+    #[ignore_malloc_size_of = "shares its pixels with rasterized_vector_images"]
+    last_svg_rasters: FxHashMap<Uuid, LastSvgRaster>,
+
+    /// Stillwater: loads that were evicted before they finished (an inline `<svg>` that
+    /// changed again first); their result is dropped as soon as it has been delivered.
+    abandoned_loads: HashSet<LoadKey>,
+
+    /// Stillwater: WebRender keys of replaced `<svg>` pictures, deleted a moment later because
+    /// the frame on screen may still draw them.
+    retired_svg_keys: Vec<(WebRenderImageKey, Instant)>,
 }
 
+/// Stillwater: see [`ImageCacheStore::last_svg_rasters`].
+struct LastSvgRaster {
+    image: RasterImage,
+    /// The rasterization this picture came from was dropped (the `<svg>` changed), so this
+    /// entry now owns the picture's WebRender key.
+    detached: bool,
+}
+
+/// Stillwater: how long a replaced `<svg>` picture's key outlives it.
+const RETIRED_SVG_KEY_DELAY: Duration = Duration::from_secs(1);
+
 impl ImageCacheStore {
+    /// Stillwater: remember `image` as the picture layout now shows for the `<svg>` `svg_id`.
+    fn record_svg_raster(&mut self, svg_id: Uuid, image: &RasterImage) {
+        if self
+            .last_svg_rasters
+            .get(&svg_id)
+            .is_some_and(|last| last.image.id == image.id)
+        {
+            return;
+        }
+        let replaced = self.last_svg_rasters.insert(
+            svg_id,
+            LastSvgRaster {
+                image: image.clone(),
+                detached: false,
+            },
+        );
+        if let Some(replaced) = replaced {
+            self.retire_svg_raster(replaced);
+        }
+    }
+
+    /// Stillwater: forget the picture kept for the `<svg>` `svg_id` (it left the document).
+    fn forget_svg_raster(&mut self, svg_id: &Uuid) {
+        if let Some(last) = self.last_svg_rasters.remove(svg_id) {
+            self.retire_svg_raster(last);
+        }
+    }
+
+    fn retire_svg_raster(&mut self, last: LastSvgRaster) {
+        // Identical icons share one picture; its key goes with the last of them.
+        if last.detached &&
+            let Some(key) = last.image.id &&
+            !self
+                .last_svg_rasters
+                .values()
+                .any(|other| other.image.id == Some(key))
+        {
+            self.retired_svg_keys.push((key, Instant::now()));
+        }
+    }
+
+    /// Stillwater: delete the keys of replaced `<svg>` pictures once nothing draws them.
+    fn delete_retired_svg_keys(&mut self) {
+        if self.retired_svg_keys.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut deletions = Vec::new();
+        self.retired_svg_keys.retain(|(key, since)| {
+            if now.duration_since(*since) < RETIRED_SVG_KEY_DELAY {
+                return true;
+            }
+            deletions.push(ImageUpdate::DeleteImage(*key));
+            false
+        });
+        if !deletions.is_empty() {
+            self.paint_api
+                .update_images(self.webview_id.into(), deletions.into());
+        }
+    }
+
     #[cfg(feature = "test-util")]
     fn number_of_rasterize_tasks(&self) -> usize {
         self.svg_rasterization_task_store.0.len()
@@ -762,17 +848,21 @@ impl ImageCacheStore {
         };
 
         let completed_load = CompletedLoad::new(image_response.clone(), key);
-        self.completed_loads.insert(
-            (
-                pending_load.url,
-                pending_load.load_origin,
-                pending_load.cors_setting,
-            ),
-            completed_load,
+        let cache_key = (
+            pending_load.url,
+            pending_load.load_origin,
+            pending_load.cors_setting,
         );
+        self.completed_loads
+            .insert(cache_key.clone(), completed_load);
 
         for listener in pending_load.listeners {
             listener.respond(image_response.clone());
+        }
+
+        // Stillwater: nothing wants this image any more (see `abandoned_loads`).
+        if self.abandoned_loads.remove(&key) {
+            self.remove_loaded_image(&cache_key.0, &cache_key.1, &cache_key.2);
         }
 
         self.evict_unused_images();
@@ -822,16 +912,46 @@ impl ImageCacheStore {
         origin: &ImmutableOrigin,
         cors_setting: &Option<CorsSettings>,
     ) {
-        if let Some(loaded_image) =
-            self.completed_loads
-                .remove(&(url.clone(), origin.clone(), *cors_setting)) &&
-            let ImageResponse::Loaded(Image::Raster(image), _) = loaded_image.image_response &&
-            let Some(id) = image.id
-        {
-            self.paint_api.update_images(
-                self.webview_id.into(),
-                vec![ImageUpdate::DeleteImage(id)].into(),
-            );
+        let Some(loaded_image) = self
+            .completed_loads
+            .remove(&(url.clone(), origin.clone(), *cors_setting))
+        else {
+            // Stillwater: still loading; drop it when it arrives, after answering whoever
+            // waits for it.
+            if let Some(key) = self.pending_loads.url_to_load_key.get(&(
+                url.clone(),
+                origin.clone(),
+                *cors_setting,
+            )) {
+                self.abandoned_loads.insert(*key);
+            }
+            return;
+        };
+        match loaded_image.image_response {
+            ImageResponse::Loaded(Image::Raster(image), _) => {
+                if let Some(id) = image.id {
+                    self.paint_api.update_images(
+                        self.webview_id.into(),
+                        vec![ImageUpdate::DeleteImage(id)].into(),
+                    );
+                }
+            },
+            // Stillwater: an inline `<svg>`'s picture nothing shows any more (see
+            // `SVGSVGElement`): drop the parsed SVG and its rasterizations with it.
+            ImageResponse::Loaded(Image::Vector(image), _) => {
+                self.vector_images.remove(&image.id);
+                let rasterizations: Vec<_> = self
+                    .rasterized_vector_images
+                    .keys()
+                    .filter(|(id, _)| *id == image.id)
+                    .cloned()
+                    .collect();
+                for (id, size) in rasterizations {
+                    self.remove_rasterized_vector_image(&id, &size);
+                }
+                self.svg_rasterization_task_store.remove_all_for_id(image.id);
+            },
+            _ => {},
         }
     }
 
@@ -847,7 +967,18 @@ impl ImageCacheStore {
             let result = entry.result.take();
             entry.notify_dropped(*image_id, *device_size);
             if let Some(result) = result {
-                if let Some(image_id) = result.id {
+                // Stillwater: a picture an `<svg>` still shows until its new one is ready is
+                // kept, and its key is deleted when it is replaced.
+                let mut shown = false;
+                if let Some(key) = result.id {
+                    for last in self.last_svg_rasters.values_mut() {
+                        if last.image.id == Some(key) {
+                            last.detached = true;
+                            shown = true;
+                        }
+                    }
+                }
+                if !shown && let Some(image_id) = result.id {
                     self.paint_api.update_images(
                         self.webview_id.into(),
                         vec![ImageUpdate::DeleteImage(image_id)].into(),
@@ -964,6 +1095,9 @@ impl ImageCacheFactory for ImageCacheFactoryImpl {
                 key_cache: KeyCache::new(),
                 svg_rasterization_task_store: SvgRasterizationTaskStore::default(),
                 last_unused_image_sweep: Instant::now(),
+                last_svg_rasters: FxHashMap::default(),
+                abandoned_loads: HashSet::new(),
+                retired_svg_keys: Vec::new(),
             })),
             svg_id_image_id_map: Arc::new(Mutex::new(FxHashMap::default())),
             broken_image_icon_data: self.broken_image_icon_data.clone(),
@@ -1125,18 +1259,14 @@ impl ImageCache for ImageCacheImpl {
         {
             let mut store = self.store.lock();
             let key = (image_id, requested_size);
-            if !store.vector_images.contains_key(&image_id) {
-                warn!("Unknown image requested for rasterization for key {key:?}");
-                return;
-            };
-
-            let Some(task) = store.rasterized_vector_images.get_mut(&key) else {
-                warn!("Image rasterization task not found in the cache for key {key:?}");
-                return;
-            };
-
-            // If `result` is `None`, the task is still pending.
-            if task.result.is_none() {
+            // Stillwater: if the image or its rasterization was dropped in the meantime (an
+            // inline `<svg>` that changed), answer at once like a dropped task does; the waiter
+            // would otherwise wait forever. Layout asks again if it still needs the image.
+            if store.vector_images.contains_key(&image_id) &&
+                let Some(task) = store.rasterized_vector_images.get_mut(&key) &&
+                task.result.is_none()
+            {
+                // The task is still pending.
                 task.listeners.push((pipeline_id, callback));
                 return;
             }
@@ -1171,24 +1301,18 @@ impl ImageCache for ImageCacheImpl {
             .entry((image_id, requested_size))
             .or_default();
         if let Some(result) = entry.result.as_ref() {
-            return RasterizationResult::Image(result.clone());
+            let result = result.clone();
+            if let Some(svg_id) = svg_id {
+                store.record_svg_raster(svg_id, &result);
+            }
+            store.delete_retired_svg_keys();
+            return RasterizationResult::Image(result);
         }
 
-        if let Some(svg_id) = svg_id &&
-            let Some(old_mapped_image_id) =
-                self.svg_id_image_id_map.lock().insert(svg_id, image_id) &&
-            old_mapped_image_id != image_id
-        {
-            store.vector_images.remove(&old_mapped_image_id);
-            if let Some(task) = store
-                .rasterized_vector_images
-                .remove(&(old_mapped_image_id, requested_size))
-            {
-                task.notify_dropped(old_mapped_image_id, requested_size);
-            }
-            store
-                .svg_rasterization_task_store
-                .remove_all_for_id(old_mapped_image_id);
+        // Stillwater: identical inline `<svg>`s share one image, so an `<svg>` moving to another
+        // image must not drop the old one; script evicts it when no `<svg>` uses it any more.
+        if let Some(svg_id) = svg_id {
+            self.svg_id_image_id_map.lock().insert(svg_id, image_id);
         }
 
         let natural_size = vector_image.svg_tree.size().to_int_size();
@@ -1335,21 +1459,23 @@ impl ImageCache for ImageCacheImpl {
         store.remove_loaded_image(url, origin, cors_setting);
     }
 
-    fn evict_rasterized_image(&self, svg_id: &Uuid) {
+    fn last_rasterized_svg(&self, svg_id: &Uuid) -> Option<WebRenderImageKey> {
+        self.store
+            .lock()
+            .last_svg_rasters
+            .get(svg_id)
+            .and_then(|last| last.image.id)
+    }
+
+    fn evict_rasterized_image(&self, svg_id: &Uuid, keep_last_picture: bool) {
         let mut store = self.store.lock();
-        if let Some(mapped_image_id) = self.svg_id_image_id_map.lock().remove(svg_id) {
-            store.pending_loads.remove(&mapped_image_id);
-            store.vector_images.remove(&mapped_image_id);
-            let images_to_remove = store
-                .rasterized_vector_images
-                .keys()
-                .filter(|(id, _size)| *id == mapped_image_id)
-                .cloned()
-                .collect::<Vec<_>>();
-            for (id, requested_size) in images_to_remove {
-                store.remove_rasterized_vector_image(&id, &requested_size);
-            }
+        if !keep_last_picture {
+            store.forget_svg_raster(svg_id);
         }
+        store.delete_retired_svg_keys();
+        // Stillwater: the image itself may be shared with identical `<svg>`s; it is dropped
+        // with `evict_completed_image` once none uses it.
+        self.svg_id_image_id_map.lock().remove(svg_id);
     }
 
     /// Inform the image cache about a response for a pending request.

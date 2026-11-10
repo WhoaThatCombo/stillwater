@@ -261,8 +261,14 @@ pub trait ImageCache: Sync + Send {
         callback: ImageCacheResponseCallback,
     );
 
-    /// Removes the rasterized image from the image_cache, identified by the id of the SVG
-    fn evict_rasterized_image(&self, svg_id: &Uuid);
+    /// Removes the rasterized image from the image_cache, identified by the id of the SVG.
+    /// Stillwater: with `keep_last_picture`, the picture layout last drew for that SVG stays
+    /// available through [`ImageCache::last_rasterized_svg`] until a new one replaces it.
+    fn evict_rasterized_image(&self, svg_id: &Uuid, keep_last_picture: bool);
+
+    /// Stillwater: the WebRender key of the picture layout last drew for the inline `<svg>`
+    /// `svg_id`, to keep drawing while its next picture is prepared.
+    fn last_rasterized_svg(&self, svg_id: &Uuid) -> Option<ImageKey>;
 
     /// Removes the completed image from the image_cache, identified by url, origin, and cors
     fn evict_completed_image(

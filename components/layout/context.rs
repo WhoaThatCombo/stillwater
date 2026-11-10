@@ -286,6 +286,12 @@ impl ImageResolver {
         }
     }
 
+    /// Stillwater: the picture last drawn for the inline `<svg>` `svg_id`, drawn while its new
+    /// picture is being serialized, loaded and rasterized.
+    pub(crate) fn last_rasterized_svg(&self, svg_id: &Uuid) -> Option<ImageKey> {
+        self.image_cache.last_rasterized_svg(svg_id)
+    }
+
     /// Resolve a cached image to a WebRender [`ImageKey`]
     pub(crate) fn image_key_from_cached_image(
         &self,

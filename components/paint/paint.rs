@@ -816,7 +816,7 @@ impl Paint {
     /// Free as much cached rendering memory as possible, e.g. when the system is low on memory.
     pub fn notify_memory_pressure(&self) {
         for painter in &self.painters {
-            painter.borrow().notify_memory_pressure();
+            painter.borrow_mut().notify_memory_pressure();
         }
     }
 

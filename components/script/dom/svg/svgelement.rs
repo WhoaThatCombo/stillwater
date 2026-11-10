@@ -4,7 +4,7 @@
 
 use dom_struct::dom_struct;
 use html5ever::{LocalName, Prefix, local_name, ns};
-use js::context::JSContext;
+use js::context::{JSContext, NoGC};
 use js::rust::HandleObject;
 use script_bindings::codegen::GenericBindings::ElementBinding::ScrollLogicalPosition;
 use script_bindings::codegen::GenericBindings::WindowBinding::ScrollBehavior;
@@ -32,7 +32,7 @@ use crate::dom::element::attributes::storage::AttrRef;
 use crate::dom::element::{AttributeMutation, Element};
 use crate::dom::node::focus::FocusTrigger;
 use crate::dom::node::virtualmethods::VirtualMethods;
-use crate::dom::node::{Node, NodeTraits};
+use crate::dom::node::{ChildrenMutation, Node, NodeTraits};
 use crate::dom::svg::svgcircleelement::SVGCircleElement;
 use crate::dom::svg::svgellipseelement::SVGEllipseElement;
 use crate::dom::svg::svgimageelement::SVGImageElement;
@@ -88,6 +88,25 @@ impl SVGElement {
     fn as_element(&self) -> &Element {
         self.upcast::<Element>()
     }
+
+    /// Stillwater: an inline `<svg>` is drawn from a serialized copy of its whole subtree, so a
+    /// change anywhere inside it (a path's `d`, a `fill`, a `<text>`'s text, children of a `<g>`)
+    /// has to throw away that copy, or the old picture stays on screen.
+    fn invalidate_ancestor_svg_serializations(&self, no_gc: &NoGC) {
+        // Copies being serialized are not in the document; their changes don't matter.
+        if !self.upcast::<Node>().is_connected() {
+            return;
+        }
+        for ancestor in self
+            .upcast::<Node>()
+            .ancestors()
+            .take_while(|ancestor| ancestor.is::<SVGElement>())
+        {
+            if let Some(svg) = ancestor.downcast::<SVGSVGElement>() {
+                svg.invalidate_cached_serialized_subtree_and_rasterization_result(no_gc);
+            }
+        }
+    }
 }
 
 impl VirtualMethods for SVGElement {
@@ -116,6 +135,14 @@ impl VirtualMethods for SVGElement {
                 },
             }
         }
+        self.invalidate_ancestor_svg_serializations(cx.no_gc());
+    }
+
+    fn children_changed(&self, cx: &mut JSContext, mutation: &ChildrenMutation) {
+        if let Some(super_type) = self.super_type() {
+            super_type.children_changed(cx, mutation);
+        }
+        self.invalidate_ancestor_svg_serializations(cx.no_gc());
     }
 
     fn attribute_affects_presentational_hints(&self, attr: AttrRef<'_>) -> bool {

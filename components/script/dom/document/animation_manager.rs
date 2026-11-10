@@ -214,6 +214,18 @@ impl AnimationManager {
         self.unroot_unused_nodes(&sets);
     }
 
+    /// Stillwater: whether CSS animations or transitions are running on `node` itself.
+    pub(crate) fn node_is_animating(&self, node: &Node) -> bool {
+        if !node.get_flag(NodeFlags::HAS_EVER_ANIMATED) {
+            return false;
+        }
+        self.sets
+            .sets
+            .read()
+            .get(&AnimationSetKey::new_for_non_pseudo(node.to_opaque()))
+            .is_some_and(ElementAnimationSet::needs_animation_ticks)
+    }
+
     /// Cancel animations for the given node, if any exist.
     pub(crate) fn cancel_animations_for_node(&self, node: &Node) {
         if !node.get_flag(NodeFlags::HAS_EVER_ANIMATED) {

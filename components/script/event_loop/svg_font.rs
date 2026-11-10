@@ -22,12 +22,43 @@ use style::values::computed::{
 };
 use webrender_api::FontVariation;
 
+/// A font loaded into a fontdb, and the address of the data it was loaded from.
+///
+/// Stillwater: usvg gives every SVG it parses its own copy of the database, so an ID cached
+/// while parsing one SVG means nothing (or another font) in the next one. The address tells
+/// whether the database being filled really holds this font under that ID.
+type LoadedFont = (fontdb::ID, usize);
+
+fn source_address(source: &fontdb::Source) -> Option<usize> {
+    match source {
+        fontdb::Source::Binary(data) => Some(Arc::as_ptr(data) as *const () as usize),
+        _ => None,
+    }
+}
+
+fn is_loaded_in(database: &fontdb::Database, (id, address): LoadedFont) -> bool {
+    database
+        .face(id)
+        .is_some_and(|face| source_address(&face.source) == Some(address))
+}
+
+/// Load font data into `database`, returning the loaded faces' IDs and the data's address.
+fn load_into(
+    database: &mut Arc<fontdb::Database>,
+    data: fonts::FontData,
+) -> (Vec<fontdb::ID>, usize) {
+    let data = Arc::new(data);
+    let address = Arc::as_ptr(&data) as *const () as usize;
+    let ids = Arc::make_mut(database).load_font_source(fontdb::Source::Binary(data));
+    (ids.into_iter().collect(), address)
+}
+
 /// Used to dynamically query fonts used in SVGs and insert them into the fontDB used when rasterizing.
 #[derive(MallocSizeOf)]
 pub struct SvgFontResolver {
     /// Cache for Font to ID
-    font_id_cache: Mutex<FxHashMap<Font, fontdb::ID>>,
-    fallback_id_cache: Mutex<FxHashMap<char, Vec<fontdb::ID>>>,
+    font_id_cache: Mutex<FxHashMap<Font, LoadedFont>>,
+    fallback_id_cache: Mutex<FxHashMap<char, Vec<LoadedFont>>>,
     #[conditional_malloc_size_of]
     context: Arc<FontContext>,
 }
@@ -74,12 +105,13 @@ impl SvgFontResolver {
             let Ok(data_and_index) = font_ref.font_data_and_index() else {
                 continue;
             };
-            let ids = Arc::make_mut(database).load_font_source(fontdb::Source::Binary(Arc::new(
-                data_and_index.data.clone(),
-            )));
+            let (ids, address) = load_into(database, data_and_index.data.clone());
 
             if let Some(id) = ids.get(data_and_index.index as usize).copied() {
-                self.font_id_cache.lock().unwrap().insert(font.clone(), id);
+                self.font_id_cache
+                    .lock()
+                    .unwrap()
+                    .insert(font.clone(), (id, address));
                 return Some(id);
             }
         }
@@ -159,8 +191,10 @@ impl FontResolver for SvgFontResolver {
     fn resolve(&self, font: &Font, database: &mut Arc<fontdb::Database>) -> Option<fontdb::ID> {
         {
             let id_cache = self.font_id_cache.lock().unwrap();
-            if let Some(font_id) = id_cache.get(font) {
-                return Some(*font_id);
+            if let Some(loaded) = id_cache.get(font) &&
+                is_loaded_in(database, *loaded)
+            {
+                return Some(loaded.0);
             }
         }
         self.insert_into_database(font, database)
@@ -174,10 +208,11 @@ impl FontResolver for SvgFontResolver {
     ) -> Option<fontdb::ID> {
         {
             let id_cache = self.fallback_id_cache.lock().unwrap();
-            if let Some(font_id) = id_cache
-                .get(&character)
-                .and_then(|font_ids| font_ids.iter().find(|font_id| !excluded.contains(font_id)))
-            {
+            if let Some((font_id, _)) = id_cache.get(&character).and_then(|loaded_fonts| {
+                loaded_fonts.iter().find(|loaded| {
+                    !excluded.contains(&loaded.0) && is_loaded_in(database, **loaded)
+                })
+            }) {
                 return Some(*font_id);
             }
         }
@@ -212,9 +247,7 @@ impl FontResolver for SvgFontResolver {
                     continue;
                 };
 
-                let ids = Arc::make_mut(database).load_font_source(fontdb::Source::Binary(
-                    Arc::new(data_and_index.data.clone()),
-                ));
+                let (ids, address) = load_into(database, data_and_index.data.clone());
 
                 let Some(id) = ids.get(data_and_index.index as usize) else {
                     continue;
@@ -229,7 +262,7 @@ impl FontResolver for SvgFontResolver {
                     .unwrap()
                     .entry(character)
                     .or_default()
-                    .push(*id);
+                    .push((*id, address));
                 return Some(*id);
             }
         }

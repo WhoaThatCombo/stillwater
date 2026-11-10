@@ -123,6 +123,7 @@ use crate::dom::bindings::codegen::Bindings::ImageBitmapBinding::{
 };
 use crate::dom::bindings::codegen::Bindings::MediaQueryListBinding::MediaQueryList_Binding::MediaQueryListMethods;
 use crate::dom::bindings::codegen::Bindings::MessagePortBinding::StructuredSerializeOptions;
+use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::codegen::Bindings::ReportingObserverBinding::Report;
 use crate::dom::bindings::codegen::Bindings::RequestBinding::{RequestInfo, RequestInit};
 use crate::dom::bindings::codegen::Bindings::VoidFunctionBinding::VoidFunction;
@@ -427,6 +428,23 @@ pub(crate) struct Window {
     pending_images_for_rasterization: DomRefCell<
         HashMapTracedValues<PendingImageRasterizationKey, Vec<Dom<Node>>, FxBuildHasher>,
     >,
+
+    /// Stillwater: inline `<svg>` elements in the document that are drawn from a serialized
+    /// copy, checked after each layout for style changes the copy has to follow.
+    serialized_svgs: DomRefCell<Vec<Dom<SVGSVGElement>>>,
+
+    /// Stillwater: set while [`Window::invalidate_svgs_using_other_svgs`] runs.
+    invalidating_svg_users: Cell<bool>,
+
+    /// Stillwater: how many inline `<svg>`s draw each serialized SVG image (identical icons
+    /// share one).
+    #[no_trace]
+    svg_image_users: RefCell<FxHashMap<ServoUrl, usize>>,
+
+    /// Stillwater: whether the last reflow restyled anything, and if so the part of the
+    /// document it restyled (the parent of its dirty root; `None` for the whole document).
+    svg_style_check_pending: Cell<bool>,
+    svg_style_check_scope: MutNullableDom<Node>,
 
     /// Directory to store unminified css for this window if unminify-css
     /// opt is enabled.
@@ -811,6 +829,58 @@ impl Window {
                 nodes.remove();
             },
         }
+    }
+
+    /// Stillwater: see [`Window::serialized_svgs`].
+    /// An `<svg>` leaving the document clears its flag and is dropped from the list on the
+    /// next walk.
+    pub(crate) fn register_serialized_svg(&self, svg: &SVGSVGElement) {
+        if !svg.is_registered() {
+            svg.set_registered(true);
+            self.serialized_svgs.borrow_mut().push(Dom::from_ref(svg));
+        }
+    }
+
+    /// Stillwater: an inline `<svg>` now draws the serialized SVG image `url`.
+    pub(crate) fn retain_svg_image(&self, url: &ServoUrl) {
+        *self
+            .svg_image_users
+            .borrow_mut()
+            .entry(url.clone())
+            .or_default() += 1;
+    }
+
+    /// Stillwater: an inline `<svg>` stopped drawing `url`. Returns whether others still do.
+    pub(crate) fn release_svg_image(&self, url: &ServoUrl) -> bool {
+        let mut users = self.svg_image_users.borrow_mut();
+        let Some(count) = users.get_mut(url) else {
+            return false;
+        };
+        *count -= 1;
+        if *count > 0 {
+            return true;
+        }
+        users.remove(url);
+        false
+    }
+
+    /// Stillwater: an `<svg>` that others include through `<use>` changed; make their copies
+    /// again too.
+    pub(crate) fn invalidate_svgs_using_other_svgs(&self, no_gc: &NoGC) {
+        if self.invalidating_svg_users.replace(true) {
+            return;
+        }
+        let users: Vec<DomRoot<SVGSVGElement>> = self
+            .serialized_svgs
+            .borrow()
+            .iter()
+            .filter(|svg| svg.is_registered() && svg.uses_other_svgs())
+            .map(|svg| DomRoot::from_ref(&**svg))
+            .collect();
+        for svg in users {
+            svg.invalidate_cached_serialized_subtree_and_rasterization_result(no_gc);
+        }
+        self.invalidating_svg_users.set(false);
     }
 
     pub(crate) fn handle_image_rasterization_complete_notification(
@@ -2782,7 +2852,17 @@ impl Window {
             let pending_restyles = document.drain_pending_restyles(cx.no_gc());
             let dirty_root = document
                 .take_dirty_root()
-                .filter(|_| !stylesheets_changed)
+                .filter(|_| !stylesheets_changed);
+            // Stillwater: inline `<svg>`s outside the restyled part keep their styles; the
+            // parent also covers sibling selectors (`.a:hover + .b svg`).
+            self.svg_style_check_pending.set(true);
+            self.svg_style_check_scope.set(
+                dirty_root
+                    .as_ref()
+                    .and_then(|root| root.upcast::<Node>().GetParentNode())
+                    .as_deref(),
+            );
+            let dirty_root = dirty_root
                 .or_else(|| document.GetDocumentElement())
                 .map(|root| root.upcast::<Node>().to_trusted_node_address());
 
@@ -4026,6 +4106,25 @@ impl Window {
             svg.serialize_and_cache_subtree(cx);
             node.dirty(cx.no_gc(), NodeDamage::Other);
         }
+
+        // Stillwater: last, so that what layout asked for above is already being waited on.
+        // Only the `<svg>`s in the part of the document this reflow restyled can have changed.
+        // This runs after every layout, so it neither roots nor allocates per `<svg>`.
+        if self.svg_style_check_pending.replace(false) {
+            let scope = self.svg_style_check_scope.take();
+            self.serialized_svgs
+                .borrow_mut()
+                .retain(|svg| svg.is_registered());
+            let no_gc = cx.no_gc();
+            for svg in self.serialized_svgs.borrow().iter() {
+                if scope
+                    .as_ref()
+                    .is_none_or(|scope| scope.is_inclusive_ancestor_of(svg.upcast()))
+                {
+                    svg.invalidate_if_styles_changed(no_gc);
+                }
+            }
+        }
     }
 
     #[expect(unsafe_code)]
@@ -4244,6 +4343,11 @@ impl Window {
             pending_image_callbacks: Default::default(),
             pending_layout_images: Default::default(),
             pending_images_for_rasterization: Default::default(),
+            serialized_svgs: Default::default(),
+            invalidating_svg_users: Default::default(),
+            svg_image_users: Default::default(),
+            svg_style_check_pending: Default::default(),
+            svg_style_check_scope: Default::default(),
             unminified_css_dir: DomRefCell::new(if unminify_css {
                 Some(unminified_path("unminified-css"))
             } else {

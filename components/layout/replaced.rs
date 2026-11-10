@@ -162,6 +162,9 @@ pub(crate) enum ReplacedContentKind {
     SVGElement {
         vector_image: Option<VectorImage>,
         has_viewbox: bool,
+        /// Stillwater: the `<svg>` element's id in the image cache.
+        #[ignore_malloc_size_of = "plain id"]
+        svg_id: uuid::Uuid,
     },
     Audio,
 }
@@ -334,6 +337,7 @@ impl ReplacedContents {
             ReplacedContentKind::SVGElement {
                 vector_image,
                 has_viewbox: svg_data.view_box.is_some(),
+                svg_id: svg_data.svg_id,
             },
             natural_size,
         )
@@ -627,12 +631,11 @@ impl ReplacedContents {
             ReplacedContentKind::SVGElement {
                 vector_image,
                 has_viewbox,
+                svg_id,
             } => {
-                let Some(vector_image) = vector_image else {
-                    return vec![];
-                };
-
-                if !has_viewbox {
+                if let Some(vector_image) = vector_image &&
+                    !has_viewbox
+                {
                     base.set_rect(
                         PhysicalSize::new(
                             vector_image
@@ -658,15 +661,20 @@ impl ReplacedContents {
                 );
 
                 let tag = self.base_fragment_info.tag.unwrap();
-                layout_context
-                    .image_resolver
-                    .rasterize_vector_image(
-                        vector_image.id,
-                        raster_size,
-                        tag.node,
-                        vector_image.svg_id,
-                    )
+                vector_image
+                    .as_ref()
+                    .and_then(|vector_image| {
+                        layout_context.image_resolver.rasterize_vector_image(
+                            vector_image.id,
+                            raster_size,
+                            tag.node,
+                            vector_image.svg_id,
+                        )
+                    })
                     .and_then(|image| image.id)
+                    // Stillwater: while the `<svg>`'s new picture is not ready, keep drawing the
+                    // previous one rather than nothing.
+                    .or_else(|| layout_context.image_resolver.last_rasterized_svg(svg_id))
                     .map(|image_key| {
                         Fragment::Image(Arc::new(ImageFragment {
                             base,

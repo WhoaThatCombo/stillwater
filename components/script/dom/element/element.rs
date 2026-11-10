@@ -1062,6 +1062,18 @@ impl Element {
             .map(|data| data.element_data.borrow().styles.primary().clone())
     }
 
+    /// Stillwater: whether this element's computed style is `style` (`None`: no style), without
+    /// touching reference counts. For cheap "was this restyled?" checks.
+    pub(crate) fn primary_style_is(&self, style: Option<&ServoArc<ComputedValues>>) -> bool {
+        match (self.style_data.borrow().as_ref(), style) {
+            (Some(data), Some(style)) => {
+                ServoArc::ptr_eq(data.element_data.borrow().styles.primary(), style)
+            },
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
     pub(crate) fn is_styled(&self) -> bool {
         self.style_data.borrow().is_some()
     }

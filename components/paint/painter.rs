@@ -841,8 +841,12 @@ impl Painter {
     }
 
     /// Drop WebRender's caches (textures, glyphs, rasterized images); they are rebuilt as needed.
-    pub(crate) fn notify_memory_pressure(&self) {
+    pub(crate) fn notify_memory_pressure(&mut self) {
         self.webrender_api.notify_memory_pressure();
+        // Stillwater: WebRender forgets the frame it last drew along with its caches, so until
+        // a new frame is built, every repaint of the window draws these pages blank (white).
+        // Rebuild the scene and a frame now instead of waiting for the pages to change.
+        self.send_root_pipeline_display_list();
     }
 
     pub(crate) fn report_memory(&self) -> MemoryReport {
