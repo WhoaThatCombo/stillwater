@@ -492,6 +492,19 @@ impl Selection {
         self.visible_selection_dirty.set(true);
     }
 
+    /// Stillwater: the focus, the end of the selection that moves when it is extended.
+    pub(crate) fn composed_focus_position(&self) -> Option<RootedSelectionBoundary> {
+        let range = self.range.borrow();
+        let range = range.as_ref()?;
+        let (container, offset) = match self.direction.get() {
+            Direction::Forwards => (range.end.container.as_rooted(), range.end.offset),
+            _ => (range.start.container.as_rooted(), range.start.offset),
+        };
+        Some(RootedSelectionBoundary::new_with_utf16_offset(
+            container, offset,
+        ))
+    }
+
     pub(crate) fn composed_anchor_position(&self) -> Option<RootedSelectionBoundary> {
         let range = self.range.borrow();
         let range = range.as_ref()?;
