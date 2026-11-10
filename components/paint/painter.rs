@@ -300,7 +300,7 @@ impl Painter {
             property_binding_key_counter: Default::default(),
         };
         painter.assert_gl_framebuffer_complete();
-        painter.clear_background();
+        painter.clear_background(painter.clear_color());
         painter
     }
 
@@ -435,18 +435,21 @@ impl Painter {
 
         self.rendering_context.prepare_for_rendering();
 
+        let clear_color = self.clear_color();
         time_profile!(
             ProfilerCategory::Painting,
             None,
             time_profiler_channel.clone(),
             || {
                 if let Some(renderer) = self.webrender_renderer.as_mut() {
+                    // WebRender clears the frame with this colour too.
+                    renderer.set_clear_color(clear_color);
                     renderer.update();
                 }
 
                 // Paint the scene.
                 // TODO(gw): Take notice of any errors the renderer returns!
-                self.clear_background();
+                self.clear_background(clear_color);
                 if let Some(renderer) = self.webrender_renderer.as_mut() {
                     let size = self.rendering_context.size2d().to_i32();
                     renderer.render(size, 0 /* buffer_age */).ok();
@@ -466,19 +469,46 @@ impl Painter {
         self.send_pending_paint_metrics_messages_after_composite();
     }
 
-    fn clear_background(&self) {
+    /// Stillwater: the colour the frame is cleared with. While a page re-lays out after its
+    /// viewport grew (a window resize, a move to another monitor), the frame still holds its
+    /// previous, smaller display list; the area that display list doesn't cover shows this
+    /// colour. That is the page's own canvas background when it has one, so a dark page no
+    /// longer gets a white band, and the `shell_background_color_rgba` default (white, which is
+    /// also what a page with a transparent canvas shows) otherwise.
+    fn clear_color(&self) -> ColorF {
+        let default = servo_config::pref!(shell_background_color_rgba);
+        let default = ColorF::new(
+            default[0] as f32,
+            default[1] as f32,
+            default[2] as f32,
+            default[3] as f32,
+        );
+        let Some(color) = self
+            .webview_renderers
+            .values()
+            .filter(|webview_renderer| !webview_renderer.hidden())
+            .find_map(|webview_renderer| webview_renderer.root_background_color)
+        else {
+            return default;
+        };
+        // A translucent canvas background is drawn over the default one.
+        let mix = |page: f32, under: f32| page * color.a + under * (1.0 - color.a);
+        ColorF::new(
+            mix(color.r, default.r),
+            mix(color.g, default.g),
+            mix(color.b, default.b),
+            mix(1.0, default.a),
+        )
+    }
+
+    fn clear_background(&self, color: ColorF) {
         self.assert_gl_framebuffer_complete();
 
         // Always clear the entire RenderingContext, regardless of how many WebViews there are
         // or where they are positioned. This is so WebView actually clears even before the
         // first WebView is ready.
-        let color = servo_config::pref!(shell_background_color_rgba);
-        self.webrender_gl.clear_color(
-            color[0] as f32,
-            color[1] as f32,
-            color[2] as f32,
-            color[3] as f32,
-        );
+        self.webrender_gl
+            .clear_color(color.r, color.g, color.b, color.a);
         self.webrender_gl.clear(gleam::gl::COLOR_BUFFER_BIT);
     }
 
@@ -1127,6 +1157,9 @@ impl Painter {
 
         let mut transaction = Transaction::new();
         let is_root_pipeline = Some(pipeline_id.into()) == webview_renderer.root_pipeline_id;
+        if is_root_pipeline {
+            webview_renderer.root_background_color = display_list_info.root_background_color;
+        }
         if is_root_pipeline && old_scale != webview_renderer.device_pixels_per_page_pixel() {
             self.send_root_pipeline_display_list_in_transaction(&mut transaction);
         }

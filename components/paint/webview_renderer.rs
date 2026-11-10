@@ -93,6 +93,9 @@ pub(crate) struct WebViewRenderer {
     pub webview: Box<dyn WebViewTrait>,
     /// The root [`PipelineId`] of the currently displayed page in this WebView.
     pub root_pipeline_id: Option<PipelineId>,
+    /// Stillwater: the canvas background colour of the root pipeline's latest display list
+    /// (`None`: transparent, so the default canvas colour shows).
+    pub root_background_color: Option<webrender_api::ColorF>,
     /// The rectangle of the [`WebView`] in device pixels, which is the viewport.
     pub rect: DeviceRect,
     /// Tracks details about each active pipeline that `Paint` knows about.
@@ -154,6 +157,7 @@ impl WebViewRenderer {
             id: webview_id,
             webview: renderer_webview,
             root_pipeline_id: None,
+            root_background_color: None,
             rect,
             pipelines: Default::default(),
             touch_handler: TouchHandler::new(webview_id),

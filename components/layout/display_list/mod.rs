@@ -256,6 +256,8 @@ impl DisplayListBuilder<'_> {
 
         // Clear any caret color from previous display list constructions.
         builder.paint_info.caret_property_binding = None;
+        // Likewise the canvas colour: set again if the root background is painted.
+        builder.paint_info.root_background_color = None;
 
         builder.add_all_spatial_nodes();
 
@@ -1080,6 +1082,8 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             let common = self.common_properties(state, painting_area, &source_style);
             let color = rgba(background_color);
             self.wr().push_rect(&common, painting_area, color);
+            // Stillwater: tell `Paint` the canvas colour (see `root_background_color`).
+            self.paint_info.root_background_color = Some(color);
 
             // From <https://www.w3.org/TR/paint-timing/#sec-terminology>:
             // First paint ... includes non-default background paint and the enclosing box of an iframe.

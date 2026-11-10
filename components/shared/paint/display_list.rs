@@ -1061,6 +1061,12 @@ pub struct PaintDisplayListInfo {
     /// If this display list contains a blinking caret, this value will be filled with its animation
     /// key and original color value so that the painter can animate the caret.
     pub caret_property_binding: Option<(PropertyBindingKey<ColorF>, ColorF)>,
+
+    /// Stillwater: the canvas background colour of this display list (the root element's
+    /// background, or the `<body>` background propagated to it), when it isn't transparent.
+    /// `Paint` clears the frame with it, so the part of a resized viewport that the page has not
+    /// re-laid out into yet shows the page's own background instead of white.
+    pub root_background_color: Option<ColorF>,
 }
 
 impl PaintDisplayListInfo {
@@ -1115,6 +1121,7 @@ impl PaintDisplayListInfo {
             paint_timing_report: PaintTimingReport::default(),
             paint_timing_info: PaintTimingInfo::now(),
             caret_property_binding: Default::default(),
+            root_background_color: None,
         }
     }
 
