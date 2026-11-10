@@ -121,6 +121,9 @@ pub struct Gui {
     pub(crate) find_bar: FindBar,
     /// Where the saved-login list under a focused sign-in field is drawn, if it shows.
     password_chooser_rect: Option<egui::Rect>,
+    /// The startup animation, until it has finished (or was never wanted).
+    splash: Option<crate::desktop::splash::Splash>,
+    splash_decided: bool,
 }
 
 #[cfg(any(
@@ -312,6 +315,8 @@ impl Gui {
             painted_webviews: HashSet::new(),
             find_bar: FindBar::default(),
             password_chooser_rect: None,
+            splash: Some(crate::desktop::splash::Splash::new()),
+            splash_decided: false,
         }
     }
 
@@ -837,6 +842,14 @@ impl Gui {
             .set_window_state(!winit_window.is_decorated(), winit_window.is_maximized());
         self.sidebar.push_state(window);
 
+        if !self.splash_decided {
+            self.splash_decided = true;
+            let automated = state.servoshell_preferences.webdriver_port.get().is_some();
+            if !crate::desktop::splash::Splash::wanted(self.sidebar.startup_animation(), automated) {
+                self.splash = None;
+            }
+        }
+
         self.rendering_context
             .make_current()
             .expect("Could not make RenderingContext current");
@@ -858,6 +871,7 @@ impl Gui {
             pane_focus,
             find_bar,
             password_chooser_rect,
+            splash,
             ..
         } = self;
         pane_control_rects.borrow_mut().clear();
@@ -1148,6 +1162,13 @@ impl Gui {
                             })),
                         });
                 }
+            }
+
+            // The startup animation covers everything until the browser is ready to be seen.
+            if let Some(animation) = splash.as_mut() &&
+                !animation.paint(ctx, full_rect, background, sidebar.is_ready())
+            {
+                *splash = None;
             }
         });
 

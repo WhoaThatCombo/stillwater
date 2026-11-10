@@ -60,7 +60,7 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "toggle-compact", "session-startup", "adblock-enabled", "pw-autofill", "pw-delete", "pw-reveal",
     "pw-copy", "pw-copy-user", "pw-forget-never", "zen-scan", "zen-import", "check-updates",
     "hist-clear", "hist-show", "dl-ask", "dl-panel", "set-spaces", "tr-auto", "tr-target", "tr-unlist",
-    "tr-delete-model", "tr-models",
+    "tr-delete-model", "tr-models", "set-splash",
 ];
 
 /// Whether `url` is the settings page (whatever category it shows).
@@ -541,6 +541,11 @@ impl Sidebar {
         self.waker.wake_by_ref();
     }
 
+    /// Whether the startup animation is turned on in settings.
+    pub(crate) fn startup_animation(&self) -> bool {
+        self.settings.borrow().startup_animation
+    }
+
     /// The window background colour, tinted by the current workspace.
     pub(crate) fn background(&self) -> [u8; 3] {
         self.workspaces.background(self.theme)
@@ -937,6 +942,7 @@ impl Sidebar {
                     self.window_actions.push(WindowAction::CommandBar)
                 },
                 "set-newtab" => self.settings.borrow_mut().set_new_tab_bar(argument == "1"),
+                "set-splash" => self.settings.borrow_mut().set_startup_animation(argument == "1"),
                 "set-spaces" => {
                     let enabled = argument == "1";
                     self.settings.borrow_mut().set_spaces(enabled);

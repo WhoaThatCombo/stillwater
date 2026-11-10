@@ -108,6 +108,8 @@ pub(crate) struct Settings {
     /// Zen's spaces (several sets of tabs, switched at the bottom of the sidebar). Off by
     /// default: one list of tabs.
     pub(crate) spaces: bool,
+    /// Play the short animation that covers the window while Stillwater starts.
+    pub(crate) startup_animation: bool,
     path: Option<PathBuf>,
 }
 
@@ -139,6 +141,7 @@ impl Settings {
             restore_session: saved["startup"].as_str() != Some("newtab"),
             new_tab_bar: saved["newTabBar"].as_bool().unwrap_or(true),
             spaces: saved["spaces"].as_bool().unwrap_or(false),
+            startup_animation: saved["startupAnimation"].as_bool().unwrap_or(true),
             path,
         };
         settings.publish_search_template();
@@ -158,6 +161,7 @@ impl Settings {
             "startup": self.startup_id(),
             "newTabBar": self.new_tab_bar,
             "spaces": self.spaces,
+            "startupAnimation": self.startup_animation,
         });
         let result = path
             .parent()
@@ -231,6 +235,11 @@ impl Settings {
         self.save();
     }
 
+    pub(crate) fn set_startup_animation(&mut self, enabled: bool) {
+        self.startup_animation = enabled;
+        self.save();
+    }
+
     pub(crate) fn set_new_tab_bar(&mut self, enabled: bool) {
         self.new_tab_bar = enabled;
         self.save();
@@ -251,6 +260,7 @@ impl Settings {
             "startup": self.startup_id(),
             "newTabBar": self.new_tab_bar,
             "spaces": self.spaces,
+            "startupAnimation": self.startup_animation,
             "version": crate::desktop::updater::CURRENT_VERSION,
         })
     }

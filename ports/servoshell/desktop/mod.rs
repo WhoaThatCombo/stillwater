@@ -35,6 +35,7 @@ mod settings;
 pub(crate) mod shutdown;
 pub(crate) mod sidebar;
 pub(crate) mod single_instance;
+mod splash;
 mod tracing;
 mod updater;
 #[cfg(feature = "webxr")]
