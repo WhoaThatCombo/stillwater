@@ -614,31 +614,6 @@ impl Gui {
                     if let Some(url) = self.glance.take().and_then(|pane| pane.url()) {
                         self.pane_requests.borrow_mut().push(PaneRequest::Open(PaneKind::Split, url));
                         self.apply_pane_requests(state, window, headed_window);
-        {
-            // The shield shows the page in the URL bar: the focused pane or the active tab.
-            let adblock = state.adblock.borrow();
-            let page = self.sidebar.navigated_webview(window);
-            let url = page.as_ref().and_then(|webview| webview.url());
-            let host = url
-                .as_ref()
-                .filter(|url| matches!(url.scheme(), "http" | "https"))
-                .and_then(|url| url.host_str().map(str::to_owned));
-            self.sidebar.set_adblock(serde_json::json!({
-                "enabled": adblock.enabled(),
-                "ready": adblock.ready(),
-                "host": host,
-                "site": url.as_ref().is_some_and(|url| adblock.enabled_for(url)),
-                "blocked": page.map(|webview| adblock.blocked_count(webview.id())).unwrap_or(0),
-            }));
-        }
-        {
-            // The translate button shows the page in the URL bar.
-            let mut translation = state.translation.borrow_mut();
-            translation.set_proxy(&headed_window.event_loop_proxy());
-            let page = self.sidebar.navigated_webview(window).map(|webview| webview.id());
-            translation.focused(page);
-            self.sidebar.set_translate(translation.to_json(page));
-        }
                     }
                 },
             }
