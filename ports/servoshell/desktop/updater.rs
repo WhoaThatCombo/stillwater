@@ -39,7 +39,7 @@ pub(crate) fn system_program(name: &str) -> std::path::PathBuf {
 
 /// This build's Stillwater version. Keep in sync with `support/windows/*.wxs*` and the
 /// `ProductVersion` in `ports/servoshell/Cargo.toml` when releasing.
-pub(crate) const CURRENT_VERSION: &str = "0.9.0";
+pub(crate) const CURRENT_VERSION: &str = "0.9.1";
 
 const RELEASES_API: &str =
     "https://api.github.com/repos/WhoaThatCombo/stillwater/releases?per_page=10";

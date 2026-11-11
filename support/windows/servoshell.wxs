@@ -2,7 +2,7 @@
   <!-- Stillwater setup: installs per-user into %LOCALAPPDATA%\Programs\Stillwater (no admin prompt).
        The auto-updater runs this with /passive. -->
   <Bundle Name="Stillwater"
-          Version="0.9.0"
+          Version="0.9.1"
           Manufacturer="Stillwater contributors"
           AboutUrl="https://github.com/WhoaThatCombo/stillwater"
           UpdateUrl="https://github.com/WhoaThatCombo/stillwater/releases"
