@@ -82,6 +82,14 @@ pub(crate) struct MediaFrameRenderer {
     current_frame_holder: Option<FrameHolder>,
     /// <https://html.spec.whatwg.org/multipage/#poster-frame>
     poster_frame: Option<MediaFrame>,
+    /// Whether the last frame needs a new display list (a new image key or a GL texture to
+    /// lock) rather than just new pixels for the image the display list already shows.
+    display_list_stale: bool,
+    /// Whether the page is shown (its window isn't throttled), so new frames are worth
+    /// compositing at once. A hidden tab's frames take the old path (the element is dirtied
+    /// and painted with the page's next rendering update), so a video playing in a background
+    /// tab doesn't make the renderer generate frames nobody sees.
+    page_visible: bool,
 }
 
 impl MediaFrameRenderer {
@@ -101,11 +109,24 @@ impl MediaFrameRenderer {
             very_old_frame: None,
             current_frame_holder: None,
             poster_frame: None,
+            display_list_stale: false,
+            page_visible: true,
         }
     }
 
     pub(crate) fn current_frame(&self) -> Option<MediaFrame> {
         self.current_frame
+    }
+
+    /// Whether a frame rendered since the last call needs the element to be laid out and
+    /// painted again. Frames that only replace the pixels of the current image are shown by
+    /// the renderer on its own (see `render`).
+    pub(crate) fn take_display_list_stale(&mut self) -> bool {
+        std::mem::take(&mut self.display_list_stale)
+    }
+
+    pub(crate) fn set_page_visible(&mut self, visible: bool) {
+        self.page_visible = visible;
     }
 
     pub(crate) fn poster_frame(&self) -> Option<MediaFrame> {
@@ -229,6 +250,8 @@ impl VideoFrameRenderer for MediaFrameRenderer {
         }
 
         let mut updates = smallvec::smallvec![];
+        // Set when only the pixels of the image already in the display list change.
+        let mut pixels_only = false;
 
         if let Some(old_image_key) =
             std::mem::replace(&mut self.very_old_frame, self.old_frame.take())
@@ -257,6 +280,7 @@ impl VideoFrameRenderer for MediaFrameRenderer {
                         )),
                         None,
                     ));
+                    pixels_only = true;
                 }
 
                 self.current_frame_holder
@@ -364,5 +388,17 @@ impl VideoFrameRenderer for MediaFrameRenderer {
         }
         self.paint_api
             .update_images(self.webview_id.into(), updates);
+
+        // Not while an earlier frame's new image is still waiting for the element to be laid
+        // out: until then the display list shows the previous image, which is deleted a frame
+        // later, and a frame generated in between would show nothing there.
+        if pixels_only && self.page_visible && !self.display_list_stale {
+            // The display list already shows this image: have the renderer composite the new
+            // pixels now, at the video's own pace, instead of waiting for the page's next
+            // rendering update (a 20 ms timer, and only as often as the script thread is free).
+            self.paint_api.generate_frame(vec![self.webview_id.into()]);
+        } else {
+            self.display_list_stale = true;
+        }
     }
 }

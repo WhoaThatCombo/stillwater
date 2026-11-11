@@ -99,6 +99,49 @@ pub(crate) fn count(name: &'static str) {
     }
 }
 
+/// Whether `STILLWATER_FRAME_LOG=1`: log every new frame of the active page as it becomes ready
+/// (`ready`) and as it reaches the window (`present`), so frame pacing (video smoothness) can
+/// be measured from the log.
+fn frame_log() -> bool {
+    static EACH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EACH.get_or_init(|| std::env::var_os("STILLWATER_FRAME_LOG").is_some_and(|v| v == "1"))
+}
+
+/// A new frame of the active page has been painted, and is shown with the window's next present.
+static FRAME_PAINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The active page has a new frame to show.
+pub(crate) fn frame_ready() {
+    if frame_log() {
+        log("ready");
+    }
+}
+
+/// The active page's new frame has been painted into the window's buffer.
+pub(crate) fn frame_painted() {
+    FRAME_PAINTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The window was presented, `update` and `paint` after the start of its frame. Counts a
+/// `present` (in the summary) if it showed a new frame of the active page.
+pub(crate) fn window_presented(update: std::time::Duration, paint: std::time::Duration) {
+    if !FRAME_PAINTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mut guard = LOG.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(log) = guard.as_mut() {
+        *log.counters.entry("present").or_default() += 1;
+        if frame_log() {
+            let line = format!(
+                "present {:.1} {:.1}",
+                update.as_secs_f64() * 1000.0,
+                paint.as_secs_f64() * 1000.0
+            );
+            write_line(log, &line);
+        }
+    }
+}
+
 /// Write the counters gathered since the last summary (at most once a second).
 pub(crate) fn maybe_summarize(extra: impl FnOnce() -> String) {
     let summary = {

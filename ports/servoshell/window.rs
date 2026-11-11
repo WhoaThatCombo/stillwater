@@ -73,6 +73,9 @@ pub(crate) struct ServoShellWindow {
     /// Whether or not Servo needs to repaint its display. Currently this is global
     /// because every `WebView` shares a `RenderingContext`.
     needs_repaint: Cell<bool>,
+    /// Whether the active [`WebView`] has a new frame that hasn't been painted yet (for the
+    /// diagnostic log's count of presented frames).
+    new_frame_ready: Cell<bool>,
     /// List of webviews that have favicon textures which are not yet uploaded
     /// to the GPU by egui.
     pending_favicon_loads: RefCell<Vec<WebViewId>>,
@@ -93,6 +96,7 @@ impl ServoShellWindow {
             close_scheduled: Default::default(),
             needs_update: Default::default(),
             needs_repaint: Default::default(),
+            new_frame_ready: Default::default(),
             pending_favicon_loads: Default::default(),
             pending_commands: Default::default(),
         }
@@ -168,6 +172,20 @@ impl ServoShellWindow {
             .expect("Could not make PlatformWindow RenderingContext current");
         webview.paint();
         self.platform_window().rendering_context().present();
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        if self.new_frame_ready.take() {
+            crate::desktop::diagnostics::frame_painted();
+        }
+    }
+
+    /// `webview` has a new frame to paint.
+    pub(crate) fn note_new_frame_ready(&self, webview: &WebView) {
+        if self.webview_collection.borrow().active_id() == Some(webview.id()) {
+            self.new_frame_ready.set(true);
+            #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+            crate::desktop::diagnostics::frame_ready();
+        }
+        self.set_needs_repaint();
     }
 
     /// Whether or not this [`ServoShellWindow`] has any [`WebView`]s.

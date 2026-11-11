@@ -3120,16 +3120,26 @@ impl HTMLMediaElement {
             return;
         }
 
-        if let Some(frame) = self.video_renderer.lock().unwrap().current_frame() {
+        let (current_frame, display_list_stale) = {
+            let mut video_renderer = self.video_renderer.lock().unwrap();
+            video_renderer.set_page_visible(!self.owner_window().throttled());
+            (
+                video_renderer.current_frame(),
+                video_renderer.take_display_list_stale(),
+            )
+        };
+        if let Some(frame) = current_frame {
             if video_element.set_natural_dimensions(
                 no_gc,
                 Some(frame.width as u32),
                 Some(frame.height as u32),
             ) {
                 self.queue_media_element_task_to_fire_event(atom!("resize"));
-            } else {
+            } else if display_list_stale {
                 // If the natural dimensions have not been changed, the node should be marked as
-                // damaged to force a repaint with the new frame contents.
+                // damaged to force a repaint with the new frame's image. Frames that only
+                // replace the pixels of the image already shown are composited by the renderer
+                // without a reflow (see `MediaFrameRenderer::render`).
                 self.upcast::<Node>().dirty(no_gc, NodeDamage::Other);
             }
         }

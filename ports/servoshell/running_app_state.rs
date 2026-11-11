@@ -273,6 +273,10 @@ pub(crate) struct RunningAppState {
     loads_in_progress: RefCell<HashMap<WebViewId, std::time::Instant>>,
     /// Whether a page was replaced or a tab closed since the renderer's caches were last dropped.
     render_caches_stale: Cell<bool>,
+    /// Since when media playback has been postponing the idle garbage collection.
+    gc_held_for_media_since: Cell<Option<std::time::Instant>>,
+    /// When the latest new frames of shown pages became ready (see `showing_moving_pictures`).
+    recent_frames: RefCell<std::collections::VecDeque<std::time::Instant>>,
 
     /// Whether or not program exit has been triggered. This means that all windows
     /// will be destroyed and shutdown will start at the end of the current event loop.
@@ -374,6 +378,8 @@ impl RunningAppState {
             gc_due: Default::default(),
             loads_in_progress: Default::default(),
             render_caches_stale: Default::default(),
+            gc_held_for_media_since: Default::default(),
+            recent_frames: Default::default(),
             experimental_preferences_enabled,
             accessibility_active: Cell::new(false),
         }
@@ -905,6 +911,24 @@ impl RunningAppState {
         playing.keys().copied().collect()
     }
 
+    /// Whether any tab is playing audio or video (see `playing_media`).
+    pub(crate) fn media_playing(&self) -> bool {
+        let mut playing = self.playing_media.borrow_mut();
+        playing.retain(|_, last| last.elapsed() < std::time::Duration::from_secs(10));
+        !playing.is_empty()
+    }
+
+    /// Whether a shown page is producing frames continuously, as a playing video, a canvas
+    /// animation or a scrolling page does: at least `RECENT_FRAMES` new frames in the last
+    /// second.
+    pub(crate) fn showing_moving_pictures(&self) -> bool {
+        let frames = self.recent_frames.borrow();
+        frames.len() == RECENT_FRAMES &&
+            frames
+                .front()
+                .is_some_and(|first| first.elapsed() < std::time::Duration::from_secs(1))
+    }
+
     /// Collect garbage once activity settles: pages allocate a lot while loading, and without
     /// this the memory is only reclaimed when some page next allocates enough to trigger a GC.
     fn schedule_idle_gc(&self) {
@@ -935,14 +959,40 @@ impl RunningAppState {
                 self.schedule_idle_gc();
                 return;
             }
+            // Nor while audio or video plays: a full collection stalls the page's script thread
+            // (and dropping the renderer's caches makes it upload every texture again) for
+            // 100-500 ms, which a playing video shows as a visible hitch. It runs once playback
+            // has stopped for a while (`playing_media` forgets a tab 10 s after its last
+            // progress report; a muted video doesn't always report progress, so a shown page
+            // that keeps producing frames counts too). A tab that plays for ever (radio, a
+            // looping video) still gets a plain collection after `MAX_MEDIA_HOLDING_GC`, but
+            // keeps the renderer's caches until the next idle collection.
+            let media_playing = self.media_playing() || self.showing_moving_pictures();
+            if media_playing {
+                let since = self
+                    .gc_held_for_media_since
+                    .get()
+                    .unwrap_or_else(std::time::Instant::now);
+                self.gc_held_for_media_since.set(Some(since));
+                if since.elapsed() < MAX_MEDIA_HOLDING_GC {
+                    self.schedule_idle_gc();
+                    return;
+                }
+            }
+            self.gc_held_for_media_since.set(None);
             self.gc_due.set(None);
             #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-            crate::desktop::diagnostics::log("idle garbage collection");
+            crate::desktop::diagnostics::log(if media_playing {
+                "idle garbage collection (postponed for media as long as allowed)"
+            } else {
+                "idle garbage collection"
+            });
             // When a page was replaced or a tab closed, also drop the renderer's caches: its
             // textures for the old pages are only evicted as new frames are drawn, so an idle
             // window otherwise keeps hundreds of megabytes of them. The next frame redraws its
-            // glyphs and images, once.
-            if self.render_caches_stale.replace(false) {
+            // glyphs and images, once. Not while media plays (see above): that waits for the
+            // next idle collection.
+            if !media_playing && self.render_caches_stale.replace(false) {
                 self.servo.notify_memory_pressure();
             } else {
                 self.servo.collect_garbage();
@@ -955,6 +1005,10 @@ impl RunningAppState {
 const IDLE_GC_DELAY: std::time::Duration = std::time::Duration::from_secs(8);
 /// A page load older than this no longer postpones the idle garbage collection.
 const MAX_LOAD_HOLDING_GC: std::time::Duration = std::time::Duration::from_secs(30);
+/// How many new frames in a second make a page "moving" (see `showing_moving_pictures`).
+const RECENT_FRAMES: usize = 8;
+/// Playing media postpones the idle garbage collection at most this long.
+const MAX_MEDIA_HOLDING_GC: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 impl WebViewDelegate for RunningAppState {
     fn load_web_resource(&self, webview: WebView, load: servo::WebResourceLoad) {
@@ -1232,7 +1286,15 @@ impl WebViewDelegate for RunningAppState {
     }
 
     fn notify_new_frame_ready(&self, webview: WebView) {
-        self.window_for_webview(&webview).set_needs_repaint();
+        let window = self.window_for_webview(&webview);
+        if window.active_webview().is_some_and(|active| active.id() == webview.id()) {
+            let mut frames = self.recent_frames.borrow_mut();
+            if frames.len() == RECENT_FRAMES {
+                frames.pop_front();
+            }
+            frames.push_back(std::time::Instant::now());
+        }
+        window.note_new_frame_ready(&webview);
     }
 
     fn show_embedder_control(&self, webview: WebView, embedder_control: EmbedderControl) {

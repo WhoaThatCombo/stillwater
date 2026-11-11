@@ -1359,8 +1359,10 @@ impl HeadedWindow {
             self.last_paint.set(Some(frame_start));
             let mut gui = self.gui.borrow_mut();
             gui.update(&state, &window, self);
+            let updated = frame_start.elapsed();
             gui.paint(&self.winit_window);
             let frame_time = frame_start.elapsed();
+            diagnostics::window_presented(updated, frame_time);
             if frame_time > std::time::Duration::from_millis(50) {
                 diagnostics::log(format!("slow frame: {frame_time:?}"));
             }

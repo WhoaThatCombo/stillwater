@@ -60,6 +60,15 @@ pub struct App {
     next_memory_check: Instant,
     /// When Servo was last told that memory is low (it drops caches, so not too often).
     last_memory_pressure: Option<Instant>,
+    /// Whether this process holds a 1 ms Windows timer resolution (see `update_timer_resolution`).
+    fine_timers: bool,
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn timeBeginPeriod(period_ms: u32) -> u32;
+    fn timeEndPeriod(period_ms: u32) -> u32;
 }
 
 /// How often to look for inactive tabs to unload, and how often while memory is low.
@@ -104,7 +113,47 @@ impl App {
             repaint_at: None,
             next_memory_check: t + MEMORY_CHECK_INTERVAL,
             last_memory_pressure: None,
+            fine_timers: false,
         }
+    }
+
+    /// Windows rounds every timed wait of a process that hasn't asked for a finer timer
+    /// resolution up to its 15.6 ms tick, even when another program raised the system's (Windows
+    /// 10 2004 and later). Servo paces frames with timed waits: the script thread's 20 ms
+    /// rendering-update timer, the 8 ms refresh-driver timer, this loop's repaint pacing. At
+    /// 15.6 ms granularity they land on 31 or 47 ms instead, so a 60 fps video was shown at about
+    /// 32 frames a second, unevenly, and a 30 fps one alternated 16/31/47 ms frames: micro
+    /// stutter. Hold a 1 ms resolution while a shown page animates, loads or keeps producing
+    /// frames (a playing video: its frames are shown without the page animating), like Chromium
+    /// and Firefox do while they need it, and let it go when idle to save power. Background
+    /// tabs don't count: nothing of theirs is on screen.
+    fn update_timer_resolution(&mut self) {
+        let wanted = match &self.state {
+            AppState::Running(state) => {
+                state.showing_moving_pictures() ||
+                    state.windows().iter().any(|window| {
+                        window.active_webview().is_some_and(|webview| {
+                            webview.animating() ||
+                                !matches!(webview.load_status(), LoadStatus::Complete)
+                        })
+                    })
+            },
+            _ => false,
+        };
+        if wanted == self.fine_timers {
+            return;
+        }
+        self.fine_timers = wanted;
+        #[cfg(target_os = "windows")]
+        // SAFETY: plain Win32 calls; every timeBeginPeriod is matched by one timeEndPeriod.
+        unsafe {
+            if wanted {
+                timeBeginPeriod(1);
+            } else {
+                timeEndPeriod(1);
+            }
+        }
+        diagnostics::log(format!("timer resolution: fine={wanted}"));
     }
 
     /// Initialize Application once event loop start running.
@@ -275,6 +324,9 @@ impl App {
             {
                 wake = wake.min(gc_due);
             }
+            if self.fine_timers {
+                wake = wake.min(Instant::now() + std::time::Duration::from_secs(1));
+            }
             ControlFlow::WaitUntil(wake)
         }
     }
@@ -356,6 +408,10 @@ impl ApplicationHandler<AppEvent> for App {
         event_loop.set_control_flow(self.control_flow());
     }
 
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        self.update_timer_resolution();
+    }
+
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
         if !matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
             return;
@@ -429,6 +485,9 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, app_event: AppEvent) {
+        // Also here, not only in `about_to_wait`: a loop that never runs dry (frames arriving
+        // faster than the window can show them) never gets there.
+        self.update_timer_resolution();
         let AppState::Running(state) = &self.state else {
             return;
         };
