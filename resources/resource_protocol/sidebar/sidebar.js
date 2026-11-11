@@ -900,7 +900,7 @@ function renderPasswordList() {
   empty.hidden = list.length > 0;
   empty.textContent = query
     ? "No saved passwords match."
-    : "No saved passwords yet. Stillwater offers to save one when you sign in to a site, or you can import them from Zen in settings.";
+    : "No saved passwords yet. Stillwater offers to save one when you sign in to a site, or you can import them from another browser in settings.";
   const problem = $("passwords-problem");
   problem.hidden = !data.problem;
   problem.textContent = data.problem || "";

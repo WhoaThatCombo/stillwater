@@ -61,7 +61,8 @@ pub(crate) const SETTINGS_MESSAGE_PREFIX: &str = "__stillwater_settings__";
 const SETTINGS_COMMANDS: &[&str] = &[
     "ready", "set-theme", "set-search", "set-tab-unload", "set-unload-low-memory", "set-newtab",
     "toggle-compact", "session-startup", "adblock-enabled", "pw-autofill", "pw-delete", "pw-reveal",
-    "pw-copy", "pw-copy-user", "pw-forget-never", "zen-scan", "zen-import", "check-updates",
+    "pw-copy", "pw-copy-user", "pw-forget-never", "zen-scan", "zen-import", "import-scan",
+    "import-run", "import-passwords-file", "check-updates",
     "hist-clear", "hist-show", "dl-ask", "dl-panel", "set-spaces", "tr-auto", "tr-target", "tr-unlist",
     "tr-delete-model", "tr-models", "set-splash", "set-scrollbar", "set-preload",
 ];
@@ -151,6 +152,13 @@ pub(crate) enum WindowAction {
         bookmarks: bool,
         cookies: bool,
     },
+    /// Look for other browsers to import from, and count what one profile holds: browser id
+    /// (empty: the first found), profile number.
+    BrowserScan(String, usize),
+    /// Import from another browser: id, profile number, what.
+    BrowserImport(String, usize, crate::desktop::browser_import::Choice),
+    /// Ask for a password CSV file and import it.
+    ImportPasswordFile,
     /// History, address-bar suggestions and bookmarks: a `hist-` / `bm-` command and its argument.
     History(String, String),
     /// New tab: open (or close) Zen's floating address bar over the page.
@@ -242,6 +250,9 @@ pub(crate) struct Sidebar {
     passwords: serde_json::Value,
     /// Import from Zen: profiles found, what they hold, the last result.
     zen: serde_json::Value,
+    /// Import from other browsers (`browser_import::scan`), the last result, and the last
+    /// password-file result (`fileResult`).
+    browser_import: serde_json::Value,
     /// Compare with Edge: whether it's running and what to tell the user.
     compare: serde_json::Value,
     /// Open settings pages and the state last sent to each.
@@ -297,6 +308,7 @@ impl Sidebar {
             playing_media: HashSet::new(),
             passwords: serde_json::Value::Null,
             zen: serde_json::Value::Null,
+            browser_import: serde_json::Value::Null,
             compare: serde_json::Value::Null,
             settings_pages: Vec::new(),
             reveal_target: None,
@@ -447,6 +459,15 @@ impl Sidebar {
         self.zen = zen;
         // Always send it, even if nothing changed: the page shows "Looking for Zen…" until then.
         self.last_pushed_state = None;
+    }
+
+    pub(crate) fn set_browser_import(&mut self, value: serde_json::Value) {
+        self.browser_import = value;
+        self.last_pushed_state = None;
+    }
+
+    pub(crate) fn browser_import(&mut self) -> &mut serde_json::Value {
+        &mut self.browser_import
     }
 
     /// Show a saved password the user asked to see. It's sent once, not kept in the state.
@@ -1203,6 +1224,23 @@ impl Sidebar {
                         cookies: what.contains(&"cookies"),
                     });
                 },
+                // `<browser id>\t<profile index>`.
+                "import-scan" => {
+                    let (browser, profile) = argument.split_once('\t').unwrap_or((argument, "0"));
+                    self.window_actions.push(WindowAction::BrowserScan(
+                        browser.to_owned(),
+                        profile.parse().unwrap_or(0),
+                    ));
+                },
+                // `<browser id>\t<profile index>\t<what>`, what as for "zen-import".
+                "import-run" => {
+                    let mut parts = argument.splitn(3, '\t');
+                    let browser = parts.next().unwrap_or_default().to_owned();
+                    let profile = parts.next().and_then(|profile| profile.parse().ok()).unwrap_or(0);
+                    let choice = crate::desktop::browser_import::Choice::parse(parts.next().unwrap_or_default());
+                    self.window_actions.push(WindowAction::BrowserImport(browser, profile, choice));
+                },
+                "import-passwords-file" => self.window_actions.push(WindowAction::ImportPasswordFile),
                 // History panel (Ctrl+H) and bookmarking the page (Ctrl+D): show the sidebar.
                 "hist-show" | "bm-star" if self.compact.get() => {
                     self.peek.set(true);
@@ -1316,6 +1354,7 @@ impl Sidebar {
             "translate": self.translate,
             "passwords": self.passwords,
             "zen": self.zen,
+            "browserImport": self.browser_import,
             "compare": self.compare,
             "session": self.session_state(),
             "hist": self.hist,

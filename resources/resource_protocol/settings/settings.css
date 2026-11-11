@@ -171,7 +171,9 @@ a {
 }
 
 .pane[hidden],
-.group[hidden] {
+.group[hidden],
+.toggle[hidden],
+.options[hidden] {
   display: none;
 }
 
@@ -496,12 +498,19 @@ kbd {
   font-weight: 600;
 }
 
-#zen-found {
+#import-found {
   margin-top: 10px;
 }
 
-#zen-profiles {
+#import-browsers,
+#import-profiles {
   margin-bottom: 6px;
+}
+
+/* The pins toggle's own label (it changes with the browser), not a muted detail line. */
+.toggle > span:first-child > span[data-import-label] {
+  color: inherit;
+  font-size: inherit;
 }
 
 @media (max-width: 760px) {

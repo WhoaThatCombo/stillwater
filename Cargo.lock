@@ -10001,6 +10001,7 @@ dependencies = [
  "accesskit",
  "adblock",
  "aes",
+ "aes-gcm",
  "android_logger",
  "arboard",
  "backtrace",

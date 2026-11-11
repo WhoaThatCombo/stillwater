@@ -239,7 +239,7 @@ function renderLogins() {
   $("logins-empty").hidden = list.length > 0;
   $("logins-empty").textContent = query
     ? "No saved passwords match."
-    : "No saved passwords yet. Stillwater offers to save one when you sign in to a site, or you can import them from Zen.";
+    : "No saved passwords yet. Stillwater offers to save one when you sign in to a site, or you can import them from another browser (Import).";
   $("logins-problem").hidden = !data.problem;
   $("logins-problem").textContent = data.problem || "";
   const never = data.never || [];
@@ -271,58 +271,90 @@ function renderDownloads() {
     : `Files are saved to ${data.folder || "your Downloads folder"}.`;
 }
 
-// ---- Import from Zen ----
+// ---- Import from another browser ----
+// Zen, Firefox and its relatives, Chrome, Edge, Opera (GX), Brave, Vivaldi: the browsers
+// Stillwater finds on this computer (browser_import.rs). Zen's import is the same as ever.
 
-const zenKinds = ["pins", "tabs", "passwords", "bookmarks", "history", "cookies"];
-const zenChoice = { profile: 0, pins: true, tabs: false, passwords: true, bookmarks: true, history: false, cookies: true };
-let zenBusy = false;
-$("zen-scan").addEventListener("click", () => {
-  zenBusy = true;
-  state.zen = null;
-  renderZen();
-  send("zen-scan", zenChoice.profile);
-});
-document.querySelectorAll("[data-zen]").forEach((toggle) => toggle.addEventListener("click", () => {
-  zenChoice[toggle.dataset.zen] = !zenChoice[toggle.dataset.zen];
-  renderZen();
+const importKinds = ["pins", "tabs", "passwords", "bookmarks", "history", "cookies"];
+const importChoice = { browser: "", profile: 0, pins: true, tabs: false, passwords: true, bookmarks: true, history: false, cookies: true };
+let importBusy = false;
+let importing = false;
+const imported = () => state.browserImport || null;
+function scanBrowser(browser, profile) {
+  importBusy = true;
+  importChoice.browser = browser;
+  importChoice.profile = profile;
+  state.browserImport = Object.assign({}, { fileResult: (imported() || {}).fileResult });
+  renderImport();
+  send("import-scan", `${browser}\t${profile}`);
+}
+$("import-scan").addEventListener("click", () => scanBrowser(importChoice.browser, importChoice.profile));
+document.querySelectorAll("[data-import]").forEach((toggle) => toggle.addEventListener("click", () => {
+  importChoice[toggle.dataset.import] = !importChoice[toggle.dataset.import];
+  renderImport();
 }));
-$("zen-import").addEventListener("click", () => {
-  const what = zenKinds.filter((name) => zenChoice[name]);
-  if (what.length === 0) return;
-  $("zen-status").textContent = "Importing…";
-  send("zen-import", `${zenChoice.profile}\t${what.join(",")}`);
+// What the chosen browser can give.
+function importable(data) {
+  return importKinds.filter((what) => (what !== "pins" && what !== "tabs") || data.hasTabs);
+}
+$("import-run").addEventListener("click", () => {
+  const data = imported() || {};
+  const what = importable(data).filter((name) => importChoice[name]);
+  if (what.length === 0 || !data.browser) return;
+  importing = true;
+  $("import-status").textContent = `Importing from ${data.name}…`;
+  send("import-run", `${data.browser}\t${data.profile || 0}\t${what.join(",")}`);
 });
-function renderZen() {
-  const zen = state.zen;
-  if (!zen) {
-    $("zen-found").hidden = true;
-    $("zen-status").textContent = zenBusy ? "Looking for Zen…" : "";
+$("import-csv").addEventListener("click", () => send("import-passwords-file"));
+function renderImport() {
+  const data = imported();
+  $("import-csv-status").textContent = (data && data.fileResult) || "";
+  if (!data || !data.browsers) {
+    $("import-found").hidden = true;
+    $("import-status").textContent = importBusy ? "Looking for browsers…" : "";
     return;
   }
-  zenBusy = false;
-  const profiles = zen.profiles || [];
-  if (profiles.length === 0) {
-    $("zen-found").hidden = true;
-    $("zen-status").textContent = "Zen Browser's data wasn't found on this computer.";
+  importBusy = false;
+  const browsers = data.browsers;
+  if (browsers.length === 0 || !data.browser) {
+    $("import-found").hidden = true;
+    $("import-status").textContent = "No other browser's data was found on this computer (Chrome, Edge, Firefox, Zen, Opera, Opera GX, Brave, Vivaldi, LibreWolf, Floorp or Waterfox).";
     return;
   }
-  $("zen-found").hidden = false;
-  zenChoice.profile = zen.profile || 0;
-  $("zen-profiles").hidden = profiles.length < 2;
-  choices($("zen-profiles"), profiles.map((name, index) => ({ label: name, value: index })), zenChoice.profile,
-    (index) => send("zen-scan", index));
+  $("import-found").hidden = false;
+  importChoice.browser = data.browser;
+  importChoice.profile = data.profile || 0;
+  choices($("import-browsers"), browsers.map((browser) => ({
+    label: browser.name,
+    detail: browser.profiles.length > 1 ? `${browser.profiles.length} profiles` : "",
+    value: browser.id,
+  })), data.browser, (id) => { if (id !== data.browser) scanBrowser(id, 0); });
+  const current = browsers.find((browser) => browser.id === data.browser) || { profiles: [] };
+  $("import-profiles").hidden = current.profiles.length < 2;
+  choices($("import-profiles"), current.profiles.map((name, index) => ({ label: name, value: index })), importChoice.profile,
+    (index) => scanBrowser(data.browser, index));
+  const zen = data.spacesKind === "zen";
+  document.querySelector("[data-import-label=pins]").textContent = zen ? "Spaces and pinned tabs" : "Pinned tabs";
+  const protectedNote = (n) => n ? `; ${count(n, "more is", "more are")} protected by ${data.name} and can't be imported` : "";
   const counts = {
-    pins: zen.sessionProblem || `${count(zen.spaces, "space", "spaces")}, ${count(zen.pins, "pinned tab", "pinned tabs")}, ${count(zen.essentials, "Essential", "Essentials")}`,
-    tabs: zen.sessionProblem ? "" : `${count(zen.tabs, "tab", "tabs")}, added unloaded`,
-    passwords: zen.passwordProblem || count(zen.passwords, "password", "passwords"),
-    bookmarks: zen.placesProblem || count(zen.bookmarks || 0, "bookmark", "bookmarks"),
-    history: zen.placesProblem || `${count(zen.visits || 0, "visit", "visits")} in the last 90 days`,
-    cookies: zen.cookiesProblem || `${count(zen.cookies || 0, "cookie", "cookies")}; replaces Stillwater's cookies for the same sites`,
+    pins: data.sessionProblem || (zen
+      ? `${count(data.spaces, "space", "spaces")}, ${count(data.pins, "pinned tab", "pinned tabs")}, ${count(data.essentials, "Essential", "Essentials")}`
+      : count(data.pins, "pinned tab", "pinned tabs")),
+    tabs: data.sessionProblem ? "" : `${count(data.tabs, "tab", "tabs")}, added unloaded`,
+    passwords: data.passwordProblem || count(data.passwords, "password", "passwords") + protectedNote(data.protectedPasswords),
+    bookmarks: data.placesProblem || count(data.bookmarks || 0, "bookmark", "bookmarks"),
+    history: data.placesProblem || `${count(data.visits || 0, "visit", "visits")} in the last 90 days`,
+    cookies: data.cookiesProblem || `${count(data.cookies || 0, "cookie", "cookies")}; replaces Stillwater's cookies for the same sites` + protectedNote(data.protectedCookies),
   };
-  document.querySelectorAll("[data-zen-count]").forEach((span) => { span.textContent = counts[span.dataset.zenCount]; });
-  document.querySelectorAll("[data-zen]").forEach((toggle) => pressed(toggle, zenChoice[toggle.dataset.zen]));
-  $("zen-import").disabled = !zenKinds.some((what) => zenChoice[what]);
-  $("zen-status").textContent = zen.result || "";
+  const offered = importable(data);
+  document.querySelectorAll("[data-import-count]").forEach((span) => { span.textContent = counts[span.dataset.importCount]; });
+  document.querySelectorAll("[data-import]").forEach((toggle) => {
+    toggle.hidden = !offered.includes(toggle.dataset.import);
+    pressed(toggle, importChoice[toggle.dataset.import]);
+  });
+  $("import-run").disabled = !offered.some((what) => importChoice[what]);
+  if (data.result) importing = false;
+  $("import-status").textContent = data.result || (importing ? `Importing from ${data.name}…` : "");
 }
 
 // ---- Keyboard shortcuts (a reference) ----
@@ -429,7 +461,7 @@ window.stillwaterSettings = {
     renderLogins();
     renderDownloads();
     renderTranslation();
-    renderZen();
+    renderImport();
   },
   // A saved password the user asked to see (sent only on request, never in the state).
   revealPassword(id, password) {

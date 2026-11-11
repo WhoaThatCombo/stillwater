@@ -115,10 +115,15 @@ pub(crate) struct ZenData {
     pub(crate) skipped_logins: usize,
 }
 
-/// Zen's data folder (`STILLWATER_ZEN_DIR` overrides it for tests).
-fn zen_dir() -> Option<PathBuf> {
+/// Zen's data folder (`STILLWATER_ZEN_DIR` overrides it for tests, as does
+/// `STILLWATER_BROWSERS_DIR`, which stands in for every browser's folder: see
+/// `browser_import::browser_dir`).
+pub(crate) fn zen_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("STILLWATER_ZEN_DIR") {
         return Some(PathBuf::from(dir));
+    }
+    if let Some(dir) = std::env::var_os("STILLWATER_BROWSERS_DIR") {
+        return Some(PathBuf::from(dir).join("zen"));
     }
     if cfg!(any(windows, target_os = "macos")) {
         dirs::config_dir().map(|dir| dir.join("zen"))
@@ -154,9 +159,12 @@ fn ini_value<'a>(entries: &'a [(String, String)], key: &str) -> Option<&'a str> 
 
 /// Zen's profiles, the one Zen opens by default first.
 pub(crate) fn find_profiles() -> Vec<ZenProfile> {
-    let Some(root) = zen_dir() else {
-        return Vec::new();
-    };
+    zen_dir().map_or_else(Vec::new, |root| find_profiles_in(&root))
+}
+
+/// The profiles in a Firefox-family data folder (Zen's, Firefox's, LibreWolf's...), the one the
+/// browser opens by default first.
+pub(crate) fn find_profiles_in(root: &Path) -> Vec<ZenProfile> {
     let read = |name: &str| std::fs::read_to_string(root.join(name)).unwrap_or_default();
     let install_defaults: Vec<String> = parse_ini(&read("installs.ini"))
         .iter()
@@ -204,6 +212,25 @@ pub(crate) fn read_profile(profile: &Path) -> ZenData {
         logins,
         cookies: read_cookies(profile),
         skipped_logins,
+    }
+}
+
+/// `read_profile` for another Firefox-family browser: the same files, with its name instead of
+/// Zen's in what's reported.
+pub(crate) fn read_profile_as(profile: &Path, browser: &str) -> ZenData {
+    let data = read_profile(profile);
+    if browser == "Zen" {
+        return data;
+    }
+    fn rename<T>(result: Result<T, String>, browser: &str) -> Result<T, String> {
+        result.map_err(|error| error.replace("Zen", browser))
+    }
+    ZenData {
+        session: rename(data.session, browser),
+        places: rename(data.places, browser),
+        logins: rename(data.logins, browser),
+        cookies: rename(data.cookies, browser),
+        skipped_logins: data.skipped_logins,
     }
 }
 
@@ -464,10 +491,10 @@ fn decrypt_pbe(item: &[u8], global_salt: &[u8]) -> Option<Vec<u8>> {
 
 /// A new, randomly named folder in the temp directory for copies of Zen's databases. It is
 /// removed, with everything in it, when this goes away, also when an import fails part-way.
-struct TempCopyDir(PathBuf);
+pub(crate) struct TempCopyDir(pub(crate) PathBuf);
 
 impl TempCopyDir {
-    fn new() -> Result<Self, &'static str> {
+    pub(crate) fn new() -> Result<Self, &'static str> {
         use std::hash::{BuildHasher, Hasher};
         for _ in 0..4 {
             // `RandomState` is seeded from the system's random number source.
@@ -639,6 +666,7 @@ fn read_cookies(profile: &Path) -> Result<Vec<ZenCookie>, String> {
 /// cookie with the same host, path and name replaces the one Stillwater has. Returns how many
 /// were handed over; the store keeps them in memory and writes them to `cookie_jar.json` when
 /// Stillwater closes.
+/// Cookies from other browsers (`chromium_import`) come in the same shape.
 pub(crate) fn import_cookies(manager: &servo::SiteDataManager, cookies: &[ZenCookie]) -> usize {
     use cookie::time::OffsetDateTime;
     use cookie::{Cookie, SameSite};
@@ -714,14 +742,17 @@ fn read_cookies_from(
             })
         })?
         .filter_map(Result::ok)
-        .filter(|cookie| {
-            cookie.expiry > now_seconds &&
-                !cookie.host.trim_start_matches('.').is_empty() &&
-                !(cookie.name.is_empty() && cookie.value.is_empty()) &&
-                cookie.name.len() + cookie.value.len() <= 4096
-        })
+        .filter(|cookie| usable_cookie(cookie, now_seconds))
         .collect();
     Ok(cookies)
+}
+
+/// Not expired, for a host, and not empty or too big.
+pub(crate) fn usable_cookie(cookie: &ZenCookie, now_seconds: i64) -> bool {
+    cookie.expiry > now_seconds &&
+        !cookie.host.trim_start_matches('.').is_empty() &&
+        !(cookie.name.is_empty() && cookie.value.is_empty()) &&
+        cookie.name.len() + cookie.value.len() <= 4096
 }
 
 // ---- Bookmarks and history: places.sqlite ----

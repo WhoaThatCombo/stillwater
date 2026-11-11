@@ -1061,15 +1061,33 @@ unsafe extern "system" {
 const UI_FORBIDDEN: u32 = 0x1;
 
 #[cfg(windows)]
-#[expect(unsafe_code)]
 fn dpapi(input: &[u8], encrypt: bool) -> Option<Vec<u8>> {
+    dpapi_with(input, ENTROPY, encrypt)
+}
+
+/// Decrypt data another program protected with DPAPI for the signed-in Windows user, without
+/// extra entropy (how Chromium-based browsers keep their key, see `chromium_import`).
+#[cfg(windows)]
+pub(crate) fn unprotect_for_user(data: &[u8]) -> Option<Vec<u8>> {
+    dpapi_with(data, &[], false)
+}
+
+#[cfg(windows)]
+#[expect(unsafe_code)]
+fn dpapi_with(input: &[u8], entropy: &[u8], encrypt: bool) -> Option<Vec<u8>> {
     let input = DataBlob {
         size: input.len().try_into().ok()?,
         data: input.as_ptr() as *mut u8,
     };
-    let entropy = DataBlob {
-        size: ENTROPY.len() as u32,
-        data: ENTROPY.as_ptr() as *mut u8,
+    let entropy_blob = DataBlob {
+        size: entropy.len() as u32,
+        data: entropy.as_ptr() as *mut u8,
+    };
+    // No entropy: pass none at all rather than an empty blob.
+    let entropy: *const DataBlob = if entropy.is_empty() {
+        std::ptr::null()
+    } else {
+        &entropy_blob
     };
     let mut output = DataBlob {
         size: 0,
@@ -1082,7 +1100,7 @@ fn dpapi(input: &[u8], encrypt: bool) -> Option<Vec<u8>> {
             CryptProtectData(
                 &input,
                 std::ptr::null(),
-                &entropy,
+                entropy,
                 std::ptr::null(),
                 std::ptr::null(),
                 UI_FORBIDDEN,
@@ -1092,7 +1110,7 @@ fn dpapi(input: &[u8], encrypt: bool) -> Option<Vec<u8>> {
             CryptUnprotectData(
                 &input,
                 std::ptr::null_mut(),
-                &entropy,
+                entropy,
                 std::ptr::null(),
                 std::ptr::null(),
                 UI_FORBIDDEN,
@@ -1126,5 +1144,10 @@ fn protect(_: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(not(windows))]
 fn unprotect(_: &[u8]) -> Option<Vec<u8>> {
+    None
+}
+
+#[cfg(not(windows))]
+pub(crate) fn unprotect_for_user(_: &[u8]) -> Option<Vec<u8>> {
     None
 }

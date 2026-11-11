@@ -10,6 +10,8 @@ pub(crate) mod app;
 pub(crate) mod capture;
 pub(crate) mod clipboard;
 mod bookmarks;
+mod browser_import;
+mod chromium_import;
 pub(crate) mod cli;
 pub(crate) mod compare;
 pub(crate) mod translate;
