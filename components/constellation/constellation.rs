@@ -1359,9 +1359,10 @@ where
             EmbedderToConstellationMessage::AllowNavigationResponse(pipeline_id, allowed) => {
                 self.handle_allow_navigation_response(pipeline_id, allowed);
             },
-            // Load a new page from a typed url
-            // If there is already a pending page (self.pending_changes), it will not be overridden;
-            // However, if the id is not encompassed by another change, it will be.
+            // Load a new page from a typed url (or WebDriver, or the embedder). The latest
+            // such request always wins: a page of this webview still loading (not yet
+            // activated) is abandoned for it, as a new navigation cancels the ongoing one
+            // (<https://html.spec.whatwg.org/multipage/#set-the-ongoing-navigation>).
             EmbedderToConstellationMessage::LoadUrl(webview_id, url_request) => {
                 let mut load_data = LoadData::new_for_new_unrelated_webview(url_request.url);
 
@@ -1373,9 +1374,12 @@ where
                 let pipeline_id = match self.browsing_contexts.get(&ctx_id) {
                     Some(ctx) => ctx.pipeline_id,
                     None => {
-                        return warn!("{}: LoadUrl for unknown browsing context", webview_id);
+                        // The webview's first page hasn't been activated yet, so there is
+                        // no browsing context to navigate: load the new page in its place.
+                        return self.replace_initial_pending_load(webview_id, load_data);
                     },
                 };
+                self.supersede_pending_changes(webview_id, ctx_id);
                 // Since this is a top-level load, initiated by the embedder, go straight to load_url,
                 // bypassing schedule_navigation.
                 self.load_url(
@@ -3532,6 +3536,70 @@ where
 
         self.system_font_service
             .prefetch_font_keys_for_painter(PainterId::from(webview_id));
+    }
+
+    /// An embedder load arrived before the webview's first page was activated (its browsing
+    /// context is only created then): start the new page as the webview's first page instead,
+    /// and abandon the one still loading.
+    fn replace_initial_pending_load(&mut self, webview_id: WebViewId, load_data: LoadData) {
+        let browsing_context_id = BrowsingContextId::from(webview_id);
+        let Some(webview) = self.webviews.get_mut(&webview_id) else {
+            return warn!("{}: LoadUrl for unknown webview", webview_id);
+        };
+        let Some(index) = webview.pending_changes.iter().rposition(|change| {
+            change.browsing_context_id == browsing_context_id &&
+                change.new_browsing_context_info.is_some()
+        }) else {
+            return warn!("{}: LoadUrl for unknown browsing context", webview_id);
+        };
+        let initial = webview.pending_changes.remove(index);
+        let is_private = initial
+            .new_browsing_context_info
+            .as_ref()
+            .is_some_and(|info| info.is_private);
+        let opener = self
+            .pipelines
+            .get(&initial.new_pipeline_id)
+            .and_then(|pipeline| pipeline.opener);
+        let abandoned_pipeline_id = initial.new_pipeline_id;
+        let new_pipeline_id = PipelineId::new();
+        let viewport_details = initial.viewport_details;
+        if let Some(webview) = self.webviews.get_mut(&webview_id) {
+            webview.add_pending_change(SessionHistoryChange {
+                new_pipeline_id,
+                ..initial
+            });
+        }
+        // The new pipeline first, so that an event loop the two share stays alive.
+        self.new_pipeline(
+            new_pipeline_id,
+            browsing_context_id,
+            webview_id,
+            None,
+            opener,
+            viewport_details,
+            load_data,
+            is_private,
+            TargetSnapshotParams::default(),
+            None,
+        );
+        self.close_pipeline(abandoned_pipeline_id, DiscardBrowsingContext::No);
+    }
+
+    /// A new top-level navigation of `browsing_context_id` cancels the ones still loading
+    /// (<https://html.spec.whatwg.org/multipage/#set-the-ongoing-navigation>).
+    fn supersede_pending_changes(
+        &mut self,
+        webview_id: WebViewId,
+        browsing_context_id: BrowsingContextId,
+    ) {
+        let Some(webview) = self.webviews.get_mut(&webview_id) else {
+            return;
+        };
+        let superseded = webview.remove_pending_changes_for_browsing_context_id(browsing_context_id);
+        for change in superseded {
+            self.close_pipeline(change.new_pipeline_id, DiscardBrowsingContext::No);
+        }
     }
 
     #[servo_tracing::instrument(skip_all)]
