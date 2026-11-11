@@ -739,6 +739,10 @@ bitflags! {
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct ReflowPhasesRun: u8 {
         const RanLayout = 1 << 0;
+        /// Only the values of animated `transform` / `opacity` properties changed and were
+        /// sent to `Paint` as WebRender dynamic properties: a new frame is needed, but no new
+        /// display list was built.
+        const UpdatedAnimatedProperties = 1 << 1;
         const BuiltStackingContextTree = 1 << 2;
         const BuiltDisplayList = 1 << 3;
         const UpdatedScrollNodeOffset = 1 << 4;
@@ -753,7 +757,10 @@ bitflags! {
 impl ReflowPhasesRun {
     pub fn needs_frame(&self) -> bool {
         self.intersects(
-            Self::BuiltDisplayList | Self::UpdatedScrollNodeOffset | Self::UpdatedImageData,
+            Self::BuiltDisplayList |
+                Self::UpdatedScrollNodeOffset |
+                Self::UpdatedImageData |
+                Self::UpdatedAnimatedProperties,
         )
     }
 }

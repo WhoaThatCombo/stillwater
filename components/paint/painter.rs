@@ -45,7 +45,8 @@ use webrender::{
     ShaderPrecacheFlags, Transaction, UploadMethod,
 };
 use webrender_api::units::{
-    DevicePixel, DevicePoint, LayoutPoint, LayoutRect, LayoutSize, LayoutVector2D, WorldPoint,
+    DevicePixel, DevicePoint, LayoutPoint, LayoutRect, LayoutSize, LayoutTransform, LayoutVector2D,
+    WorldPoint,
 };
 use webrender_api::{
     self, BuiltDisplayList, BuiltDisplayListDescriptor, ColorF, DirtyRect, DisplayListPayload,
@@ -693,7 +694,7 @@ impl Painter {
     fn add_dynamic_properties_to_transaction(&self, transaction: &mut Transaction) {
         transaction.reset_dynamic_properties();
         let colors = self.web_content_animator.values(&self.webview_renderers);
-        let transforms: Vec<_> = self
+        let mut transforms: Vec<_> = self
             .webview_renderers
             .values()
             .filter_map(|webview_renderer| {
@@ -706,9 +707,17 @@ impl Painter {
                 })
             })
             .collect();
+        // Animated `transform` and `opacity` values that layout sent without a new display list.
+        let mut floats = Vec::new();
+        for webview_renderer in self.webview_renderers.values() {
+            for details in webview_renderer.pipelines.values() {
+                transforms.extend_from_slice(&details.animated_transforms);
+                floats.extend_from_slice(&details.animated_floats);
+            }
+        }
         transaction.append_dynamic_properties(DynamicProperties {
             transforms,
-            floats: Vec::new(),
+            floats,
             colors,
         });
     }
@@ -1155,6 +1164,13 @@ impl Painter {
             &self.web_content_animator,
         );
 
+        // The new display list carries the current values of its animated properties. Drop the
+        // values sent for the previous one, so that they don't override the new list's values.
+        let had_animated_properties =
+            !details.animated_transforms.is_empty() || !details.animated_floats.is_empty();
+        details.animated_transforms.clear();
+        details.animated_floats.clear();
+
         let mut transaction = Transaction::new();
         let is_root_pipeline = Some(pipeline_id.into()) == webview_renderer.root_pipeline_id;
         if is_root_pipeline {
@@ -1167,6 +1183,31 @@ impl Painter {
         transaction.set_display_list(epoch, (pipeline_id, built_display_list));
 
         self.update_transaction_with_all_scroll_offsets(&mut transaction);
+        if had_animated_properties {
+            self.add_dynamic_properties_to_transaction(&mut transaction);
+        }
+        self.send_transaction(transaction);
+    }
+
+    /// Layout found that only animated `transform` and `opacity` values changed in the
+    /// pipeline's current display list: send them to WebRender as dynamic properties, so that
+    /// the next frame (requested by script) shows them without building a new scene.
+    pub(crate) fn update_animated_properties(
+        &mut self,
+        webview_id: WebViewId,
+        pipeline_id: PipelineId,
+        transforms: Vec<PropertyValue<LayoutTransform>>,
+        floats: Vec<PropertyValue<f32>>,
+    ) {
+        let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) else {
+            return;
+        };
+        let details = webview_renderer.ensure_pipeline_details(pipeline_id);
+        details.animated_transforms = transforms;
+        details.animated_floats = floats;
+
+        let mut transaction = Transaction::new();
+        self.add_dynamic_properties_to_transaction(&mut transaction);
         self.send_transaction(transaction);
     }
 

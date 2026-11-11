@@ -39,6 +39,7 @@ mod from_constellation {
                 Self::ScrollNodeByDelta(..) => target!("ScrollNodeByDelta"),
                 Self::ScrollViewportByDelta(..) => target!("ScrollViewportByDelta"),
                 Self::UpdateEpoch { .. } => target!("UpdateEpoch"),
+                Self::UpdateAnimatedProperties { .. } => target!("UpdateAnimatedProperties"),
                 Self::SendDisplayList { .. } => target!("SendDisplayList"),
                 Self::GenerateFrame { .. } => target!("GenerateFrame"),
                 Self::GenerateImageKey(..) => target!("GenerateImageKey"),

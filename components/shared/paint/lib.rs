@@ -38,12 +38,12 @@ use servo_base::generic_channel::{
     self, GenericCallback, GenericReceiver, GenericSender, GenericSharedMemory, SendError,
 };
 pub use webrender_api::ExternalImageSource;
-use webrender_api::units::{DevicePixel, LayoutVector2D, TexelRect};
+use webrender_api::units::{DevicePixel, LayoutTransform, LayoutVector2D, TexelRect};
 use webrender_api::{
     BuiltDisplayList, BuiltDisplayListDescriptor, ExternalImage, ExternalImageData,
     ExternalImageHandler, ExternalImageId, ExternalScrollId, FontInstanceFlags, FontInstanceKey,
     FontKey, ImageData, ImageDescriptor, ImageKey, NativeFontHandle,
-    PipelineId as WebRenderPipelineId,
+    PipelineId as WebRenderPipelineId, PropertyValue,
 };
 
 use crate::viewport_description::ViewportDescription;
@@ -115,6 +115,20 @@ pub enum PaintMessage {
     /// in the pinch zoom viewport if possible and the remaining delta will be used
     /// to scroll the root layer.
     ScrollViewportByDelta(WebViewId, LayoutVector2D),
+    /// New values for the animated `transform` and `opacity` properties of the given
+    /// `Pipeline`'s current display list (bound there as WebRender property bindings). They
+    /// replace any values sent earlier for that pipeline. A new display list for the pipeline
+    /// carries its own values and clears these.
+    UpdateAnimatedProperties {
+        /// The [`WebViewId`] that the pipeline belongs to.
+        webview_id: WebViewId,
+        /// The [`PipelineId`] whose display list holds the bindings.
+        pipeline_id: PipelineId,
+        /// The values of all animated transforms of the pipeline.
+        transforms: Vec<PropertyValue<LayoutTransform>>,
+        /// The values of all animated opacities of the pipeline.
+        floats: Vec<PropertyValue<f32>>,
+    },
     /// Update the rendering epoch of the given `Pipeline`.
     UpdateEpoch {
         /// The [`WebViewId`] that this display list belongs to.
@@ -308,6 +322,24 @@ impl CrossProcessPaintApi {
             image_keys,
         )) {
             warn!("Error delaying frames for canvas image updates {error:?}");
+        }
+    }
+
+    /// Send new values for the animated properties bound in the pipeline's display list.
+    pub fn update_animated_properties(
+        &self,
+        webview_id: WebViewId,
+        pipeline_id: PipelineId,
+        transforms: Vec<PropertyValue<LayoutTransform>>,
+        floats: Vec<PropertyValue<f32>>,
+    ) {
+        if let Err(error) = self.0.send(PaintMessage::UpdateAnimatedProperties {
+            webview_id,
+            pipeline_id,
+            transforms,
+            floats,
+        }) {
+            warn!("Error updating animated properties: {error:?}");
         }
     }
 

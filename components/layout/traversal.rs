@@ -185,10 +185,15 @@ pub(crate) fn compute_damage_and_rebuild_box_tree_below_dirty_root<'dom>(
 
     let (element_damage, is_display_none) = {
         let mut element_data = element.element_data_mut();
-        (
-            LayoutDamage::from(std::mem::take(&mut element_data.damage)),
-            element_data.styles.is_display_none(),
-        )
+        let element_damage = LayoutDamage::from(std::mem::take(&mut element_data.damage));
+        if !element_damage.is_empty() &&
+            let Some(damaged_elements) = layout_context.damaged_elements.as_ref()
+        {
+            damaged_elements
+                .lock()
+                .push((node.opaque(), element_data.styles.clone()));
+        }
+        (element_damage, element_data.styles.is_display_none())
     };
 
     let has_dirty_descendants;

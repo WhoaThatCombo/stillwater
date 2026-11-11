@@ -10,8 +10,8 @@ use paint_api::{CompositionPipeline, PipelineExitSource};
 use servo_base::Epoch;
 use servo_base::id::{ContainerTimingID, LCPCandidateID, PipelineId};
 use style_traits::CSSPixel;
-use webrender_api::Epoch as WebRenderEpoch;
-use webrender_api::units::DevicePixel;
+use webrender_api::units::{DevicePixel, LayoutTransform};
+use webrender_api::{Epoch as WebRenderEpoch, PropertyValue};
 
 use crate::painter::PaintMetricState;
 use crate::web_content_animation::PipelineAnimations;
@@ -70,6 +70,14 @@ pub(crate) struct PipelineDetails {
     /// Note: This does not manage animations and transitions from CSS or for user input
     /// interaction.
     pub animations: PipelineAnimations,
+
+    /// The latest values of the animated `transform` properties bound in this pipeline's
+    /// display list, sent by layout when only those values changed. Cleared by a new
+    /// display list, which carries its own values.
+    pub animated_transforms: Vec<PropertyValue<LayoutTransform>>,
+
+    /// Like `animated_transforms`, for animated `opacity` values.
+    pub animated_floats: Vec<PropertyValue<f32>>,
 }
 
 impl PipelineDetails {
@@ -100,6 +108,8 @@ impl PipelineDetails {
             exited: PipelineExitSource::empty(),
             display_list_epoch: None,
             animations: Default::default(),
+            animated_transforms: Vec::new(),
+            animated_floats: Vec::new(),
         }
     }
 

@@ -497,6 +497,16 @@ impl Paint {
                     painter.scroll_viewport_by_delta(webview_id, delta);
                 }
             },
+            PaintMessage::UpdateAnimatedProperties {
+                webview_id,
+                pipeline_id,
+                transforms,
+                floats,
+            } => {
+                if let Some(mut painter) = self.maybe_painter_mut(webview_id.into()) {
+                    painter.update_animated_properties(webview_id, pipeline_id, transforms, floats);
+                }
+            },
             PaintMessage::UpdateEpoch {
                 webview_id,
                 pipeline_id,
