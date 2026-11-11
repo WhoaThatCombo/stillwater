@@ -57,7 +57,7 @@ function suggest() {
 }
 
 function pick(row) {
-  if (row.kind === "tab" || row.kind === "pin") {
+  if (row.kind === "tab" || row.kind === "pin" || row.kind === "command") {
     sendBar("switch", `${row.command}\t${row.argument}`);
   } else if (row.kind === "visit") {
     sendBar("open", `visit\t${input.value.trim()}`);

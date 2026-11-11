@@ -32,6 +32,8 @@ pub(crate) enum LinkAction {
     BackgroundTab,
     Glance,
     Split,
+    /// Open the link in an incognito window (a new tab there, from an incognito window).
+    Incognito,
     /// Put the image itself (its pixels) on the clipboard.
     CopyImage,
     /// Put a .gif file on the clipboard: an animated GIF image as it is, or a GIF made from a
@@ -748,6 +750,9 @@ impl Dialog {
                         ));
                         link_action = match pick.as_str() {
                             "Copy image" => image.clone().map(|url| (LinkAction::CopyImage, url)),
+                            "Open link in incognito window" => {
+                                link.clone().map(|url| (LinkAction::Incognito, url))
+                            },
                             "Copy GIF" => gif_video
                                 .clone()
                                 .or(gif_image)
@@ -839,6 +844,7 @@ impl Dialog {
                                                     ("Open link in background tab", LinkAction::BackgroundTab),
                                                     ("Open link in Glance", LinkAction::Glance),
                                                     ("Open link in split view", LinkAction::Split),
+                                                    ("Open link in incognito window", LinkAction::Incognito),
                                                 ] {
                                                     let button = Button::new(
                                                         RichText::new(label)

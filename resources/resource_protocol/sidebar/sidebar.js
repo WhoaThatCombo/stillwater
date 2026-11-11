@@ -262,8 +262,8 @@ function tabMenu(tab) {
     { label: "Rename", run: () => renameTab(tab) },
     { label: "Open in split view", run: () => send("split-tab", tab.id) },
     ...otherSpaces().map((space) => ({ label: `Move to ${space.name}`, run: () => send("tab-move-space", `${tab.id}\t${space.id}`) })),
-    ...(tab.active && /^https?:/.test(tab.url || "") ? [{ label: "Compare with Edge", run: () => send("compare") }] : []),
-    { label: "Report site isn't working", run: () => send("report-site", tab.id) },
+    ...(tab.active && !state.incognito && /^https?:/.test(tab.url || "") ? [{ label: "Compare with Edge", run: () => send("compare") }] : []),
+    ...(state.incognito ? [] : [{ label: "Report site isn't working", run: () => send("report-site", tab.id) }]),
     "-",
     ...(tab.loaded && !tab.active ? [{ label: "Unload (free memory)", run: () => send("tab-unload", tab.id) }] : []),
     { label: "Close tab", run: () => send("close", tab.id) },
@@ -309,7 +309,7 @@ function pinMenu(pin, essential) {
     run: () => send("pin-essential", pin.pinId),
   });
   items.push({ label: "Unpin", run: () => send("unpin", pin.pinId) });
-  if (pin.loaded) items.push({ label: "Report site isn't working", run: () => send("report-site", "") });
+  if (pin.loaded && !state.incognito) items.push({ label: "Report site isn't working", run: () => send("report-site", "") });
   return items;
 }
 
@@ -663,17 +663,22 @@ function appMenu() {
   return [
     { header: `Stillwater ${version}` },
     { label: "New tab", glyph: "\uE710", shortcut: "Ctrl+T", run: () => send("new-tab") },
+    { label: "New incognito window", glyph: "\uE72E", shortcut: "Ctrl+Shift+N", run: () => send("incognito-window") },
     { label: "Reopen closed tab", glyph: "\uE7A7", run: () => send("session-reopen") },
     "-",
     { label: "History", glyph: "\uE81C", shortcut: "Ctrl+H", run: () => send("hist-show", "history") },
     { label: "Bookmarks", glyph: "\uE728", run: () => send("hist-show", "bookmarks") },
     { label: "Downloads", glyph: "\uE896", shortcut: "Ctrl+J", run: () => send("dl-panel") },
-    { label: "Passwords", glyph: "\uE8D7", run: openPasswords },
+    // Incognito: saved passwords are managed in a normal window.
+    { label: "Passwords", glyph: "\uE8D7", run: () => state.incognito ? send("open-settings", "passwords") : openPasswords() },
     "-",
     ...(page ? [
       { label: "Bookmark this page", glyph: "\uE734", shortcut: "Ctrl+D", run: () => send("bm-star") },
-      { label: "Compare with Edge", glyph: "\uE8F9", run: () => send("compare") },
-      { label: "Report a broken site", glyph: "\uEBE8", run: () => send("report-site", "") },
+      // An incognito page's address never leaves its window.
+      ...(state.incognito ? [] : [
+        { label: "Compare with Edge", glyph: "\uE8F9", run: () => send("compare") },
+        { label: "Report a broken site", glyph: "\uEBE8", run: () => send("report-site", "") },
+      ]),
       "-",
     ] : []),
     { label: "Settings", glyph: "\uE713", shortcut: "Ctrl+,", run: () => send("open-settings") },
@@ -882,6 +887,9 @@ function revealActiveRow() {
 }
 
 function render() {
+  // Before the colours are worked out (renderWorkspaces): incognito has its own.
+  document.documentElement.classList.toggle("incognito", !!state.incognito);
+  $("incognito-badge").hidden = !state.incognito;
   renderCompare();
   renderPasswordOffer();
   renderKey();

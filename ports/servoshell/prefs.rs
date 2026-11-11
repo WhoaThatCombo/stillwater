@@ -103,6 +103,8 @@ pub(crate) struct ServoShellPreferences {
     /// Whether or not to run servoshell in headless mode. While running in headless
     /// mode, image output is supported.
     pub headless: bool,
+    /// Run as an incognito (private) session: see `desktop/incognito.rs`.
+    pub incognito: bool,
     /// Filter directives for our tracing implementation.
     ///
     /// Overrides directives specified via `SERVO_TRACING` if set.
@@ -148,6 +150,7 @@ impl Default for ServoShellPreferences {
             clean_shutdown: false,
             device_pixel_ratio_override: None,
             headless: false,
+            incognito: false,
             homepage: "https://servo.org".into(),
             initial_window_size: Size2D::new(1024, 740),
             no_native_titlebar: true,
@@ -538,6 +541,10 @@ struct CmdArgs {
     #[bpaf(short('z'), long)]
     headless: bool,
 
+    /// Open a private (incognito) window: nothing from it is saved on this device.
+    #[bpaf(long)]
+    incognito: bool,
+
     ///
     /// Path to a hosts file (like `/etc/hosts`).
     /// Ignored if the `HOST_FILE` environment variable is set.
@@ -825,6 +832,7 @@ fn parse_arguments_helper(args_without_binary: Args) -> ArgumentParsingResult {
         device_pixel_ratio_override: cmd_args.device_pixel_ratio,
         clean_shutdown: cmd_args.clean_shutdown,
         headless: cmd_args.headless,
+        incognito: cmd_args.incognito,
         tracing_filter: cmd_args.tracing_filter,
         initial_window_size: cmd_args.window_size.unwrap_or(default_window_size),
         screen_size_override: cmd_args.screen_size_override,

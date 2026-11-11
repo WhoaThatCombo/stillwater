@@ -408,10 +408,13 @@ impl Drop for History {
 
 impl History {
     pub(crate) fn new() -> Self {
-        let path = crate::desktop::settings::config_dir().map(|dir| {
-            let _ = std::fs::create_dir_all(&dir);
-            dir.join(HISTORY_FILE)
-        });
+        // Incognito: no history at all (not even the normal one, which would mean opening it).
+        let path = crate::desktop::settings::config_dir()
+            .filter(|_| !crate::desktop::incognito::active())
+            .map(|dir| {
+                let _ = std::fs::create_dir_all(&dir);
+                dir.join(HISTORY_FILE)
+            });
         let (writer, writer_thread) = path
             .clone()
             .and_then(|path| {
@@ -764,6 +767,20 @@ pub(crate) fn suggestions(history: &mut History, tabs: Vec<Value>, text: &str) -
         rows.push(json!({ "kind": "visit", "url": target, "title": text }));
     } else {
         rows.push(json!({ "kind": "search", "url": search_url, "title": text }));
+    }
+    // "incog", "private window"...: offer a new incognito window.
+    let lowercase = text.to_lowercase();
+    let offer_incognito = lowercase.len() >= 3 &&
+        (["incognito", "private"].iter().any(|word| word.starts_with(&lowercase)) ||
+            (lowercase.len() >= 6 &&
+                ["new incognito window", "private window"]
+                    .iter()
+                    .any(|name| name.contains(&lowercase))));
+    if offer_incognito {
+        rows.push(json!({
+            "kind": "command", "title": "New incognito window", "url": "",
+            "command": "incognito-window", "argument": "",
+        }));
     }
     let matches = |title: &str, url: &str| {
         let address = url.split_once("://").map_or(url, |(_, rest)| rest);

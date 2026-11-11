@@ -190,7 +190,10 @@ pub(crate) struct Workspaces {
 
 impl Workspaces {
     pub(crate) fn load() -> Self {
-        let path = crate::desktop::settings::config_dir().map(|dir| dir.join("workspaces.json"));
+        // Incognito: a fresh space, never saved.
+        let path = crate::desktop::settings::config_dir()
+            .filter(|_| !crate::desktop::incognito::active())
+            .map(|dir| dir.join("workspaces.json"));
         let saved = path
             .as_ref()
             .and_then(|path| std::fs::read_to_string(path).ok())

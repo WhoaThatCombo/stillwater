@@ -127,12 +127,15 @@ mod imp {
         name.encode_utf16().chain(Some(0)).collect()
     }
 
-    fn pipe_prefix() -> String {
-        format!("stillwater2-{}-", user())
+    /// Incognito sessions listen on names of their own (`stillwater2i-`), so a URL from another
+    /// program never lands in an incognito window and incognito requests never in a normal one.
+    fn pipe_prefix(incognito: bool) -> String {
+        let kind = if incognito { "stillwater2i" } else { "stillwater2" };
+        format!("{kind}-{}-", user())
     }
 
-    fn pipe_name(generation: u32) -> Vec<u16> {
-        wide(&format!(r"\\.\pipe\{}{generation}", pipe_prefix()))
+    fn pipe_name(generation: u32, incognito: bool) -> Vec<u16> {
+        wide(&format!(r"\\.\pipe\{}{generation}", pipe_prefix(incognito)))
     }
 
     /// The name Stillwater 0.8.5 and older listen on.
@@ -141,8 +144,8 @@ mod imp {
     }
 
     /// The generations some instance is listening on, lowest first.
-    fn generations_in_use() -> Vec<u32> {
-        let prefix = pipe_prefix();
+    fn generations_in_use(incognito: bool) -> Vec<u32> {
+        let prefix = pipe_prefix(incognito);
         let mut generations = Vec::new();
         let pattern = wide(r"\\.\pipe\*");
         let mut data: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
@@ -223,8 +226,8 @@ mod imp {
     }
 
     /// Hand `url` to the instance listening on `generation`. Ok once it has taken the URL.
-    fn send(generation: u32, url: &str) -> Result<(), String> {
-        let name = pipe_name(generation);
+    fn send(generation: u32, url: &str, incognito: bool) -> Result<(), String> {
+        let name = pipe_name(generation, incognito);
         let Some(pipe) = connect(&name, GENERIC_READ | GENERIC_WRITE, FILE_FLAG_OVERLAPPED) else {
             return Err(format!("generation {generation}: could not connect"));
         };
@@ -330,15 +333,15 @@ mod imp {
         true
     }
 
-    pub(super) fn forward(url: &str) -> bool {
+    pub(super) fn forward(url: &str, incognito: bool) -> bool {
         // Newest first: an older generation still in use is most likely a stuck copy.
-        for generation in generations_in_use().into_iter().rev() {
-            match send(generation, url) {
+        for generation in generations_in_use(incognito).into_iter().rev() {
+            match send(generation, url, incognito) {
                 Ok(()) => return true,
                 Err(problem) => note(format!("hand-off: {problem}")),
             }
         }
-        send_legacy(url)
+        !incognito && send_legacy(url)
     }
 
     /// Create one listening end of the pipe. The very first one is created with
@@ -443,18 +446,20 @@ mod imp {
         let _ = std::thread::Builder::new()
             .name("StillwaterSingleInstance".into())
             .spawn(move || {
+                let incognito = crate::desktop::incognito::active();
                 // The generation after the newest one in use, so launches find us first.
-                let start = generations_in_use().last().map_or(0, |newest| newest + 1);
+                let start = generations_in_use(incognito).last().map_or(0, |newest| newest + 1);
                 let Some((generation, mut pipe)) = (start..GENERATIONS)
                     .chain(0..start.min(GENERATIONS))
                     .find_map(|generation| {
-                        create_pipe(&pipe_name(generation), true).map(|pipe| (generation, pipe))
+                        create_pipe(&pipe_name(generation, incognito), true)
+                            .map(|pipe| (generation, pipe))
                     })
                 else {
                     diagnostics::log("single instance: could not create the pipe");
                     return;
                 };
-                let name = pipe_name(generation);
+                let name = pipe_name(generation, incognito);
                 diagnostics::log(format!("single instance: listening (generation {generation})"));
                 loop {
                     let connected = unsafe { ConnectNamedPipe(pipe, null_mut()) } != 0 ||
@@ -484,7 +489,18 @@ mod imp {
 /// If another Stillwater is running and takes `url`, return true (the caller should exit).
 pub(crate) fn forward_to_running_instance(url: &str) -> bool {
     #[cfg(target_os = "windows")]
-    return imp::forward(url);
+    return imp::forward(url, false);
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = url;
+        false
+    }
+}
+
+/// If an incognito session is running and takes `url` (as a new tab), return true.
+pub(crate) fn forward_to_incognito_instance(url: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    return imp::forward(url, true);
     #[cfg(not(target_os = "windows"))]
     {
         let _ = url;

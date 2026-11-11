@@ -39,6 +39,10 @@ pub(crate) fn save(webview: &WebView, (x, y): (f32, f32)) {
 }
 
 fn write(report: &str) -> std::io::Result<std::path::PathBuf> {
+    // A report holds the page's address and text: never from an incognito window.
+    if crate::desktop::incognito::active() {
+        return Err(std::io::Error::other("not saved from an incognito window"));
+    }
     let dir = crate::desktop::diagnostics::dir()
         .ok_or_else(|| std::io::Error::other("no folder for diagnostics"))?;
     std::fs::create_dir_all(&dir)?;

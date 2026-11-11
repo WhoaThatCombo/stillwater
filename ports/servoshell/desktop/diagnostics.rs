@@ -51,9 +51,14 @@ pub(crate) fn init() {
 /// Where the log goes. STILLWATER_LOG_FILE lets test copies log elsewhere instead of
 /// overwriting the user's log.
 fn log_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("STILLWATER_LOG_FILE")
+    let path = std::env::var_os("STILLWATER_LOG_FILE")
         .map(std::path::PathBuf::from)
-        .or_else(|| dirs::data_local_dir().map(|dir| dir.join("Stillwater").join("stillwater.log")))
+        .or_else(|| dirs::data_local_dir().map(|dir| dir.join("Stillwater").join("stillwater.log")));
+    // An incognito session has a log of its own (see `incognito::loggable` for what goes in it).
+    if crate::desktop::incognito::active() {
+        return path.map(|path| path.with_file_name(crate::desktop::incognito::log_file_name()));
+    }
+    path
 }
 
 /// The folder holding the log, for other files meant for bug reports.
@@ -70,7 +75,9 @@ pub(crate) fn log(message: impl AsRef<str>) {
 }
 
 fn write_line(log: &mut Log, message: &str) {
-    if log.written > MAX_BYTES {
+    if log.written > MAX_BYTES ||
+        (crate::desktop::incognito::active() && !crate::desktop::incognito::loggable(message))
+    {
         return;
     }
     let line = format!("{:9.3} {}\n", log.start.elapsed().as_secs_f64(), message);

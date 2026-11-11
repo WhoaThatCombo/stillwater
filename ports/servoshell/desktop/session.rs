@@ -55,7 +55,8 @@ fn path() -> Option<PathBuf> {
 /// command line (or by the app that launched Stillwater), if any. Returns the page the first
 /// tab should open instead of the default one: the previous session's active tab.
 pub(crate) fn init(requested: Option<&str>, headless: bool, webdriver: bool) -> Option<url::Url> {
-    if headless || webdriver {
+    // Incognito tabs are never saved (nor the normal session restored into incognito).
+    if headless || webdriver || crate::desktop::incognito::active() {
         return None;
     }
     ENABLED.store(true, Ordering::Relaxed);
