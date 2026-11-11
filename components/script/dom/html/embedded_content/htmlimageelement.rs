@@ -16,7 +16,7 @@ use layout_api::BoxAreaType;
 use mime::{self, Mime};
 use net_traits::image_cache::{
     Image, ImageCache, ImageCacheResult, ImageLoadListener, ImageOrMetadataAvailable,
-    ImageResponse, PendingImageId,
+    ImageResponse, PendingImageId, RasterizationResult,
 };
 use net_traits::request::{CorsSettings, Destination, Initiator, RequestId};
 use net_traits::{
@@ -30,6 +30,7 @@ use servo_url::ServoUrl;
 use servo_url::origin::MutableOrigin;
 use style::Atom;
 use style::attr::{AttrValue, LengthOrPercentageOrAuto, parse_unsigned_integer};
+use webrender_api::units::DeviceIntSize;
 
 use crate::dom::activation::Activatable;
 use crate::dom::bindings::cell::AtomicSafeBorrowMut;
@@ -170,6 +171,52 @@ impl HTMLImageElement {
         let Some(raster_image) = self.image_data()?.as_raster_image() else {
             warn!("Vector image is not supported as raster image source");
             return None;
+        };
+        Some(raster_image.as_snapshot())
+    }
+
+    /// Like [`Self::get_raster_image_data`], but an SVG image is rasterized at its natural
+    /// size first. Waits (briefly) for the image cache to rasterize it, so only callers that
+    /// deliver their result asynchronously anyway (createImageBitmap) should use this.
+    pub(crate) fn get_raster_image_data_rasterizing_vector(&self) -> Option<Snapshot> {
+        let vector_image = match self.image_data()? {
+            Image::Raster(raster_image) => return Some(raster_image.as_snapshot()),
+            Image::Vector(vector_image) => vector_image,
+        };
+        let metadata = vector_image.metadata;
+        if metadata.width == 0 || metadata.height == 0 {
+            return None;
+        }
+        let size = DeviceIntSize::new(metadata.width as i32, metadata.height as i32);
+        let window = self.owner_window();
+        let image_cache = window.image_cache();
+        let rasterize = || image_cache.rasterize_vector_image(vector_image.id, size, None);
+        let raster_image = match rasterize() {
+            RasterizationResult::Image(raster_image) => raster_image,
+            RasterizationResult::InvalidSvgParameters => return None,
+            RasterizationResult::PendingRasterization => {
+                // The listener is called even if rasterization finished in the meantime.
+                let (sender, receiver) = std::sync::mpsc::channel();
+                image_cache.add_rasterization_complete_listener(
+                    window.pipeline_id(),
+                    vector_image.id,
+                    size,
+                    Box::new(move |_| {
+                        let _ = sender.send(());
+                    }),
+                );
+                if receiver
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .is_err()
+                {
+                    warn!("Timed out rasterizing a vector image for createImageBitmap");
+                    return None;
+                }
+                match rasterize() {
+                    RasterizationResult::Image(raster_image) => raster_image,
+                    _ => return None,
+                }
+            },
         };
         Some(raster_image.as_snapshot())
     }
