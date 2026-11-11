@@ -98,6 +98,8 @@ pub struct Gui {
 
     /// Zen's hover-reveal top bar with the window buttons, while it's showing.
     top_bar_rect: Option<egui::Rect>,
+    /// Where the top bar is (shown or not) while the window is frameless.
+    top_bar_zone: Option<egui::Rect>,
 
     /// Needed to create render surfaces for extra panes.
     window_rendering_context: Rc<WindowRenderingContext>,
@@ -303,6 +305,7 @@ impl Gui {
             pending_accesskit_updates: vec![],
             shown: false,
             top_bar_rect: None,
+            top_bar_zone: None,
             window_rendering_context,
             split: None,
             glance: None,
@@ -377,10 +380,26 @@ impl Gui {
     }
 
     /// If `position` is over the visible sidebar, return it relative to the sidebar's origin.
-    /// Whether `position` is over the top bar (window buttons), while it's showing.
+    /// Whether `position` is over the top bar (window buttons), while it's showing, or in the
+    /// strip along the top edge that reveals it (a press there may beat the frame that shows it).
     pub(crate) fn top_bar_contains(&self, position: Point2D<f32, DeviceIndependentPixel>) -> bool {
-        self.top_bar_rect
-            .is_some_and(|rect| rect.contains(pos2(position.x, position.y)))
+        self.top_bar_hit(position).is_some()
+    }
+
+    /// What a press at `position` on the top bar hits, if it is on the top bar.
+    pub(crate) fn top_bar_hit(&self, position: Point2D<f32, DeviceIndependentPixel>) -> Option<TopBarHit> {
+        let point = pos2(position.x, position.y);
+        let bar = match (self.top_bar_rect, self.top_bar_zone) {
+            (Some(bar), _) if bar.contains(point) => bar,
+            (_, Some(zone)) if zone.contains(point) && point.y <= zone.min.y + TOP_BAR_REVEAL => zone,
+            _ => return None,
+        };
+        let hit = [TopBarHit::Close, TopBarHit::Maximize, TopBarHit::Minimize]
+            .into_iter()
+            .enumerate()
+            .find(|(index, _)| caption_button_rect(bar, *index).contains(point))
+            .map_or(TopBarHit::Drag, |(_, hit)| hit);
+        Some(hit)
     }
 
     /// Ask for a pane change; it happens on the next update.
@@ -515,6 +534,17 @@ impl Gui {
                 LinkAction::BackgroundTab => window.queue_user_interface_command(
                     UserInterfaceCommand::NewBackgroundWebViewWithUrl(url),
                 ),
+                LinkAction::CopyImage | LinkAction::CopyGif => {
+                    if let Some(webview) = window.active_webview() {
+                        let kind = if action == LinkAction::CopyGif {
+                            crate::desktop::capture::Kind::Gif
+                        } else {
+                            crate::desktop::capture::Kind::Image
+                        };
+                        crate::desktop::capture::start(state.servo(), webview.id(), kind, url);
+                        window.set_needs_update();
+                    }
+                },
             }
         }
         let requests = std::mem::take(&mut *self.pane_requests.borrow_mut());
@@ -923,6 +953,7 @@ impl Gui {
             content_rect,
             painted_webviews,
             top_bar_rect,
+            top_bar_zone,
             split,
             glance,
             split_rect,
@@ -1196,14 +1227,15 @@ impl Gui {
                     pos2(full_rect.max.x, full_rect.min.y + TOP_BAR_HEIGHT),
                 );
                 let pointer = ctx.input(|input| input.pointer.hover_pos());
-                let reveal = pointer.is_some_and(|p| p.y <= full_rect.min.y + 8.0 && p.x >= bar.min.x);
+                let reveal = pointer.is_some_and(|p| p.y <= full_rect.min.y + TOP_BAR_REVEAL && p.x >= bar.min.x);
                 let keep = top_bar_rect.is_some() && pointer.is_some_and(|p| bar.expand(4.0).contains(p));
                 // STILLWATER_SHOW_TOP_BAR keeps it visible (for screenshots in tests).
                 let forced = std::env::var_os("STILLWATER_SHOW_TOP_BAR").is_some();
                 *top_bar_rect = (frameless && (reveal || keep || forced)).then_some(bar);
+                *top_bar_zone = frameless.then_some(bar);
             }
             if let Some(bar) = *top_bar_rect {
-                draw_top_bar(ctx, bar, background, theme, headed_window, window);
+                draw_top_bar(ctx, bar, background, theme, headed_window);
             }
 
             // Paint the sidebar's surface every frame, even while it's collapsed in compact
@@ -1285,7 +1317,8 @@ impl Gui {
     fn update_status_text(&mut self, window: &ServoShellWindow) -> bool {
         let state_status = window
             .active_webview()
-            .and_then(|webview| webview.status_text());
+            .and_then(|webview| webview.status_text())
+            .or_else(crate::desktop::capture::notice);
         let old_status = std::mem::replace(&mut self.status_text, state_status);
         old_status != self.status_text
     }
@@ -1416,15 +1449,37 @@ fn load_pending_favicons(window: &ServoShellWindow, sidebar: &mut Sidebar) {
 
 /// Height of Zen's hover-reveal top bar.
 const TOP_BAR_HEIGHT: f32 = 36.0;
+/// The top bar slides in when the pointer is this close to the window's top edge.
+const TOP_BAR_REVEAL: f32 = 8.0;
+const CAPTION_BUTTON_WIDTH: f32 = 46.0;
 
-/// Draw the top bar's background and Windows-style caption buttons, and act on clicks.
+/// What a press on the top bar does. The press is handled by `HeadedWindow` (never by egui or
+/// the page): an OS window drag swallows the release, which used to leave egui thinking the
+/// button was still down, so it stopped claiming later presses and they reached the page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TopBarHit {
+    Drag,
+    Close,
+    Maximize,
+    Minimize,
+}
+
+/// The caption button `index` places from the right (close, maximise, minimise).
+fn caption_button_rect(bar: egui::Rect, index: usize) -> egui::Rect {
+    egui::Rect::from_min_size(
+        pos2(bar.max.x - CAPTION_BUTTON_WIDTH * (index as f32 + 1.0), bar.min.y),
+        egui::vec2(CAPTION_BUTTON_WIDTH, bar.height()),
+    )
+}
+
+/// Draw the top bar's background and Windows-style caption buttons (clicks on it are handled
+/// by `HeadedWindow::handle_top_bar_event`).
 fn draw_top_bar(
     ctx: &egui::Context,
     bar: egui::Rect,
     background: Color32,
     theme: servo::Theme,
     headed_window: &headed_window::HeadedWindow,
-    window: &ServoShellWindow,
 ) {
     let foreground = match theme {
         servo::Theme::Dark => Color32::from_rgba_unmultiplied(255, 255, 255, 210),
@@ -1442,22 +1497,13 @@ fn draw_top_bar(
             let painter = ui.painter().clone();
             painter.rect_filled(bar, CornerRadius::ZERO, background);
 
-            // The empty part of the bar moves the window; double-click maximises.
-            let drag = ui.interact(bar, Id::new("top-bar-drag"), egui::Sense::click_and_drag());
-            if drag.double_clicked() {
-                winit_window.set_maximized(!winit_window.is_maximized());
-            } else if drag.drag_started() {
-                let _ = winit_window.drag_window();
-            }
+            // Claim the bar's area so egui reports the pointer as over it.
+            let _ = ui.interact(bar, Id::new("top-bar-drag"), egui::Sense::hover());
 
-            let width = 46.0;
             let buttons = ["close", "maximize", "minimize"];
             for (index, name) in buttons.iter().enumerate() {
-                let rect = egui::Rect::from_min_size(
-                    pos2(bar.max.x - width * (index as f32 + 1.0), bar.min.y),
-                    egui::vec2(width, bar.height()),
-                );
-                let response = ui.interact(rect, Id::new(("caption", *name)), egui::Sense::click());
+                let rect = caption_button_rect(bar, index);
+                let response = ui.interact(rect, Id::new(("caption", *name)), egui::Sense::hover());
                 let is_close = *name == "close";
                 if response.hovered() {
                     let fill = if is_close { Color32::from_rgb(196, 43, 28) } else { hover };
@@ -1493,13 +1539,6 @@ fn draw_top_bar(
                         painter.line_segment([pos2(c.x - 5.0, c.y - 5.0), pos2(c.x + 5.0, c.y + 5.0)], stroke);
                         painter.line_segment([pos2(c.x - 5.0, c.y + 5.0), pos2(c.x + 5.0, c.y - 5.0)], stroke);
                     },
-                }
-                if response.clicked() {
-                    match *name {
-                        "minimize" => winit_window.set_minimized(true),
-                        "maximize" => winit_window.set_maximized(!winit_window.is_maximized()),
-                        _ => window.schedule_close(),
-                    }
                 }
             }
         });

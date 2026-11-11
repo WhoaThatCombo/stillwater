@@ -1118,6 +1118,10 @@ impl WebViewDelegate for RunningAppState {
             // when they choose a download folder, never into the user's.
             let automated = self.servoshell_preferences.headless ||
                 self.servoshell_preferences.webdriver_port.get().is_some();
+            // "Copy image" / "Copy GIF" fetch their file as a download of their own.
+            let Some(request) = crate::desktop::capture::claim(request) else {
+                return;
+            };
             if automated && std::env::var_os("STILLWATER_DOWNLOAD_DIR").is_none() {
                 crate::desktop::diagnostics::log(format!(
                     "download not saved (automated run without STILLWATER_DOWNLOAD_DIR): {}",
@@ -1298,7 +1302,10 @@ impl WebViewDelegate for RunningAppState {
     }
 
     fn show_embedder_control(&self, webview: WebView, embedder_control: EmbedderControl) {
-        if self.servoshell_preferences.webdriver_port.get().is_some() {
+        // Tests of Stillwater's own context menu entries (see `dialog.rs`) show the real menu.
+        let test_context_menu = matches!(&embedder_control, EmbedderControl::ContextMenu(..)) &&
+            std::env::var_os("STILLWATER_TEST_CONTEXT_MENU_PICK").is_some();
+        if self.servoshell_preferences.webdriver_port.get().is_some() && !test_context_menu {
             if matches!(&embedder_control, EmbedderControl::SimpleDialog(..)) {
                 self.interrupt_webdriver_script_evaluation();
 
@@ -1403,7 +1410,9 @@ struct ServoShellServoDelegate {
 impl ServoDelegate for ServoShellServoDelegate {
     fn notify_download_update(&self, id: servo::DownloadId, update: servo::DownloadUpdate) {
         #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-        self.downloads.borrow_mut().update(id, update);
+        if !crate::desktop::capture::update(id, &update) {
+            self.downloads.borrow_mut().update(id, update);
+        }
         #[cfg(any(target_os = "android", target_env = "ohos"))]
         let _ = (id, update);
     }

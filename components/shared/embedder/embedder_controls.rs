@@ -140,6 +140,10 @@ pub struct ContextMenuElementInformation {
     /// whitespace collapsed, e.g. for a "Copy Link Text" menu item.
     #[serde(default)]
     pub link_text: Option<String>,
+    /// Stillwater: the source of a short, looping, muted `<video>` without controls under the
+    /// pointer, which is how sites such as X show animated GIFs (for a "Copy GIF" menu item).
+    #[serde(default)]
+    pub gif_video_url: Option<Url>,
 }
 
 /// Request to present an IME to the user when an editable element is focused. If `type` is

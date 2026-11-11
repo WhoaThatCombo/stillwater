@@ -70,7 +70,7 @@ jitspew = ["servo/jitspew"]
 js_backtrace = ["servo/js_backtrace"]
 js_jit = ["servo/js_jit"]
 max_log_level = ["log/release_max_level_info"]
-media-gstreamer = ["servo/media-gstreamer"]
+media-gstreamer = ["servo/media-gstreamer", "dep:gstreamer", "dep:gstreamer-app"]
 multiprocess = ["servo/multiprocess"]
 native-bluetooth = ["servo/native-bluetooth"]
 profilemozjs = ["servo/profilemozjs"]
@@ -162,6 +162,9 @@ egui-winit = { workspace = true, features = ["accesskit", "clipboard", "wayland"
 egui_glow = { workspace = true, features = ["winit"] }
 gilrs = { workspace = true }
 glow = { workspace = true }
+# "Copy GIF" decodes videos with the media backend's GStreamer.
+gstreamer = { workspace = true, optional = true }
+gstreamer-app = { workspace = true, optional = true }
 headers = { workspace = true }
 itertools = { workspace = true }
 pbkdf2 = { workspace = true }

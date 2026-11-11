@@ -3906,6 +3906,10 @@ impl Window {
     }
 
     pub(crate) fn set_last_activation_timestamp(&self, time: UserActivationTimestamp) {
+        // Stillwater: the user interacted with this WebView, so its media may play again.
+        if matches!(time, UserActivationTimestamp::TimeStamp(_)) {
+            servo_base::autoplay::unblock(self.webview_id());
+        }
         self.last_activation_timestamp.set(time);
     }
 

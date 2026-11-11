@@ -46,6 +46,8 @@ pub struct App {
     waker: Box<dyn EventLoopWaker>,
     event_loop_proxy: Option<EventLoopProxy<AppEvent>>,
     initial_url: ServoUrl,
+    /// The first tab reopens the last session's active tab (its media waits for the user).
+    initial_url_restored: bool,
     t_start: Instant,
     t: Instant,
     state: AppState,
@@ -62,6 +64,8 @@ pub struct App {
     last_memory_pressure: Option<Instant>,
     /// Whether this process holds a 1 ms Windows timer resolution (see `update_timer_resolution`).
     fine_timers: bool,
+    /// Since when the fine timer resolution has been continuously unneeded while held.
+    fine_timers_unwanted_since: Option<Instant>,
 }
 
 #[cfg(target_os = "windows")]
@@ -74,6 +78,8 @@ unsafe extern "system" {
 /// How often to look for inactive tabs to unload, and how often while memory is low.
 const MEMORY_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const LOW_MEMORY_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long the fine timer resolution must have been unneeded before it is given back.
+const FINE_TIMER_RELEASE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl App {
     pub fn new(
@@ -88,6 +94,8 @@ impl App {
             servo_shell_preferences.headless,
             servo_shell_preferences.webdriver_port.get().is_some(),
         );
+        let initial_url_restored = restored_url.is_some();
+        crate::desktop::capture::clean_up();
         let initial_url = restored_url.map(ServoUrl::from_url).unwrap_or_else(|| {
             get_default_url(
                 servo_shell_preferences.url.as_deref(),
@@ -105,6 +113,7 @@ impl App {
             waker: event_loop.create_event_loop_waker(),
             event_loop_proxy: event_loop.event_loop_proxy(),
             initial_url,
+            initial_url_restored,
             t_start: t,
             t,
             state: AppState::Initializing,
@@ -114,6 +123,7 @@ impl App {
             next_memory_check: t + MEMORY_CHECK_INTERVAL,
             last_memory_pressure: None,
             fine_timers: false,
+            fine_timers_unwanted_since: None,
         }
     }
 
@@ -126,7 +136,9 @@ impl App {
     /// stutter. Hold a 1 ms resolution while a shown page animates, loads or keeps producing
     /// frames (a playing video: its frames are shown without the page animating), like Chromium
     /// and Firefox do while they need it, and let it go when idle to save power. Background
-    /// tabs don't count: nothing of theirs is on screen.
+    /// tabs don't count: nothing of theirs is on screen. It is taken at once and given back only
+    /// after it has been unneeded for `FINE_TIMER_RELEASE_DELAY` (a page between two animation
+    /// frames looks idle for a moment; flipping on every such gap cost a system call each time).
     fn update_timer_resolution(&mut self) {
         let wanted = match &self.state {
             AppState::Running(state) => {
@@ -140,6 +152,16 @@ impl App {
             },
             _ => false,
         };
+        if wanted {
+            self.fine_timers_unwanted_since = None;
+        } else if self.fine_timers {
+            let now = Instant::now();
+            let since = *self.fine_timers_unwanted_since.get_or_insert(now);
+            if now.duration_since(since) < FINE_TIMER_RELEASE_DELAY {
+                return;
+            }
+            self.fine_timers_unwanted_since = None;
+        }
         if wanted == self.fine_timers {
             return;
         }
@@ -223,6 +245,15 @@ impl App {
             platform_window,
             TopLevelWebViewCreationRequest::WithUrl(initial_url),
         );
+        // The browser reopened this page by itself: its videos don't start until the user
+        // interacts with it.
+        if self.initial_url_restored {
+            for window in running_state.windows().iter() {
+                if let Some(webview) = window.active_webview() {
+                    webview.block_autoplay_until_activation();
+                }
+            }
+        }
 
         self.state = AppState::Running(running_state);
     }
@@ -259,7 +290,9 @@ impl App {
     /// Stillwater's toolbar is an HTML page, so without this the loop can fall asleep with
     /// frames pending and the window stays white until the mouse moves.
     fn busy(&self) -> bool {
-        if self.tick_until.is_some_and(|until| Instant::now() < until) {
+        if self.tick_until.is_some_and(|until| Instant::now() < until) ||
+            crate::desktop::capture::busy()
+        {
             return true;
         }
         let AppState::Running(state) = &self.state else {
@@ -430,8 +463,13 @@ impl ApplicationHandler<AppEvent> for App {
             state.maybe_collect_garbage();
         }
         if let AppState::Running(state) = &self.state {
+            // "Copying GIF…" / "GIF copied" in the status line.
+            let copy_notice_changed = crate::desktop::capture::take_changed();
             for window in state.windows().iter() {
                 window.set_needs_repaint();
+                if copy_notice_changed {
+                    window.set_needs_update();
+                }
             }
         }
         if !self.pump_servo_event_loop(event_loop.into()) {

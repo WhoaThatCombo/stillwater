@@ -1251,7 +1251,9 @@ impl Sidebar {
                     tabs.push(serde_json::json!({
                         "id": tab_id,
                         "title": self.workspaces.custom_title(id).cloned().or_else(|| webview.page_title()).unwrap_or_default(),
-                        "url": webview.url().map(|url| url.to_string()).unwrap_or_default(),
+                        "url": webview.url().map(|url| url.to_string())
+                            .or_else(|| self.workspaces.requested_url(id).cloned())
+                            .unwrap_or_default(),
                         "active": Some(id) == active_id,
                         "loading": is_navigating(webview),
                         "favicon": self.favicons.get(&id),

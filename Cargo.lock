@@ -10020,6 +10020,8 @@ dependencies = [
  "flate2",
  "gilrs",
  "glow",
+ "gstreamer",
+ "gstreamer-app",
  "headers",
  "hilog",
  "hitrace",

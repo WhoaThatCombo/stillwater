@@ -157,6 +157,9 @@ pub(crate) struct Workspaces {
     pending_pin: Option<u32>,
     /// Session-only names for regular tabs (double-click to rename).
     custom_titles: HashMap<WebViewId, String>,
+    /// The page a reloaded tab was asked to load, until it has a URL of its own (shown and
+    /// copied while it loads).
+    requested_urls: HashMap<WebViewId, String>,
     /// Which workspace each open tab belongs to.
     tab_workspace: HashMap<WebViewId, u32>,
     /// The tab to show again when switching back to a workspace.
@@ -229,6 +232,7 @@ impl Workspaces {
             next_pin_id,
             pending_pin: None,
             custom_titles: Default::default(),
+            requested_urls: Default::default(),
             tab_workspace: Default::default(),
             last_active: Default::default(),
             awaiting_new_tab: false,
@@ -387,6 +391,9 @@ impl Workspaces {
         self.last_used.retain(|id, _| ids.contains(id));
         self.last_active.retain(|_, id| ids.contains(id));
         self.custom_titles.retain(|id, _| ids.contains(id));
+        self.requested_urls.retain(|id, _| {
+            ids.contains(id) && window.webview_by_id(*id).is_some_and(|webview| webview.url().is_none())
+        });
         // A closed pinned tab is unloaded, not removed.
         for pin in &mut self.pins {
             if pin.webview.is_some_and(|id| !ids.contains(&id)) {
@@ -402,6 +409,16 @@ impl Workspaces {
                     let position = self.unloaded.iter().position(|tab| tab.key == key)?;
                     Some(self.unloaded.remove(position))
                 });
+                // A tab the browser loads by itself (restored from the session, or unloaded and
+                // loaded again because it was selected, or a pinned tab's first load) must not
+                // start playing media until the user interacts with it.
+                let quiet = restored.is_some() || self.pending_pin.is_some();
+                if quiet && let Some(webview) = window.webview_by_id(*id) {
+                    webview.block_autoplay_until_activation();
+                }
+                if let Some(tab) = &restored {
+                    self.requested_urls.insert(*id, tab.url.clone());
+                }
                 let space = if let Some(tab) = restored {
                     self.tab_order.insert(*id, tab.order);
                     if let Some(title) = tab.custom_title {
@@ -670,6 +687,11 @@ impl Workspaces {
                 TabEntry::Unloaded(_) => true,
             })
             .collect()
+    }
+
+    /// The page a tab that is loading again was asked for, while it has no URL yet.
+    pub(crate) fn requested_url(&self, webview: WebViewId) -> Option<&String> {
+        self.requested_urls.get(&webview)
     }
 
     /// A regular tab's custom name, if the user renamed it.

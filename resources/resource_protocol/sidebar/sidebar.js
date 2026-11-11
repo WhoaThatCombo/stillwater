@@ -413,7 +413,7 @@ function renderSplitRow(split) {
   label.textContent = split.title || split.url;
   const close = iconButton("tab-close", "", "Close split view", () => send("split-close", ""));
   row.append(icon, label, close);
-  attachMenu(row, () => [{ label: "Close split view", run: () => send("split-close", "") }]);
+  attachMenu(row, () => [...copyLinkItem(split.url), "-", { label: "Close split view", run: () => send("split-close", "") }]);
   return row;
 }
 

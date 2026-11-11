@@ -50,7 +50,7 @@ use crate::desktop::diagnostics;
 use crate::desktop::dialog::Dialog;
 use crate::desktop::event_loop::{AppEvent, RepaintEventLoopWaker};
 use crate::desktop::find_bar::FindCommand;
-use crate::desktop::gui::{Gui, PaneRequest};
+use crate::desktop::gui::{Gui, PaneRequest, TopBarHit};
 use crate::desktop::panes::PaneKind;
 use crate::desktop::sidebar::Sidebar;
 use crate::desktop::keyutils::CMD_OR_CONTROL;
@@ -135,6 +135,8 @@ pub struct HeadedWindow {
     over_sidebar_handle: Cell<bool>,
     /// The last press on the sidebar's edge, to reset the width on double-click.
     last_sidebar_handle_press: Cell<Option<std::time::Instant>>,
+    /// The top bar's caption button the left button went down on, until it is released.
+    caption_press: Cell<Option<TopBarHit>>,
 }
 
 /// `STILLWATER_BACKGROUND_WINDOW`: for automated tests, the window opens off-screen, out of the
@@ -323,6 +325,7 @@ impl HeadedWindow {
             sidebar_resize_grab: Cell::new(None),
             over_sidebar_handle: Cell::new(false),
             last_sidebar_handle_press: Cell::new(None),
+            caption_press: Cell::new(None),
         })
     }
 
@@ -575,6 +578,73 @@ impl HeadedWindow {
             )));
         }
         true
+    }
+
+    /// Presses on the frameless window's top bar: its empty part moves the window (the OS
+    /// drag starts on the press, as on a native title bar) and double-click maximises; the
+    /// caption buttons act on release over the same button. None of these presses, nor the
+    /// releases that end them, reach egui or the page. Returns true if the event was consumed.
+    fn handle_top_bar_event(&self, window: &ServoShellWindow, event: &WindowEvent) -> bool {
+        let WindowEvent::MouseInput {
+            state: button_state,
+            button,
+            ..
+        } = event
+        else {
+            return false;
+        };
+        let hit = if self.winit_window.is_decorated() {
+            None
+        } else {
+            self.last_mouse_position
+                .get()
+                .and_then(|point| self.gui.borrow().top_bar_hit(point))
+        };
+        match (button_state, button) {
+            (ElementState::Released, MouseButton::Left) if self.caption_press.get().is_some() => {
+                let pressed = self.caption_press.take();
+                if hit == pressed {
+                    diagnostics::log(format!("click: top bar {hit:?}"));
+                    match hit {
+                        Some(TopBarHit::Minimize) => self.winit_window.set_minimized(true),
+                        Some(TopBarHit::Maximize) => self
+                            .winit_window
+                            .set_maximized(!self.winit_window.is_maximized()),
+                        Some(TopBarHit::Close) => window.schedule_close(),
+                        _ => {},
+                    }
+                }
+                true
+            },
+            (ElementState::Pressed, MouseButton::Left) => {
+                self.caption_press.set(None);
+                let Some(hit) = hit else {
+                    return false;
+                };
+                if hit != TopBarHit::Drag {
+                    self.caption_press.set(Some(hit));
+                    return true;
+                }
+                let now = std::time::Instant::now();
+                let double = self
+                    .last_gutter_press
+                    .replace(Some(now))
+                    .is_some_and(|last| now.duration_since(last) < double_click_time());
+                if double {
+                    self.last_gutter_press.set(None);
+                    self.winit_window
+                        .set_maximized(!self.winit_window.is_maximized());
+                    diagnostics::log("click: top bar double-click (maximise)");
+                } else {
+                    diagnostics::log("click: top bar (drag window)");
+                    let _ = self.winit_window.drag_window();
+                }
+                true
+            },
+            // Other buttons pressed on the top bar do nothing.
+            (ElementState::Pressed, _) => hit.is_some(),
+            _ => false,
+        }
     }
 
     /// Resize the sidebar by dragging its right edge. Returns true if the event was consumed.
@@ -1420,6 +1490,7 @@ impl HeadedWindow {
         }
         if let WindowEvent::Focused(false) = event {
             self.modifiers_state.set(ModifiersState::empty());
+            self.caption_press.set(None);
             if let Some(webview) = window.active_webview() {
                 self.release_held_page_buttons(&webview);
             }
@@ -1438,6 +1509,9 @@ impl HeadedWindow {
             let Some(webview) = window.active_webview()
         {
             self.handle_mouse_button_event(&webview, button, ElementState::Released);
+            // egui sees every release too, so it can never think a button is still down
+            // (it then stops claiming presses over its own areas).
+            let _ = self.gui.borrow_mut().on_window_event(&self.winit_window, &event);
             return;
         }
         if let WindowEvent::MouseInput {
@@ -1481,8 +1555,12 @@ impl HeadedWindow {
                     let previous = self.resize_direction.replace(direction);
                     if let Some(direction) = direction {
                         self.winit_window.set_cursor(resize_cursor(direction));
-                        // egui still needs the pointer position to reveal the top bar.
-                        let _ = self.gui.borrow_mut().on_window_event(&self.winit_window, &event);
+                        // egui still needs the pointer position to reveal the top bar, and a
+                        // frame to show it.
+                        let response = self.gui.borrow_mut().on_window_event(&self.winit_window, &event);
+                        if response.repaint {
+                            self.winit_window.request_redraw();
+                        }
                         return;
                     }
                     if previous.is_some() {
@@ -1503,6 +1581,11 @@ impl HeadedWindow {
                 },
                 _ => {},
             }
+        }
+
+        // The frameless window's top bar is drawn above everything, dialogs included.
+        if self.handle_top_bar_event(&window, &event) {
+            return;
         }
 
         // The sidebar gets first pick of input, unless a dialog is capturing it.

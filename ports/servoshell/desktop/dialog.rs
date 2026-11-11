@@ -32,6 +32,30 @@ pub(crate) enum LinkAction {
     BackgroundTab,
     Glance,
     Split,
+    /// Put the image itself (its pixels) on the clipboard.
+    CopyImage,
+    /// Put a .gif file on the clipboard: an animated GIF image as it is, or a GIF made from a
+    /// video shown like one.
+    CopyGif,
+}
+
+/// Whether `url` names a GIF file (by its path or a `format=gif` query).
+fn looks_like_gif(url: &url::Url) -> bool {
+    url.path().to_ascii_lowercase().ends_with(".gif") ||
+        url.query_pairs()
+            .any(|(key, value)| key == "format" && value.eq_ignore_ascii_case("gif"))
+}
+
+/// One of Stillwater's own context menu entries.
+fn extra_menu_button(ui: &mut egui::Ui, label: &str) -> bool {
+    let button = Button::new(RichText::new(label).color(ui.visuals().strong_text_color()))
+        .corner_radius(CornerRadius::ZERO)
+        .wrap_mode(egui::TextWrapMode::Extend)
+        .min_size(Vec2 {
+            x: MINIMUM_UI_ELEMENT_WIDTH,
+            y: 0.0,
+        });
+    ui.add(button).clicked()
 }
 
 thread_local! {
@@ -695,6 +719,31 @@ impl Dialog {
                         .link_url
                         .clone()
                         .filter(|url| matches!(url.scheme(), "http" | "https"));
+                    let image = context_menu
+                        .element_info()
+                        .image_url
+                        .clone()
+                        .filter(|url| matches!(url.scheme(), "http" | "https"));
+                    let gif_video = context_menu.element_info().gif_video_url.clone();
+                    // Tests: STILLWATER_TEST_CONTEXT_MENU_PICK="Copy image" or "Copy GIF" picks
+                    // that entry as soon as the menu shows (and logs what the menu offers).
+                    if let Ok(pick) = std::env::var("STILLWATER_TEST_CONTEXT_MENU_PICK") {
+                        let gif_image = image.clone().filter(looks_like_gif);
+                        crate::desktop::diagnostics::log(format!(
+                            "context menu test: image={:?} gif_image={} gif_video={:?}",
+                            image.as_ref().map(url::Url::as_str),
+                            gif_image.is_some(),
+                            gif_video.as_ref().map(url::Url::as_str),
+                        ));
+                        link_action = match pick.as_str() {
+                            "Copy image" => image.clone().map(|url| (LinkAction::CopyImage, url)),
+                            "Copy GIF" => gif_video
+                                .clone()
+                                .or(gif_image)
+                                .map(|url| (LinkAction::CopyGif, url)),
+                            _ => None,
+                        };
+                    }
                     let mut position = context_menu.position();
                     position.min.x += toolbar_offset.x as i32;
                 position.max.x += toolbar_offset.x as i32;
@@ -791,6 +840,28 @@ impl Dialog {
                                         ContextMenuItem::Separator => {
                                             ui.separator();
                                         },
+                                    }
+                                    if let ContextMenuItem::Item {
+                                        action: ContextMenuAction::CopyImageLink,
+                                        ..
+                                    } = item &&
+                                        let Some(image) = &image
+                                    {
+                                        if extra_menu_button(ui, "Copy image") {
+                                            link_action = Some((LinkAction::CopyImage, image.clone()));
+                                            ui.close();
+                                        }
+                                        if looks_like_gif(image) && extra_menu_button(ui, "Copy GIF") {
+                                            link_action = Some((LinkAction::CopyGif, image.clone()));
+                                            ui.close();
+                                        }
+                                    }
+                                }
+                                if let Some(video) = &gif_video {
+                                    ui.separator();
+                                    if extra_menu_button(ui, "Copy GIF") {
+                                        link_action = Some((LinkAction::CopyGif, video.clone()));
+                                        ui.close();
                                     }
                                 }
                             })

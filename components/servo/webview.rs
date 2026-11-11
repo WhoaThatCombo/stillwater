@@ -559,6 +559,8 @@ impl WebView {
     /// This pushes a new entry onto the navigation history, so the user can navigate
     /// back to the previous page.
     pub fn load(&self, url: Url) {
+        // A page the user asked for may play its media.
+        servo_base::autoplay::unblock(self.id());
         self.servo()
             .constellation_proxy()
             .send(EmbedderToConstellationMessage::LoadUrl(
@@ -572,12 +574,20 @@ impl WebView {
     /// This pushes a new entry onto the navigation history, so the user can navigate
     /// back to the previous page.
     pub fn load_request(&self, url_request: UrlRequest) {
+        servo_base::autoplay::unblock(self.id());
         self.servo()
             .constellation_proxy()
             .send(EmbedderToConstellationMessage::LoadUrl(
                 self.id(),
                 url_request,
             ))
+    }
+
+    /// Stillwater: media in this WebView may not start playing (`play()` is refused, `autoplay`
+    /// does nothing) until the user clicks or types in one of its pages, or [`Self::load`] loads
+    /// another page. For pages the browser loads by itself, such as restored tabs.
+    pub fn block_autoplay_until_activation(&self) {
+        servo_base::autoplay::block_until_activation(self.id());
     }
 
     /// Reload the currently loaded page in this [`WebView`].

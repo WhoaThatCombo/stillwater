@@ -19,6 +19,7 @@ use rustc_hash::FxHashMap;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::HTMLAnchorElementBinding::HTMLAnchorElementMethods;
 use script_bindings::codegen::GenericBindings::HTMLImageElementBinding::HTMLImageElementMethods;
+use script_bindings::codegen::GenericBindings::HTMLMediaElementBinding::HTMLMediaElementMethods;
 use script_bindings::codegen::GenericBindings::HistoryBinding::HistoryMethods;
 use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
 use script_bindings::inheritance::Castable;
@@ -36,8 +37,8 @@ use crate::dom::links::htmlhyperlinkelementutils::HyperlinkElementTraits;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::node::{Node, NodeTraits};
 use crate::dom::types::{
-    Element, HTMLAnchorElement, HTMLElement, HTMLImageElement, HTMLInputElement, HTMLSelectElement,
-    Window,
+    Element, HTMLAnchorElement, HTMLElement, HTMLImageElement, HTMLInputElement, HTMLMediaElement,
+    HTMLSelectElement, HTMLVideoElement, Window,
 };
 use crate::messaging::MainThreadScriptMsg;
 
@@ -285,7 +286,69 @@ impl DocumentEmbedderControls {
             }
         }
 
+        // Stillwater: sites often lay a transparent element over a photo or video (X does), so
+        // the element under the pointer isn't the <img> or <video> itself. Look in the nearest
+        // few ancestors for one that holds exactly one such element, under the pointer.
+        let point = hit_test_result.point_in_frame;
+        let under_pointer = |cx: &mut JSContext, node: &Node| {
+            node.border_box(cx).is_some_and(|rect| {
+                rect.contains(Point2D::new(
+                    app_units::Au::from_f32_px(point.x),
+                    app_units::Au::from_f32_px(point.y),
+                ))
+            })
+        };
+        let mut video_element = None;
+        for ancestor in hit_test_result
+            .node
+            .inclusive_ancestors(ShadowIncluding::No)
+            .take(5)
+        {
+            if image_element.is_some() && video_element.is_some() {
+                break;
+            }
+            let mut images = Vec::new();
+            let mut videos = Vec::new();
+            for node in ancestor.traverse_preorder(ShadowIncluding::No).take(400) {
+                if let Some(image) = node.downcast::<HTMLImageElement>() {
+                    images.push(DomRoot::from_ref(image));
+                } else if node.is::<HTMLVideoElement>() {
+                    videos.push(node);
+                }
+            }
+            if image_element.is_none() &&
+                images.len() == 1 &&
+                under_pointer(cx, images[0].upcast::<Node>())
+            {
+                image_element = images.pop();
+            }
+            if video_element.is_none() && videos.len() == 1 && under_pointer(cx, &videos[0]) {
+                video_element = videos.pop();
+            }
+            if images.len() > 1 || videos.len() > 1 {
+                break;
+            }
+        }
+
         let mut info = ContextMenuElementInformation::default();
+        // A video shown like an animated GIF: looping, muted, no controls, a plain file source.
+        if let Some(media) = video_element
+            .as_ref()
+            .and_then(|node| node.downcast::<HTMLMediaElement>()) &&
+            media.Loop() &&
+            media.Muted() &&
+            !media.Controls()
+        {
+            let source = media.CurrentSrc().0;
+            info.gif_video_url = self
+                .window
+                .Document()
+                .url()
+                .join(&source)
+                .ok()
+                .filter(|url| matches!(url.scheme(), "http" | "https"))
+                .map(ServoUrl::into_url);
+        }
         let mut items = Vec::new();
         if let Some(anchor_element) = anchor_element.as_ref() {
             info.flags.insert(ContextMenuElementInformationFlags::Link);

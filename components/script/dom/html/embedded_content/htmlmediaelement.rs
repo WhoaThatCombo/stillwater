@@ -1670,10 +1670,22 @@ impl HTMLMediaElement {
         }
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#allowed-to-play>
+    /// Stillwater: media in a page the browser loaded by itself (a restored or reloaded tab)
+    /// waits until the user interacts with that page; see `base::autoplay`.
+    fn allowed_to_play(&self) -> bool {
+        let window = self.owner_window();
+        !servo_base::autoplay::is_blocked(window.webview_id()) || window.has_sticky_activation()
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#eligible-for-autoplay>
     fn eligible_for_autoplay(&self) -> bool {
         // its can autoplay flag is true;
         self.autoplaying.get() &&
+
+        // Stillwater: the element is allowed to play (the spec checks this where autoplay
+        // starts playback).
+        self.allowed_to_play() &&
 
         // its paused attribute is true;
         self.Paused() &&
@@ -3755,8 +3767,17 @@ impl HTMLMediaElementMethods<crate::DomTypeHolder> for HTMLMediaElement {
     fn Play(&self, cx: &mut CurrentRealm) -> RootedPromise {
         let promise = Promise::new_in_realm(cx);
 
-        // TODO Step 1. If the media element is not allowed to play, then return a promise rejected
+        // Step 1. If the media element is not allowed to play, then return a promise rejected
         // with a "NotAllowedError" DOMException.
+        if !self.allowed_to_play() {
+            promise.reject_error(
+                cx,
+                Error::NotAllowed(Some(
+                    "Playback waits for the user to interact with the page".into(),
+                )),
+            );
+            return promise;
+        }
 
         // Step 2. If the media element's error attribute is not null and its code is
         // MEDIA_ERR_SRC_NOT_SUPPORTED, then return a promise rejected with a "NotSupportedError"
