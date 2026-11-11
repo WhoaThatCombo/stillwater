@@ -129,6 +129,7 @@ button {
 }
 
 #toolbar button {
+  flex: none;
   width: 30px;
   height: 30px;
   border-radius: var(--toolbarbutton-border-radius);
@@ -1270,6 +1271,7 @@ body.no-spaces #ws-delete {
 /* Incognito windows (desktop/incognito.rs): a purple sidebar (its background comes from the
    window, see Sidebar::background) with an "Incognito" label in the top row. */
 #incognito-badge {
+  flex: none;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -1289,6 +1291,22 @@ body.no-spaces #ws-delete {
 
 #incognito-badge[hidden] {
   display: none;
+}
+
+/* A sidebar too narrow for the label keeps the lock alone (sidebar.js fitIncognitoBadge). */
+#toolbar.tight #incognito-badge {
+  gap: 0;
+  margin-left: 0;
+  padding: 2px 5px;
+  font-size: 0;
+}
+
+#toolbar.tight {
+  gap: 1px;
+}
+
+#toolbar.tight button {
+  width: 26px;
 }
 
 :root.incognito {

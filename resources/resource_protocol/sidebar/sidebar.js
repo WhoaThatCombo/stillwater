@@ -313,6 +313,15 @@ function pinMenu(pin, essential) {
   return items;
 }
 
+// The "Incognito" label drops to its lock when the top row has no room for it (a narrow
+// sidebar), rather than squeezing the buttons beside it into each other.
+function fitIncognitoBadge() {
+  const toolbar = $("toolbar");
+  toolbar.classList.remove("tight");
+  if (!$("incognito-badge").hidden && toolbar.scrollWidth > toolbar.clientWidth) toolbar.classList.add("tight");
+}
+window.addEventListener("resize", fitIncognitoBadge);
+
 // ---- A tab closed with the mouse leaves the list in this frame and the rows below move up
 // at once (so the next row's close button is under the cursor), rather than when Rust's next
 // state push arrives. ----
@@ -968,6 +977,7 @@ function render() {
   // Before the colours are worked out (renderWorkspaces): incognito has its own.
   document.documentElement.classList.toggle("incognito", !!state.incognito);
   $("incognito-badge").hidden = !state.incognito;
+  fitIncognitoBadge();
   renderCompare();
   renderPasswordOffer();
   renderKey();
