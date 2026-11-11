@@ -271,9 +271,27 @@ impl HeadedWindow {
         let window_handle = winit_window
             .window_handle()
             .expect("could not get window handle from window");
+        // Windows: start animation frames on the monitor's vertical blank (see `vsync`), not
+        // on an 8 ms timer. STILLWATER_VSYNC=0 goes back to the timer.
+        #[cfg(target_os = "windows")]
+        let window_rendering_context = match window_handle.as_raw() {
+            RawWindowHandle::Win32(handle)
+                if std::env::var_os("STILLWATER_VSYNC").is_none_or(|value| value != "0") =>
+            {
+                WindowRenderingContext::new_with_refresh_driver(
+                    display_handle,
+                    window_handle,
+                    inner_size,
+                    Rc::new(super::vsync::VsyncRefreshDriver::new(handle.hwnd.get())),
+                )
+            },
+            _ => WindowRenderingContext::new(display_handle, window_handle, inner_size),
+        };
+        #[cfg(not(target_os = "windows"))]
+        let window_rendering_context =
+            WindowRenderingContext::new(display_handle, window_handle, inner_size);
         let window_rendering_context = Rc::new(
-            WindowRenderingContext::new(display_handle, window_handle, inner_size)
-                .expect("Could not create RenderingContext for Window"),
+            window_rendering_context.expect("Could not create RenderingContext for Window"),
         );
 
         // Setup for GL accelerated media handling. This is only active on certain Linux platforms

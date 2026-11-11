@@ -42,6 +42,8 @@ pub(crate) mod single_instance;
 mod splash;
 mod tracing;
 mod updater;
+#[cfg(target_os = "windows")]
+mod vsync;
 #[cfg(feature = "webxr")]
 mod webxr;
 mod workspaces;
