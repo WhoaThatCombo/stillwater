@@ -126,6 +126,10 @@ pub(crate) struct AnimationRefreshDriverObserver {
 
     /// Whether or not we are currently animating via a timer.
     pub(crate) animating: Cell<bool>,
+
+    /// Stillwater: frame starts in a row at which no tick was sent because the previous frame
+    /// was still being built (see `frame_started`).
+    ticks_held_back: Cell<u8>,
 }
 
 impl AnimationRefreshDriverObserver {
@@ -133,6 +137,7 @@ impl AnimationRefreshDriverObserver {
         Self {
             constellation_sender,
             animating: Default::default(),
+            ticks_held_back: Default::default(),
         }
     }
 
@@ -175,6 +180,26 @@ impl RefreshDriverObserver for AnimationRefreshDriverObserver {
             self.animating.set(false);
             return false;
         }
+
+        // Stillwater: back-pressure. While WebRender is still building the frame from the last
+        // tick, another tick only queues a second rendering update behind it (the script thread
+        // makes it, WebRender builds it, and it is shown one frame late or never): wait for the
+        // next frame start instead. With display-paced ticks (164 Hz) and a page whose frames
+        // take longer than a refresh, this keeps latency at one frame instead of a growing queue.
+        // At most a few frame starts in a row, so a frame count that never drops (a frame
+        // WebRender dropped) can't stop animations.
+        // Off unless STILLWATER_FRAME_BACKPRESSURE=1: measured in an off-screen window (whose
+        // presents block ~31 ms), it halved a CSS animation's frame rate (28 -> 16 Hz), because
+        // the previous frame is still "pending" until the shell paints it after the present.
+        // It needs checking on a real screen before it can be on by default.
+        static BACKPRESSURE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+            std::env::var_os("STILLWATER_FRAME_BACKPRESSURE").is_some_and(|value| value == "1")
+        });
+        if *BACKPRESSURE && painter.has_pending_frames() && self.ticks_held_back.get() < 3 {
+            self.ticks_held_back.set(self.ticks_held_back.get() + 1);
+            return true;
+        }
+        self.ticks_held_back.set(0);
 
         // Request new animation frames from all animating WebViews.
         if let Err(error) =
