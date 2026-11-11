@@ -146,6 +146,9 @@ pub struct HeadedWindow {
     pointer_over_chrome: Cell<bool>,
     /// The monitor's frame interval and when it was looked up (`frame_interval`).
     frame_interval_cache: Cell<Option<(std::time::Instant, std::time::Duration)>>,
+    /// The window is minimised (or reported occluded): its pages are hidden, so they are
+    /// throttled like background tabs and make no frames (`set_minimized_state`).
+    minimized: Cell<bool>,
 }
 
 /// The longest a repaint waits for a newly shown tab's first frame (see
@@ -361,6 +364,7 @@ impl HeadedWindow {
             caption_press: Cell::new(None),
             pointer_over_chrome: Cell::new(true),
             frame_interval_cache: Cell::new(None),
+            minimized: Cell::new(false),
         })
     }
 
@@ -448,6 +452,39 @@ impl HeadedWindow {
         let interval = self.lookup_frame_interval();
         self.frame_interval_cache.set(Some((now, interval)));
         interval
+    }
+
+    /// The window was minimised (or occluded) or came back. While it is, its pages (the active
+    /// tab, split view, Glance and the sidebar) are hidden, which throttles them like background
+    /// tabs (no animation frames, slower timers, silent videos paused; audio keeps playing), so
+    /// the window is only repainted when asked: an animating page in a minimised window used
+    /// to keep rendering at full rate, e.g. while the user plays a game.
+    fn set_minimized_state(&self, window: &ServoShellWindow, minimized: bool) {
+        if self.minimized.replace(minimized) == minimized {
+            return;
+        }
+        diagnostics::log(if minimized {
+            "window minimised: pages throttled"
+        } else {
+            "window restored"
+        });
+        let mut webviews: Vec<WebView> = window.active_webview().into_iter().collect();
+        if let Ok(gui) = self.gui.try_borrow() {
+            webviews.extend(gui.pane_webview(PaneKind::Split));
+            webviews.extend(gui.pane_webview(PaneKind::Glance));
+            webviews.extend(gui.sidebar.webview().cloned());
+        }
+        for webview in webviews {
+            if minimized {
+                webview.hide();
+            } else {
+                webview.show();
+            }
+        }
+        if !minimized {
+            window.set_needs_update();
+            self.request_repaint(window);
+        }
     }
 
     /// Whether the window was painted less than `within` ago.
@@ -1629,7 +1666,19 @@ impl HeadedWindow {
         // Handle resize events first, so that any subsequent redrawing draws onto a buffer of the
         // correct size.
         let mut resized = false;
+        // Minimising reports a 0x0 size on Windows: keep the old size (no relayout of the page
+        // to nothing and back) and throttle the pages until the window comes back.
+        if let WindowEvent::Resized(size) = event {
+            let minimized = size.width == 0 ||
+                size.height == 0 ||
+                self.winit_window.is_minimized() == Some(true);
+            self.set_minimized_state(&window, minimized);
+        }
+        if let WindowEvent::Occluded(occluded) = event {
+            self.set_minimized_state(&window, occluded);
+        }
         if let WindowEvent::Resized(new_inner_size) = event &&
+            !self.minimized.get() &&
             self.inner_size.get() != new_inner_size
         {
             self.inner_size.set(new_inner_size);

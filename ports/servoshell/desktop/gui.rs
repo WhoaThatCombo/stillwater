@@ -1075,8 +1075,12 @@ impl Gui {
             // If the layout changed size, then update the size of the WebView and also
             // the size of its RenderingContext.
             let size = Size2D::new(new_content_rect.width(), new_content_rect.height()) * scale;
+            // Not to nothing (a minimised window): the page would lay out at zero size and
+            // again at its real size when the window comes back.
             if let Some(webview) = window.active_webview() &&
-                size != webview.size()
+                size != webview.size() &&
+                size.width >= 1.0 &&
+                size.height >= 1.0
             {
                 // `rect` is sized to just the WebView viewport, which is required by
                 // `OffscreenRenderingContext` See:
