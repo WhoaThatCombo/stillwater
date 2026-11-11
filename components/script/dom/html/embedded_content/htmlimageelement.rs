@@ -206,7 +206,7 @@ impl HTMLImageElement {
                     }),
                 );
                 if receiver
-                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .recv_timeout(std::time::Duration::from_secs(1))
                     .is_err()
                 {
                     warn!("Timed out rasterizing a vector image for createImageBitmap");
