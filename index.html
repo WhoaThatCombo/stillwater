@@ -435,8 +435,8 @@
           <figcaption>A "Work" space with a blue accent. Each space keeps its own tabs, and its colour tints the window around the page.</figcaption>
         </figure>
         <figure>
-          <img src="assets/stillwater-github.png" width="1296" height="839" loading="lazy" alt="Stillwater 0.8.9 showing the servo/servo repository on GitHub, with the file list, tabs and sidebar rendered">
-          <figcaption>Stillwater 0.8.9 on GitHub. This is an unedited capture of the browser window: the page is laid out and drawn by Servo.</figcaption>
+          <img src="assets/stillwater-github.png" width="1296" height="839" loading="lazy" alt="Stillwater showing the servo/servo repository on GitHub, with the file list, tabs and sidebar rendered">
+          <figcaption>Stillwater on GitHub. This is an unedited capture of the browser window: the page is laid out and drawn by Servo.</figcaption>
         </figure>
       </section>
 
@@ -480,6 +480,14 @@
             <p>Built in and on by default, using uBlock Origin's default filter lists.</p>
           </li>
           <li>
+            <strong>Incognito</strong>
+            <p><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>N</kbd> opens a private window with its own cookies. Nothing from it is saved: no history, site data or session.</p>
+          </li>
+          <li>
+            <strong>Tabs ready at launch</strong>
+            <p>Last session's tabs load quietly in the background when you start, so you don't click one and wait.</p>
+          </li>
+          <li>
             <strong>Moving in from Zen</strong>
             <p>Import your spaces, pinned tabs, bookmarks, history, passwords and cookies from Zen Browser on the same computer.</p>
           </li>
@@ -517,7 +525,7 @@ rustup set default-host x86_64-pc-windows-msvc</code></pre>
       <section id="sites">
         <h2>Which sites work</h2>
         <div class="prose">
-          <p>Servo is a young engine, so this is the first thing to ask. Each release is checked against a list of 25 popular sites; in 0.8.9, 23 of them are usable.</p>
+          <p>Servo is a young engine, so this is the first thing to ask. Each release is checked against a list of 25 popular sites; in 0.9.0, 23 of them are usable.</p>
           <p><strong>Work well in our testing:</strong> GitHub, Wikipedia, YouTube, Reddit, X, Twitch, the Steam store, and most news, documentation and blog sites.</p>
           <p><strong>Known to break:</strong> microsoft.com and Notion have layout problems, Discord's sign-in page doesn't display, and anything that needs DRM, such as Netflix, won't play.</p>
           <p class="muted">Emoji show as outlines, and text that should end in "…" is cut off without it. If a site is broken for you, right-click its tab and choose <strong>Report site isn't working</strong>.</p>
@@ -528,7 +536,7 @@ rustup set default-host x86_64-pc-windows-msvc</code></pre>
         <h2>What it can't do yet</h2>
         <div class="prose">
           <p>Stillwater is a hobby project on top of an engine that's still maturing. Some sites will look wrong or not load. There are no extensions and no DRM video like Netflix, and it runs on Windows only for now.</p>
-          <p>Next up: a private browsing mode, faster tab switching and start-up, and scrollbars for scrolling areas inside pages. Follow along in the <a href="https://github.com/WhoaThatCombo/stillwater/releases">release notes</a>, or bring ideas and bug reports to the <a href="https://github.com/WhoaThatCombo/stillwater/issues">issue tracker</a>.</p>
+          <p>Next up: smoother wheel scrolling, scrollbars for scrolling areas inside pages, and more sites working properly. Follow along in the <a href="https://github.com/WhoaThatCombo/stillwater/releases">release notes</a>, or bring ideas and bug reports to the <a href="https://github.com/WhoaThatCombo/stillwater/issues">issue tracker</a>.</p>
         </div>
       </section>
     </main>
