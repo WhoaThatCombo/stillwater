@@ -31,6 +31,8 @@ pub(crate) mod passwords;
 pub(crate) mod panes;
 mod protocols;
 mod report;
+pub(crate) mod scrollbar;
+pub(crate) mod scrollbar_geometry;
 pub(crate) mod session;
 mod settings;
 pub(crate) mod shutdown;

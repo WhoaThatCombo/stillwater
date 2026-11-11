@@ -16,7 +16,7 @@ use profile_traits::{mem, time};
 use servo_base::generic_channel::RoutedReceiver;
 use servo_constellation_traits::EmbedderToConstellationMessage;
 
-pub use crate::paint::{Paint, WebRenderDebugOption};
+pub use crate::paint::{Paint, RootScrollState, WebRenderDebugOption};
 
 #[macro_use]
 mod tracing;

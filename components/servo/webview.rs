@@ -716,6 +716,18 @@ impl WebView {
         self.servo().paint().page_zoom(self.id())
     }
 
+    /// Stillwater: the scroll state of this [`WebView`]'s viewport (its root scroll node) as
+    /// currently painted, for drawing overlay scrollbars. `None` before the first display list.
+    pub fn root_scroll_state(&self) -> Option<paint::RootScrollState> {
+        self.servo().paint().root_scroll_state(self.id())
+    }
+
+    /// Stillwater: scroll this [`WebView`]'s viewport by `delta` page pixels (`[x, y]`, as in
+    /// [`WebView::root_scroll_state`]), whatever is under the pointer, like keyboard scrolling.
+    pub fn scroll_viewport_by(&self, delta: [f32; 2]) {
+        self.servo().paint().scroll_viewport_by(self.id(), delta);
+    }
+
     /// Whether this [`WebView`]'s current page has painted contentful content (text,
     /// images, ...: see <https://w3c.github.io/paint-timing/#first-contentful-paint>).
     /// Before that its frames are blank.

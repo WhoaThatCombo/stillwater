@@ -90,6 +90,7 @@ const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 wireChoices($("theme"), (value) => send("set-theme", value));
 wireChoices($("startup"), (value) => send("session-startup", value));
 wireChoices($("newtab"), (value) => send("set-newtab", value));
+wireChoices($("scrollbar"), (value) => send("set-scrollbar", value));
 $("compact").addEventListener("click", () => send("toggle-compact"));
 $("lowmem").addEventListener("click", () => send("set-unload-low-memory", state.settings && state.settings.unloadOnLowMemory ? "0" : "1"));
 $("splash").addEventListener("click", () => send("set-splash", state.settings && state.settings.startupAnimation === false ? "1" : "0"));
@@ -101,6 +102,7 @@ function renderGeneral() {
   markChoices($("theme"), settings.theme || "system");
   markChoices($("startup"), settings.startup || "restore");
   markChoices($("newtab"), settings.newTabBar === false ? "0" : "1");
+  markChoices($("scrollbar"), settings.scrollbar || "auto");
   pressed($("compact"), state.compact);
   choices($("engines"), (settings.searchEngines || []).map((engine) => ({ label: engine.name, value: engine.id })),
     settings.searchEngine, (id) => send("set-search", id));

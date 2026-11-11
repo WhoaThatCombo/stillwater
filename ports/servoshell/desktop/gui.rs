@@ -126,6 +126,8 @@ pub struct Gui {
     /// The startup animation, until it has finished (or was never wanted).
     splash: Option<crate::desktop::splash::Splash>,
     splash_decided: bool,
+    /// The page scrollbars drawn over each page view.
+    pub(crate) scrollbars: RefCell<crate::desktop::scrollbar::Scrollbars>,
 }
 
 #[cfg(any(
@@ -320,6 +322,7 @@ impl Gui {
             password_chooser_rect: None,
             splash: Some(crate::desktop::splash::Splash::new()),
             splash_decided: false,
+            scrollbars: Default::default(),
         }
     }
 
@@ -987,6 +990,7 @@ impl Gui {
             find_bar,
             password_chooser_rect,
             splash,
+            scrollbars,
             ..
         } = self;
         pane_control_rects.borrow_mut().clear();
@@ -1196,6 +1200,34 @@ impl Gui {
                     None => {},
                 }
                 *glance_rect = Some(rect);
+            }
+
+            // The page scrollbars, over the pages that take input: only the Glance while it's
+            // open, none while the floating address bar is.
+            {
+                let mut views = Vec::new();
+                if command_bar.webview().is_none() {
+                    if let (Some(pane), Some(rect)) = (glance.as_ref(), *glance_rect) {
+                        if pane.webview.load_status() != LoadStatus::Started {
+                            views.push((
+                                pane.webview.clone(),
+                                rect,
+                                LayerId::new(Order::Foreground, Id::new("glance")),
+                            ));
+                        }
+                    } else {
+                        let layer = LayerId::new(Order::Middle, Id::new("scrollbars"));
+                        if content_ready && let Some(webview) = window.active_webview() {
+                            views.push((webview, new_content_rect, layer));
+                        }
+                        if let (Some(pane), Some(rect)) = (split.as_ref(), new_split_rect) &&
+                            pane.webview.load_status() != LoadStatus::Started
+                        {
+                            views.push((pane.webview.clone(), rect, layer));
+                        }
+                    }
+                }
+                scrollbars.get_mut().paint(ctx, &views);
             }
 
             command_bar.paint(ctx, content_area, scale, theme);
