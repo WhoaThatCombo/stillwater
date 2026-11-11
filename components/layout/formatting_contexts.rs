@@ -530,6 +530,7 @@ impl IndependentFormattingContext {
             .cached_independent_formatting_context_layout_if_applicable(
                 positioning_context,
                 containing_block_for_children,
+                lazy_block_size,
             ) {
             Ok(cached_layout_result) => return (cached_layout_result, true),
             Err(v) => v,
@@ -554,6 +555,7 @@ impl IndependentFormattingContext {
             &child_positioning_context,
             content_block_size_under_default_constraint,
             &result,
+            lazy_block_size.resolved(),
         );
         positioning_context.append(child_positioning_context);
         (result, false)

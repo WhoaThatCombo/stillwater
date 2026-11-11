@@ -31,7 +31,9 @@ use crate::fragment_tree::{
 };
 use crate::geom::LogicalSides1D;
 use crate::positioned::{PositioningContext, relative_adjustement};
-use crate::sizing::{ComputeInlineContentSizes, InlineContentSizesResult, SizeConstraint};
+use crate::sizing::{
+    ComputeInlineContentSizes, InlineContentSizesResult, LazySize, SizeConstraint,
+};
 use crate::traversal::ElementDamageSet;
 
 /// A box tree node that handles containing information about style and the original DOM
@@ -228,6 +230,7 @@ impl LayoutBoxBase {
         &self,
         positioning_context: &mut PositioningContext,
         containing_block_for_children: &ContainingBlock<'_>,
+        lazy_block_size: &LazySize,
     ) -> Result<IndependentFormattingContextLayoutResult, Option<Au>> {
         if self.cached_layout_result_dirty.load(Ordering::Relaxed) {
             return Err(None);
@@ -248,6 +251,14 @@ impl LayoutBoxBase {
         ) {
             return Err(cache.content_block_size_under_default_constraint);
         }
+        // The box's own block size is an input too when the layout used it (a flex or grid
+        // container aligning its contents within it). A flex item whose main size isn't
+        // definite gets the same containing block for its hypothetical and its flexed size.
+        if cache.resolved_block_size.is_some_and(|resolved| {
+            resolved != lazy_block_size.peek(cache.result.content_block_size)
+        }) {
+            return Err(cache.content_block_size_under_default_constraint);
+        }
 
         positioning_context.append(cache.positioning_context.clone());
         Ok(cache.result.clone())
@@ -259,6 +270,7 @@ impl LayoutBoxBase {
         child_positioning_context: &PositioningContext,
         content_block_size_under_default_constraint: Option<Au>,
         result: &IndependentFormattingContextLayoutResult,
+        resolved_block_size: Option<Au>,
     ) {
         self.cached_layout_result_dirty
             .store(false, Ordering::Relaxed);
@@ -267,6 +279,7 @@ impl LayoutBoxBase {
             positioning_context: child_positioning_context.clone(),
             containing_block_for_children_size: containing_block_for_children.size.clone(),
             content_block_size_under_default_constraint,
+            resolved_block_size,
         };
         if content_block_size_under_default_constraint.is_none() &&
             result_and_inputs.applicable_for_block_size(
@@ -434,6 +447,9 @@ pub(crate) struct IndependentFormattingContextLayoutResultAndInputs {
     /// A [`PositioningContext`] holding absolutely-positioned descendants
     /// collected during the layout of this box.
     pub positioning_context: PositioningContext,
+
+    /// The block size the box itself had, if this layout resolved it.
+    pub resolved_block_size: Option<Au>,
 
     /// The [`IndependentFormattingContextLayoutResult::content_block_size`]
     /// that we would get if [`Self::containing_block_for_children_size`] had

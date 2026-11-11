@@ -911,6 +911,30 @@ impl<'a> LazySize<'a> {
             )
         })
     }
+
+    /// The size this was resolved to, if a layout has resolved it.
+    pub(crate) fn resolved(&self) -> Option<Au> {
+        self.result.get().copied()
+    }
+
+    /// What [`LazySize::resolve()`] would return for this intrinsic size, without
+    /// keeping the result when it isn't resolved yet.
+    pub(crate) fn peek(&self, content_size: Au) -> Au {
+        if let Some(result) = self.result.get() {
+            return *result;
+        }
+        let Some(ref data) = self.data else {
+            return content_size;
+        };
+        data.sizes.resolve(
+            data.axis,
+            data.automatic_size,
+            data.get_automatic_minimum_size,
+            data.stretch_size,
+            || content_size.into(),
+            data.is_table,
+        )
+    }
 }
 
 impl From<Au> for LazySize<'_> {
