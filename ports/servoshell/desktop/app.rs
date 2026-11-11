@@ -528,7 +528,19 @@ impl ApplicationHandler<AppEvent> for App {
             // "Copying GIF…" / "GIF copied" in the status line.
             let copy_notice_changed = crate::desktop::capture::take_changed();
             for window in state.windows().iter() {
-                window.set_needs_repaint();
+                // A safety net for frames nobody asked to show (the window staying white until
+                // the mouse moves), not a frame clock: while the loop is busy it ticks every
+                // 16 ms, and repainting on each tick redrew the whole window (page, sidebar,
+                // chrome) about 60 times a second during any page load, animation or the
+                // 750 ms after every input event, even when nothing had changed. Real changes
+                // already ask for a repaint (new frames, egui, the sidebar's waker).
+                let painted_recently = window
+                    .platform_window()
+                    .as_headed_window()
+                    .is_some_and(|headed| headed.painted_within(std::time::Duration::from_millis(250)));
+                if !painted_recently || crate::desktop::scrollbar::wake_due() {
+                    window.set_needs_repaint();
+                }
                 if copy_notice_changed {
                     window.set_needs_update();
                 }

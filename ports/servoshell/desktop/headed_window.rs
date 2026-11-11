@@ -141,6 +141,11 @@ pub struct HeadedWindow {
     last_sidebar_handle_press: Cell<Option<std::time::Instant>>,
     /// The top bar's caption button the left button went down on, until it is released.
     caption_press: Cell<Option<TopBarHit>>,
+    /// Whether the last mouse move was over egui's own areas (not a page), so moving onto a page
+    /// still gets the one frame that clears egui's hover state and tooltips.
+    pointer_over_chrome: Cell<bool>,
+    /// The monitor's frame interval and when it was looked up (`frame_interval`).
+    frame_interval_cache: Cell<Option<(std::time::Instant, std::time::Duration)>>,
 }
 
 /// The longest a repaint waits for a newly shown tab's first frame (see
@@ -336,6 +341,8 @@ impl HeadedWindow {
             over_sidebar_handle: Cell::new(false),
             last_sidebar_handle_press: Cell::new(None),
             caption_press: Cell::new(None),
+            pointer_over_chrome: Cell::new(true),
+            frame_interval_cache: Cell::new(None),
         })
     }
 
@@ -412,6 +419,25 @@ impl HeadedWindow {
     /// How long a frame lasts on the monitor the window is on (its refresh rate: 60 Hz, 144 Hz,
     /// 240 Hz...), so repaints can be paced like vsync. Unknown rates count as 60 Hz.
     pub(crate) fn frame_interval(&self) -> std::time::Duration {
+        // Asked on every repaint request (up to the monitor's rate); looking the rate up means
+        // MonitorFromWindow + GetMonitorInfo + EnumDisplaySettings, so keep it for a second.
+        let now = std::time::Instant::now();
+        if let Some((at, interval)) = self.frame_interval_cache.get() &&
+            now.duration_since(at) < std::time::Duration::from_secs(1)
+        {
+            return interval;
+        }
+        let interval = self.lookup_frame_interval();
+        self.frame_interval_cache.set(Some((now, interval)));
+        interval
+    }
+
+    /// Whether the window was painted less than `within` ago.
+    pub(crate) fn painted_within(&self, within: std::time::Duration) -> bool {
+        self.last_paint.get().is_some_and(|last| last.elapsed() < within)
+    }
+
+    fn lookup_frame_interval(&self) -> std::time::Duration {
         let millihertz = self
             .winit_window
             .current_monitor()
@@ -1897,7 +1923,19 @@ impl HeadedWindow {
                     .borrow_mut()
                     .on_window_event(&self.winit_window, event);
 
-                if response.repaint && *event != WindowEvent::RedrawRequested {
+                // egui asks for a repaint on every mouse move (egui-winit 0.34 lib.rs:333-338),
+                // which redrew the whole window (page, sidebar, chrome) for every move over a
+                // page even though nothing changed. Over a page only the move off egui's own
+                // areas needs a frame (to clear their hover state and tooltips).
+                let repaint = match event {
+                    WindowEvent::CursorMoved { .. } => {
+                        let over_chrome = should_forward_mouse_event_to_egui();
+                        let was_over_chrome = self.pointer_over_chrome.replace(over_chrome);
+                        response.repaint && (over_chrome || was_over_chrome)
+                    },
+                    _ => response.repaint,
+                };
+                if repaint && *event != WindowEvent::RedrawRequested {
                     self.winit_window.request_redraw();
                 }
 

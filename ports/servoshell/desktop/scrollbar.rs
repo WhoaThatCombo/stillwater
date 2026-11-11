@@ -79,6 +79,11 @@ pub(crate) fn next_wake() -> Option<Instant> {
     WAKE.with(Cell::get).filter(|at| *at > Instant::now())
 }
 
+/// Whether a frame asked for with `wake_at` is due now (the bars repaint on that tick).
+pub(crate) fn wake_due() -> bool {
+    WAKE.with(Cell::get).is_some_and(|at| at <= Instant::now())
+}
+
 /// Ask for a frame at `at` (the earliest pending request wins; past ones are dropped).
 fn wake_at(at: Instant) {
     WAKE.with(|cell| {
@@ -178,6 +183,8 @@ impl Scrollbars {
         let now = Instant::now();
         let mode = mode();
         self.views.clear();
+        // This frame asks again below for every frame a bar still needs.
+        WAKE.with(|cell| cell.set(None));
         if mode == ScrollbarMode::Hidden {
             self.cancel();
             self.hover = None;
