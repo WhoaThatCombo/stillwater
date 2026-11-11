@@ -187,6 +187,9 @@ pub(crate) struct WebGLProgram {
     active_uniforms: DomRefCell<Box<[ActiveUniformInfo]>>,
     #[no_trace]
     active_uniform_blocks: DomRefCell<Box<[ActiveUniformBlockInfo]>>,
+    /// The uniform buffer binding point of each active uniform block (`uniformBlockBinding`),
+    /// by block index. GLSL ES 3.00 has no `binding` layout qualifier, so they start at 0.
+    uniform_block_bindings: DomRefCell<Box<[u32]>>,
     transform_feedback_varyings_length: Cell<i32>,
     transform_feedback_mode: Cell<i32>,
     droppable: RefCell<DroppableWebGLProgram>,
@@ -204,6 +207,7 @@ impl WebGLProgram {
             active_attribs: DomRefCell::new(vec![].into()),
             active_uniforms: DomRefCell::new(vec![].into()),
             active_uniform_blocks: DomRefCell::new(vec![].into()),
+            uniform_block_bindings: DomRefCell::new(vec![].into()),
             transform_feedback_varyings_length: Default::default(),
             transform_feedback_mode: Default::default(),
             droppable: RefCell::new(DroppableWebGLProgram::new(id, context)),
@@ -300,6 +304,7 @@ impl WebGLProgram {
         *self.active_attribs.borrow_mut() = Box::new([]);
         *self.active_uniforms.borrow_mut() = Box::new([]);
         *self.active_uniform_blocks.borrow_mut() = Box::new([]);
+        *self.uniform_block_bindings.borrow_mut() = Box::new([]);
 
         match self.fragment_shader.get() {
             Some(ref shader) if shader.successfully_compiled() => {},
@@ -353,6 +358,8 @@ impl WebGLProgram {
             .set(link_info.transform_feedback_mode);
         *self.active_attribs.borrow_mut() = link_info.active_attribs;
         *self.active_uniforms.borrow_mut() = link_info.active_uniforms;
+        *self.uniform_block_bindings.borrow_mut() =
+            vec![0; link_info.active_uniform_blocks.len()].into();
         *self.active_uniform_blocks.borrow_mut() = link_info.active_uniform_blocks;
         Ok(())
     }
@@ -367,6 +374,11 @@ impl WebGLProgram {
 
     pub(crate) fn active_uniform_blocks(&self) -> Ref<'_, [ActiveUniformBlockInfo]> {
         Ref::map(self.active_uniform_blocks.borrow(), |blocks| &**blocks)
+    }
+
+    /// The uniform buffer binding point of each active uniform block, by block index.
+    pub(crate) fn uniform_block_bindings(&self) -> Ref<'_, [u32]> {
+        Ref::map(self.uniform_block_bindings.borrow(), |bindings| &**bindings)
     }
 
     /// glValidateProgram
@@ -730,9 +742,12 @@ impl WebGLProgram {
             return Err(WebGLError::InvalidValue);
         }
 
-        let mut active_uniforms = self.active_uniforms.borrow_mut();
-        if active_uniforms.len() > block_binding as usize {
-            active_uniforms[block_binding as usize].bind_index = Some(block_binding);
+        if let Some(binding) = self
+            .uniform_block_bindings
+            .borrow_mut()
+            .get_mut(block_index as usize)
+        {
+            *binding = block_binding;
         }
 
         self.upcast()
