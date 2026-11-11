@@ -231,10 +231,7 @@ impl Painter {
         ));
 
         let painter_id = PainterId::next();
-        let (mut webrender_renderer, webrender_api_sender) = webrender::create_webrender_instance(
-            webrender_gl.clone(),
-            Box::new(RenderNotifier::new(painter_id, paint.paint_proxy.clone())),
-            webrender::WebRenderOptions {
+        let options = webrender::WebRenderOptions {
                 // We force the use of optimized shaders here because rendering is broken
                 // on Android emulators with unoptimized shaders. This is due to a known
                 // issue in the emulator's OpenGL emulation layer.
@@ -261,9 +258,18 @@ impl Painter {
                 render_backend_hooks: Some(Box::new(BoostWebRenderThread)),
                 scene_builder_hooks: Some(Box::new(BoostWebRenderThread)),
                 shared_font_namespace: Some(painter_id.into()),
+                // Linked shader binaries survive restarts (see program_cache.rs).
+                cached_programs: Some(paint.shader_store.program_cache(&webrender_gl)),
                 ..Default::default()
-            },
-            None,
+            };
+        // Every painter on this GL context uses one set of shaders, so each program is
+        // compiled (or loaded from the cache) once per process, not once per painter.
+        let shared_shaders = paint.shader_store.shaders(&webrender_gl, &options);
+        let (mut webrender_renderer, webrender_api_sender) = webrender::create_webrender_instance(
+            webrender_gl.clone(),
+            Box::new(RenderNotifier::new(painter_id, paint.paint_proxy.clone())),
+            options,
+            shared_shaders.as_ref(),
         )
         .expect("Unable to initialize WebRender.");
 

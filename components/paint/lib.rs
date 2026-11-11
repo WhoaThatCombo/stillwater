@@ -25,6 +25,7 @@ mod paint;
 mod painter;
 mod pinch_zoom;
 mod pipeline_details;
+mod program_cache;
 mod refresh_driver;
 mod render_notifier;
 mod screenshot;

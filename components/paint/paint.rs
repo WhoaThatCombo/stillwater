@@ -140,6 +140,9 @@ pub struct Paint {
     /// a single [`RenderingContext`].
     painters: Vec<Rc<RefCell<Painter>>>,
 
+    /// Compiled shaders shared by the painters and kept on disk across launches.
+    pub(crate) shader_store: crate::program_cache::ShaderStore,
+
     /// A [`PaintProxy`] which can be used to allow other parts of Servo to communicate
     /// with this [`Paint`].
     pub(crate) paint_proxy: PaintProxy,
@@ -249,6 +252,7 @@ impl Paint {
         };
         Rc::new(RefCell::new(Paint {
             painters: Default::default(),
+            shader_store: Default::default(),
             paint_proxy: state.paint_proxy,
             event_loop_waker: state.event_loop_waker,
             shutdown_state: state.shutdown_state,
