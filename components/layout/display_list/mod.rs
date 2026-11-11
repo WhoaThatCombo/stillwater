@@ -1265,7 +1265,9 @@ impl Fragment {
         // Stillwater: selected glyphs are drawn in the selection's text colour (an author
         // `::selection { color }`, or HighlightText on the default highlight), the rest in the
         // text's own colour.
-        let text_color = rgba(*parent_style.get_color());
+        let text_color = state
+            .text_clip_color
+            .unwrap_or_else(|| rgba(*parent_style.get_color()));
         match Self::selected_text_color_and_range(fragment, builder, &parent_style) {
             None => builder.webrender_display_list_builder.push_text(
                 &common,
@@ -1973,7 +1975,9 @@ impl<'a> BuilderForBoxFragment<'a> {
         let masked = self.push_background_mask(builder, state, painter);
         let b = painter.style.get_background();
         let background_color = painter.style.resolve_color(&b.background_color);
-        if background_color.alpha > 0.0 {
+        if background_color.alpha > 0.0 &&
+            !background::layer_is_clipped_to_text(painter.style, b.background_image.0.len() - 1)
+        {
             // https://drafts.csswg.org/css-backgrounds/#background-color
             // “The background color is clipped according to the background-clip
             //  value associated with the bottom-most background image layer.”
@@ -2217,6 +2221,10 @@ impl<'a> BuilderForBoxFragment<'a> {
         let node = self.fragment.base.tag.map(|tag| tag.node);
         // Reverse because the property is top layer first, we want to paint bottom layer first.
         for (index, image) in b.background_image.0.iter().enumerate().rev() {
+            // Drawn as the colour of the text instead (`text_clip_fallback_color`).
+            if background::layer_is_clipped_to_text(style, index) {
+                continue;
+            }
             let Ok(resolved_image) = builder.image_resolver.resolve_image(node, image) else {
                 continue;
             };

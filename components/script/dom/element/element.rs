@@ -1543,43 +1543,9 @@ impl<'dom> LayoutDom<'dom, Element> {
             push(PropertyDeclaration::AspectRatio(Box::new(aspect_ratio)));
         }
 
-        let cols = self
-            .downcast::<HTMLTextAreaElement>()
-            .map(LayoutDom::get_cols);
-        if let Some(cols) = cols {
-            let cols = cols as i32;
-            if cols > 0 {
-                // TODO(mttr) ServoCharacterWidth uses the size math for <input type="text">, but
-                // the math for <textarea> is a little different since we need to take
-                // scrollbar size into consideration (but we don't have a scrollbar yet!)
-                //
-                // https://html.spec.whatwg.org/multipage/#textarea-effective-width
-                let value = specified::NoCalcLength::from_servo_character_width(cols);
-                push(PropertyDeclaration::Width(
-                    specified::Size::LengthPercentage(NonNegative(
-                        specified::LengthPercentage::Length(value),
-                    )),
-                ));
-            }
-        }
-
-        let rows = self
-            .downcast::<HTMLTextAreaElement>()
-            .map(LayoutDom::get_rows);
-        if let Some(rows) = rows {
-            let rows = rows as i32;
-            if rows > 0 {
-                // TODO(mttr) This should take scrollbar size into consideration.
-                //
-                // https://html.spec.whatwg.org/multipage/#textarea-effective-height
-                let value = specified::NoCalcLength::from_em(rows as CSSFloat);
-                push(PropertyDeclaration::Height(
-                    specified::Size::LengthPercentage(NonNegative(
-                        specified::LengthPercentage::Length(value),
-                    )),
-                ));
-            }
-        }
+        // Stillwater: a `<textarea>`'s `cols` and `rows` are not width and height hints: they
+        // give its natural size (layout reads them through `textarea_cols_and_rows`), so that
+        // it can stretch as a flex or grid item and its padding is added to the size.
 
         if let Some(table) = self.downcast::<HTMLTableElement>() {
             if let Some(cellspacing) = table.get_cellspacing() {

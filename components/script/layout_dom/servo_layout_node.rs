@@ -28,6 +28,7 @@ use style::selector_parser::PseudoElement;
 use super::ServoLayoutElement;
 use crate::dom::bindings::root::LayoutDom;
 use crate::dom::element::Element;
+use crate::dom::html::htmltextareaelement::HTMLTextAreaElement;
 use crate::dom::layout_dom::NodeTypeIdWrapper;
 use crate::dom::node::{Node, NodeFlags};
 use crate::layout_dom::{
@@ -347,6 +348,14 @@ impl<'dom> LayoutNode<'dom> for ServoLayoutNode<'dom> {
 
     fn is_single_line_text_input(&self) -> bool {
         self.pseudo_element_chain.is_empty() && self.node.is_text_container_of_single_line_input()
+    }
+
+    fn textarea_cols_and_rows(&self) -> Option<(u32, u32)> {
+        if !self.pseudo_element_chain.is_empty() {
+            return None;
+        }
+        let textarea = self.node.downcast::<HTMLTextAreaElement>()?;
+        Some((textarea.get_cols(), textarea.get_rows()))
     }
 
     fn is_root_of_user_agent_widget(&self) -> bool {

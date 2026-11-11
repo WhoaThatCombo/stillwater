@@ -587,6 +587,9 @@ pub(crate) struct TraversalState {
     /// Note that this does not include the box currently being visited, see
     /// [`Self::container_timing_roots_including`].
     pub container_timing_roots: ContainerTimingRoots,
+    /// The colour text is drawn in under an ancestor with `background-clip: text`
+    /// (see `background::text_clip_fallback_color`).
+    pub text_clip_color: Option<webrender_api::ColorF>,
 }
 
 impl Default for TraversalState {
@@ -599,6 +602,7 @@ impl Default for TraversalState {
             accumulated_opacity: 1.0,
             containing_element_tag: Default::default(),
             container_timing_roots: Default::default(),
+            text_clip_color: None,
         }
     }
 }
@@ -648,6 +652,8 @@ impl TraversalState {
             text_decorations,
             accumulated_opacity: self.accumulated_opacity * style.slow_clone_opacity(),
             container_timing_roots: self.container_timing_roots_including(box_fragment),
+            text_clip_color: super::background::text_clip_fallback_color(&style)
+                .or(self.text_clip_color),
             // From <https://www.w3.org/TR/paint-timing/#sec-modifications-dom>:
             // > Let element be the Element which determines the containing block of text.
             // > Append text to element’s set of owned text nodes.
@@ -697,6 +703,7 @@ impl TraversalState {
                 positioning_fragment.style.borrow().slow_clone_opacity(),
             containing_element_tag: self.containing_element_tag,
             container_timing_roots: self.container_timing_roots.clone(),
+            text_clip_color: self.text_clip_color,
         }
     }
 
@@ -712,6 +719,7 @@ impl TraversalState {
                     .map_or(1.0, |fragment| fragment.style().slow_clone_opacity()),
             containing_element_tag: self.containing_element_tag,
             container_timing_roots: stacking_context.container_timing_roots.clone(),
+            text_clip_color: self.text_clip_color,
         }
     }
 }

@@ -522,7 +522,13 @@ impl HeadedWindow {
     /// Load restored tabs in the background (see `Sidebar::preload_tick`). Returns whether
     /// there's more to do.
     pub(crate) fn preload_tick(&self, window: &ServoShellWindow) -> bool {
-        self.gui.borrow_mut().sidebar.preload_tick(window)
+        let mut gui = self.gui.borrow_mut();
+        // Loading tabs in the background while the startup animation plays makes it stutter:
+        // wait for it to finish (a few seconds at most).
+        if gui.splash_playing() {
+            return true;
+        }
+        gui.sidebar.preload_tick(window)
     }
 
     /// Change the sidebar's state from outside a UI update (e.g. updater progress).

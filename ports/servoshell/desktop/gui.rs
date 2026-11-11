@@ -401,6 +401,11 @@ impl Gui {
     }
 
     /// What a press at `position` on the top bar hits, if it is on the top bar.
+    /// Whether the startup animation is on screen (or hasn't been decided against yet).
+    pub(crate) fn splash_playing(&self) -> bool {
+        self.splash.is_some()
+    }
+
     pub(crate) fn top_bar_hit(&self, position: Point2D<f32, DeviceIndependentPixel>) -> Option<TopBarHit> {
         let point = pos2(position.x, position.y);
         let bar = match (self.top_bar_rect, self.top_bar_zone) {

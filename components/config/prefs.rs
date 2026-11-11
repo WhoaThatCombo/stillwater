@@ -40,6 +40,11 @@ pub fn add_observer(observer: Box<dyn PreferencesObserver>) {
 /// Update the values of the global preferences for the current process. This also notifies the
 /// observers previously added using [`add_observer`].
 pub fn set(preferences: Preferences) {
+    // Stillwater: `background-clip: text` is always parsed. Layout draws the text in the
+    // background's colour instead of leaving a filled box with invisible text on it (see
+    // `text_clip_fallback_color` in the display list builder).
+    stylo_static_prefs::set_pref!("layout.css.background-clip.text.enabled", true);
+
     // Get list of changes, returning early if the preferences haven't changed.
     let changed = preferences.diff(&PREFERENCES.read().unwrap());
     if changed.is_empty() {

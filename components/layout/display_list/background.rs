@@ -9,7 +9,9 @@ use style::computed_values::background_blend_mode::SingleComputedValue as Backgr
 use style::computed_values::background_clip::single_value::T as Clip;
 use style::computed_values::background_origin::single_value::T as Origin;
 use style::properties::ComputedValues;
-use style::values::computed::LengthPercentage;
+use style::values::computed::image::{Gradient, Image};
+use style::values::computed::{Color, LengthPercentage};
+use style::values::generics::image::GradientItem;
 use style::values::computed::background::BackgroundSize as Size;
 use style::values::specified::background::{
     BackgroundRepeat as RepeatXY, BackgroundRepeatKeyword as Repeat,
@@ -35,6 +37,70 @@ struct Layout1DResult {
     bounds_origin: f32,
     bounds_size: f32,
     tile_spacing: f32,
+}
+
+/// Whether background layer `layer_index` of `style` is clipped to the element's text.
+pub(crate) fn layer_is_clipped_to_text(style: &ComputedValues, layer_index: usize) -> bool {
+    matches!(
+        get_cyclic(&style.get_background().background_clip.0, layer_index),
+        Clip::Text
+    )
+}
+
+/// Stillwater: a stand-in for `background-clip: text`, which WebRender cannot draw (it would
+/// need the glyphs as a mask). Sites use it for gradient-filled headings, with the text itself
+/// transparent. Rather than a filled box hiding the text, such layers are not painted and the
+/// text is drawn in one flat colour taken from them: the average of a gradient's stops, or the
+/// background colour.
+pub(crate) fn text_clip_fallback_color(style: &ComputedValues) -> Option<wr::ColorF> {
+    let background = style.get_background();
+    let mut any = false;
+    for (index, image) in background.background_image.0.iter().enumerate() {
+        if !layer_is_clipped_to_text(style, index) {
+            continue;
+        }
+        any = true;
+        let Image::Gradient(gradient) = image else {
+            continue;
+        };
+        let mut sum = [0.0f32; 4];
+        let mut count = 0.0f32;
+        let mut add = |color: &Color| {
+            let color = super::rgba(style.resolve_color(color));
+            for (total, part) in sum.iter_mut().zip([color.r, color.g, color.b, color.a]) {
+                *total += part;
+            }
+            count += 1.0;
+        };
+        fn stops<'a, T>(
+            items: &'a [GradientItem<Color, T>],
+        ) -> impl Iterator<Item = &'a Color> {
+            items.iter().filter_map(|item| match item {
+                GradientItem::SimpleColorStop(color) => Some(color),
+                GradientItem::ComplexColorStop { color, .. } => Some(color),
+                GradientItem::InterpolationHint(_) => None,
+            })
+        }
+        match &**gradient {
+            Gradient::Linear { items, .. } | Gradient::Radial { items, .. } => {
+                stops(items).for_each(&mut add)
+            },
+            Gradient::Conic { items, .. } => stops(items).for_each(&mut add),
+        }
+        if count > 0.0 && sum[3] > 0.0 {
+            return Some(wr::ColorF::new(
+                sum[0] / count,
+                sum[1] / count,
+                sum[2] / count,
+                sum[3] / count,
+            ));
+        }
+    }
+    if !any {
+        return None;
+    }
+    let color = super::rgba(style.resolve_color(&background.background_color));
+    (color.a > 0.0).then_some(color)
 }
 
 pub(crate) fn get_cyclic<T>(values: &[T], layer_index: usize) -> &T {
@@ -107,7 +173,10 @@ impl<'a> BackgroundPainter<'a> {
             Clip::BorderBox => {
                 fragment_builder.border_edge_clip(builder, state, force_clip_creation)
             },
-            Clip::BorderArea | Clip::Text => unreachable!("Should be disabled behind a pref"),
+            // Text-clipped layers are not painted (see `text_clip_fallback_color`).
+            Clip::BorderArea | Clip::Text => {
+                fragment_builder.border_edge_clip(builder, state, force_clip_creation)
+            },
         }
     }
 
