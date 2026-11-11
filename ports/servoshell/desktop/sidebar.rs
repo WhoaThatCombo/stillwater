@@ -541,6 +541,11 @@ impl Sidebar {
         self.pane_focus.clone().or_else(|| window.active_webview())
     }
 
+    /// Whether the page (or a keyboard shortcut) sent commands not yet acted on.
+    pub(crate) fn has_pending_messages(&self) -> bool {
+        !self.inbox.borrow().is_empty()
+    }
+
     /// Queue a command as if the sidebar page had sent it (used by keyboard shortcuts).
     pub(crate) fn post(&self, message: &str) {
         self.inbox.borrow_mut().push(message.to_owned());

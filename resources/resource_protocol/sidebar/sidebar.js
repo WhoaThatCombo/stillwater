@@ -370,9 +370,10 @@ function selectRow(key, sendCommand, event) {
   } else {
     pressed = { key, time };
   }
+  // Ask first: the shell acts on it as soon as it arrives, before the highlight's frame.
+  sendCommand();
   pendingSelect = { key, until: time + 1000 };
   applyPendingSelect();
-  sendCommand();
 }
 // The keys (`tab:<id>`, `pin:<pinId>`) the state shows as active.
 function stateActiveKeys() {

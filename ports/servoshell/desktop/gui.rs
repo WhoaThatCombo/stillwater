@@ -768,19 +768,16 @@ impl Gui {
             .then(|| Point2D::new(position.x - rect.min.x, position.y - rect.min.y))
     }
 
-    /// Update the user interface, but do not paint the updated state.
-    pub(crate) fn update(
+    /// Act on what the sidebar page (or a keyboard shortcut) asked for: switch, open and close
+    /// tabs, window buttons, panes... Called from `update` and, so that a tab switch starts at
+    /// once rather than at the next redraw, as soon as such a command arrives (see
+    /// `HeadedWindow::update_user_interface_state`).
+    pub(crate) fn handle_sidebar_commands(
         &mut self,
         state: &RunningAppState,
         window: &ServoShellWindow,
         headed_window: &headed_window::HeadedWindow,
     ) {
-        headed_window.set_theme_override(self.sidebar.theme_override(), window);
-        let theme = headed_window.theme();
-        state.sync_color_scheme_hint(theme);
-        let hidpi_scale = window.platform_window().hidpi_scale_factor();
-        self.sidebar.ensure_webview(state, theme, hidpi_scale);
-        load_pending_favicons(window, &mut self.sidebar);
         self.sidebar.handle_messages(window);
 
         // Window operations asked for by the sidebar page. Moving and maximising the window
@@ -902,6 +899,23 @@ impl Gui {
             }
         }
         self.apply_pane_requests(state, window, headed_window);
+    }
+
+    /// Update the user interface, but do not paint the updated state.
+    pub(crate) fn update(
+        &mut self,
+        state: &RunningAppState,
+        window: &ServoShellWindow,
+        headed_window: &headed_window::HeadedWindow,
+    ) {
+        headed_window.set_theme_override(self.sidebar.theme_override(), window);
+        let theme = headed_window.theme();
+        state.sync_color_scheme_hint(theme);
+        let hidpi_scale = window.platform_window().hidpi_scale_factor();
+        self.sidebar.ensure_webview(state, theme, hidpi_scale);
+        load_pending_favicons(window, &mut self.sidebar);
+        self.handle_sidebar_commands(state, window, headed_window);
+        let winit_window = headed_window.winit_window();
         {
             // The shield shows the page in the URL bar: the focused pane or the active tab.
             let adblock = state.adblock.borrow();

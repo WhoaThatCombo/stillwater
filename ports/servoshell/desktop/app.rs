@@ -347,7 +347,20 @@ impl App {
 
     fn control_flow(&self) -> ControlFlow {
         let flow = self.control_flow_without_repaint();
-        match (flow, self.repaint_at) {
+        // A repaint held back for a newly shown tab's first frame is due by then at the latest.
+        let switch_wait = match &self.state {
+            AppState::Running(state) => state
+                .windows()
+                .iter()
+                .filter_map(|window| window.platform_window().as_headed_window()?.switch_wait_deadline())
+                .min(),
+            _ => None,
+        };
+        let repaint = match (self.repaint_at, switch_wait) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        match (flow, repaint) {
             (ControlFlow::WaitUntil(at), Some(repaint)) => ControlFlow::WaitUntil(at.min(repaint)),
             (flow, _) => flow,
         }
@@ -593,7 +606,20 @@ impl ApplicationHandler<AppEvent> for App {
         // when no posted events are waiting: a runaway repaint loop must never be able to hold
         // the mouse and lock up the desktop.
         let mut defer_repaint = false;
-        if let AppEvent::RequestRepaint(window_id, _) = &app_event {
+        // A wake carrying a sidebar command (a tab clicked, Ctrl+Tab...) is user input: act on
+        // it at once (`update_user_interface_state`); only its repaint keeps to the pacing.
+        let sidebar_commands = match &app_event {
+            AppEvent::RequestRepaint(window_id, _) => state.window(*window_id).is_some_and(|window| {
+                window
+                    .platform_window()
+                    .as_headed_window()
+                    .is_some_and(|headed| headed.has_pending_sidebar_commands())
+            }),
+            _ => false,
+        };
+        if let AppEvent::RequestRepaint(window_id, _) = &app_event &&
+            !sidebar_commands
+        {
             let now = Instant::now();
             let frame = state
                 .window(*window_id)
@@ -626,6 +652,9 @@ impl ApplicationHandler<AppEvent> for App {
                 queued.store(false, std::sync::atomic::Ordering::Release);
                 if let Some(window) = state.window(window_id) {
                     window.set_needs_repaint();
+                    if sidebar_commands {
+                        window.set_needs_update();
+                    }
                 }
             },
             // A launch that gave up waiting for us has opened its own window: don't open it twice.

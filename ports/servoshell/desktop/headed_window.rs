@@ -117,6 +117,10 @@ pub struct HeadedWindow {
     repaint_pending: Cell<bool>,
     /// When the window was last painted.
     last_paint: Cell<Option<std::time::Instant>>,
+    /// The active tab when the window was last painted, and since when a repaint has been
+    /// held back waiting for the first frame of a newly shown tab (`waiting_for_switched_tab`).
+    painted_tab: Cell<Option<servo::WebViewId>>,
+    switch_wait: Cell<Option<std::time::Instant>>,
     /// The last press on the empty part of the top bar, to detect double-clicks there.
     last_top_bar_press: Cell<Option<std::time::Instant>>,
     /// Light/dark chosen in Stillwater's settings; `None` follows Windows.
@@ -138,6 +142,10 @@ pub struct HeadedWindow {
     /// The top bar's caption button the left button went down on, until it is released.
     caption_press: Cell<Option<TopBarHit>>,
 }
+
+/// The longest a repaint waits for a newly shown tab's first frame (see
+/// `HeadedWindow::waiting_for_switched_tab`): a frame or two at 60 Hz.
+const SWITCH_WAIT: std::time::Duration = std::time::Duration::from_millis(24);
 
 /// `STILLWATER_BACKGROUND_WINDOW`: for automated tests, the window opens off-screen, out of the
 /// taskbar, and never takes keyboard focus from other programs.
@@ -318,6 +326,8 @@ impl HeadedWindow {
             resize_direction: Default::default(),
             repaint_pending: Cell::new(false),
             last_paint: Cell::new(None),
+            painted_tab: Cell::new(None),
+            switch_wait: Cell::new(None),
             last_top_bar_press: Cell::new(None),
             theme_override: Cell::new(None),
             page_buttons_held: Default::default(),
@@ -348,6 +358,43 @@ impl HeadedWindow {
         if due {
             self.handle_winit_window_event(state, window, WindowEvent::RedrawRequested);
         }
+    }
+
+    /// Whether the sidebar page or a shortcut sent commands not acted on yet (see `App`).
+    pub(crate) fn has_pending_sidebar_commands(&self) -> bool {
+        self.gui
+            .try_borrow()
+            .is_ok_and(|gui| gui.sidebar.has_pending_messages())
+    }
+
+    /// Another tab became the active one since the last paint, and its first frame isn't
+    /// ready yet: hold the repaint for up to `SWITCH_WAIT`. Painting now would present the
+    /// previous tab once more (WebRender builds the new tab's scene asynchronously), and that
+    /// present blocks this thread for a whole frame, so the new tab would show a frame later.
+    /// Off with STILLWATER_SWITCH_WAIT=0.
+    fn waiting_for_switched_tab(&self, window: &ServoShellWindow) -> bool {
+        static ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+            std::env::var_os("STILLWATER_SWITCH_WAIT").is_none_or(|value| value != "0")
+        });
+        let active = window.active_webview().map(|webview| webview.id());
+        let switched = self.painted_tab.get().is_some() && active != self.painted_tab.get();
+        if !*ENABLED || !switched || active.is_none_or(|id| window.has_new_frame_for(id)) {
+            self.switch_wait.set(None);
+            return false;
+        }
+        let since = *self.switch_wait.get().get_or_insert_with(std::time::Instant::now);
+        self.switch_wait.set(Some(since));
+        if since.elapsed() >= SWITCH_WAIT {
+            self.switch_wait.set(None);
+            return false;
+        }
+        true
+    }
+
+    /// When a repaint held back by `waiting_for_switched_tab` is due anyway (for the event
+    /// loop's next wake-up).
+    pub(crate) fn switch_wait_deadline(&self) -> Option<std::time::Instant> {
+        self.switch_wait.get().map(|since| since + SWITCH_WAIT)
     }
 
     /// Apply the theme chosen in settings (`None` = follow Windows) to every page.
@@ -937,7 +984,12 @@ impl HeadedWindow {
         };
 
         // Tab and workspace shortcuts go through the sidebar so they respect workspaces.
-        let post = |message: &str| self.gui.borrow().sidebar.post(message);
+        // Acted on in this turn of the event loop (`update_user_interface_state`), not at the
+        // next redraw.
+        let post = |message: &str| {
+            self.gui.borrow().sidebar.post(message);
+            window.set_needs_update();
+        };
         let workspace = Modifiers::CONTROL | Modifiers::ALT;
 
         let mut handled = true;
@@ -1543,12 +1595,19 @@ impl HeadedWindow {
 
         // If requested to redraw or resized, repaint as soon as possible, so that new buffer
         // contents are available to the window manager.
-        if event == WindowEvent::RedrawRequested || resized {
+        if event == WindowEvent::RedrawRequested && !resized && self.waiting_for_switched_tab(&window)
+        {
+            // Painted once the new tab's frame is ready (its notification asks for a repaint)
+            // or the wait is over (the event loop wakes up then: `switch_wait_deadline`).
+            self.repaint_pending.set(true);
+        } else if event == WindowEvent::RedrawRequested || resized {
             let frame_start = std::time::Instant::now();
             self.repaint_pending.set(false);
             self.last_paint.set(Some(frame_start));
+            self.switch_wait.set(None);
             let mut gui = self.gui.borrow_mut();
             gui.update(&state, &window, self);
+            self.painted_tab.set(window.active_webview().map(|webview| webview.id()));
             let updated = frame_start.elapsed();
             gui.paint(&self.winit_window);
             let frame_time = frame_start.elapsed();
@@ -2078,7 +2137,16 @@ impl PlatformWindow for HeadedWindow {
             .unwrap_or_else(|| self.device_hidpi_scale_factor())
     }
 
-    fn update_user_interface_state(&self, _: &RunningAppState, window: &ServoShellWindow) -> bool {
+    fn update_user_interface_state(&self, state: &RunningAppState, window: &ServoShellWindow) -> bool {
+        // A tab clicked in the sidebar, Ctrl+Tab, Ctrl+W...: act now rather than at the next
+        // redraw, so the new tab's frame is being made while the window waits for it, and tabs
+        // are opened and closed (`handle_interface_commands`) before the next paint.
+        if self.has_pending_sidebar_commands() {
+            self.gui
+                .borrow_mut()
+                .handle_sidebar_commands(state, window, self);
+        }
+
         let title = window
             .active_webview()
             .and_then(|webview| {
