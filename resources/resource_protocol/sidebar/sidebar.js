@@ -313,46 +313,26 @@ function pinMenu(pin, essential) {
   return items;
 }
 
-// ---- Rows hold still under the cursor after a tab is closed with the mouse (like Firefox
-// and Zen): an invisible placeholder keeps the closed row's place until the mouse leaves the
-// list, so the next row's close button doesn't slide under the cursor. ----
-const closedGaps = []; // {id, after}: the closed tab and the row that was above it, in order
+// ---- A tab closed with the mouse leaves the list in this frame and the rows below move up
+// at once (so the next row's close button is under the cursor), rather than when Rust's next
+// state push arrives. ----
+const closingTabs = new Map(); // id -> time the close was asked for
 function closeByMouse(id, row) {
-  const above = row && row.previousElementSibling;
-  const after = !above ? null : above.dataset.gap ? `gap:${above.dataset.gap}` : above.dataset.tab || null;
-  closedGaps.push({ id: String(id), after });
+  closingTabs.set(String(id), performance.now());
   send("close", id);
-  // Gone at once (its place kept, as above), not when Rust's next state push arrives.
-  if (row) row.classList.add("closed-gap");
+  if (row) row.remove();
 }
-function withClosedGaps(rows) {
-  const keyOf = (row) => (row.dataset.gap ? `gap:${row.dataset.gap}` : row.dataset.tab);
-  for (const row of rows) {
-    if (row.dataset.tab) row.classList.toggle("closed-gap", closedGaps.some((gap) => gap.id === row.dataset.tab));
+// The tabs to list: all of them but the ones being closed. A close Rust hasn't acted on after
+// two seconds (a page asking whether to leave, say) is shown again.
+function openTabs() {
+  const now = performance.now();
+  for (const [id, asked] of closingTabs) {
+    if (now - asked > 2000 || !state.tabs.some((tab) => String(tab.id) === id)) closingTabs.delete(id);
   }
-  let pending = closedGaps.filter((gap) => !state.tabs.some((tab) => String(tab.id) === gap.id));
-  // A placeholder can sit under another one (two rows closed in a row), so place them in passes.
-  while (pending.length) {
-    const left = pending.filter((gap) => {
-      const at = gap.after === null ? 0 : rows.findIndex((row) => keyOf(row) === gap.after) + 1;
-      if (at === 0 && gap.after !== null) return true;
-      const placeholder = document.createElement("div");
-      placeholder.className = "tab closed-gap";
-      placeholder.dataset.gap = gap.id;
-      rows.splice(at, 0, placeholder);
-      return false;
-    });
-    if (left.length === pending.length) break; // the row above is gone too: let it collapse
-    pending = left;
-  }
-  return rows;
+  clearTimeout(openTabs.recheck);
+  if (closingTabs.size) openTabs.recheck = setTimeout(render, 2100);
+  return state.tabs.filter((tab) => !closingTabs.has(String(tab.id)));
 }
-tabs.addEventListener("mouseout", (event) => {
-  if (closedGaps.length && !tabs.contains(event.relatedTarget)) {
-    closedGaps.length = 0;
-    render();
-  }
-});
 
 // Selecting a tab: move the highlight at once, in this frame, rather than when Rust's next
 // state push arrives (a round trip through the shell and at least one more frame), then ask
@@ -1000,7 +980,7 @@ function render() {
   if (!document.querySelector(".rename-input")) {
     renderEssentials();
     renderPinned();
-    const rows = withClosedGaps(state.tabs.map((tab) => keyedRow(tab)));
+    const rows = openTabs().map((tab) => keyedRow(tab));
     if (state.split) rows.push(renderSplitRow(state.split));
     placeRows(tabs, rows);
     applyPendingSelect();

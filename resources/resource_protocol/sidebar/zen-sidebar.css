@@ -795,12 +795,6 @@ button.secondary:hover {
   padding-left: 26px;
 }
 
-/* Where a tab closed with the mouse was, until the mouse leaves the list (sidebar.js). */
-.tab.closed-gap {
-  visibility: hidden;
-  pointer-events: none;
-}
-
 /* ---- Context menu ---- */
 #menu {
   position: fixed;
