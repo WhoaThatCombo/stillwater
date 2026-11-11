@@ -21,6 +21,7 @@ use embedder_traits::{
 use euclid::{Scale, Size2D};
 use image::RgbaImage;
 use log::{debug, warn};
+use paint_api::display_list::{ScrollType, SpatialTreeNodeInfo};
 use paint_api::rendering_context::RenderingContext;
 use paint_api::{
     PaintMessage, PaintProxy, PainterSurfmanDetails, PainterSurfmanDetailsMap,
@@ -58,6 +59,22 @@ use webxr::WebXrRegistry;
 use crate::InitialPaintState;
 use crate::painter::Painter;
 use crate::webview_renderer::UnknownWebView;
+
+/// Stillwater: the page viewport's scroll state (see [`Paint::root_scroll_state`]), in page
+/// pixels (CSS pixels times page zoom), each as `[x, y]` / `[width, height]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RootScrollState {
+    /// How far the viewport is scrolled.
+    pub offset: [f32; 2],
+    /// The size of the scrollable content (at least the viewport's).
+    pub content_size: [f32; 2],
+    /// The size of the viewport.
+    pub viewport_size: [f32; 2],
+    /// Whether the user can scroll each axis (false for `overflow: hidden`).
+    pub user_scrollable: [bool; 2],
+    /// The page's root background colour (RGBA, 0–1), if it has one.
+    pub background: Option<[f32; 4]>,
+}
 
 /// An option to control what kind of WebRender debugging is enabled while Servo is running.
 #[derive(Copy, Clone)]
@@ -754,6 +771,48 @@ impl Paint {
     pub fn has_contentful_paint(&self, webview_id: WebViewId) -> bool {
         self.painter(webview_id.into())
             .has_contentful_paint(webview_id)
+    }
+
+    /// Stillwater: the state of the root scroll node (the page's viewport) of `webview_id`,
+    /// as `Paint` currently shows it, so the embedder can draw overlay scrollbars without
+    /// asking script. `None` until the page has a display list.
+    pub fn root_scroll_state(&self, webview_id: WebViewId) -> Option<RootScrollState> {
+        let painter = self.maybe_painter(webview_id.into())?;
+        let renderer = painter.webview_renderers.get(&webview_id)?;
+        let root = renderer.root_pipeline_id?;
+        let details = renderer.pipelines.get(&root)?;
+        let id = webrender_api::ExternalScrollId(0, root.into());
+        details.scroll_tree.nodes.iter().find_map(|node| match node.info {
+            SpatialTreeNodeInfo::Scroll(ref info) if info.external_id == id => {
+                Some(RootScrollState {
+                    offset: [info.offset.x, info.offset.y],
+                    content_size: [info.content_rect.width(), info.content_rect.height()],
+                    viewport_size: [info.clip_rect.width(), info.clip_rect.height()],
+                    user_scrollable: [
+                        info.scroll_sensitivity.x.contains(ScrollType::InputEvents),
+                        info.scroll_sensitivity.y.contains(ScrollType::InputEvents),
+                    ],
+                    background: renderer
+                        .root_background_color
+                        .map(|color| [color.r, color.g, color.b, color.a]),
+                })
+            },
+            _ => None,
+        })
+    }
+
+    /// Stillwater: scroll the page's viewport (the root scroll node) by `delta` page pixels,
+    /// as keyboard scrolling does; script sees the usual scroll events.
+    pub fn scroll_viewport_by(&self, webview_id: WebViewId, delta: [f32; 2]) {
+        if self.shutdown_state() != ShutdownState::NotShuttingDown {
+            return;
+        }
+        if let Some(mut painter) = self.maybe_painter_mut(webview_id.into()) {
+            painter.scroll_viewport_by_delta(
+                webview_id,
+                webrender_api::units::LayoutVector2D::new(delta[0], delta[1]),
+            );
+        }
     }
 
     /// Render the WebRender scene to the active `RenderingContext`.

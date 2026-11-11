@@ -63,7 +63,7 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "toggle-compact", "session-startup", "adblock-enabled", "pw-autofill", "pw-delete", "pw-reveal",
     "pw-copy", "pw-copy-user", "pw-forget-never", "zen-scan", "zen-import", "check-updates",
     "hist-clear", "hist-show", "dl-ask", "dl-panel", "set-spaces", "tr-auto", "tr-target", "tr-unlist",
-    "tr-delete-model", "tr-models", "set-splash",
+    "tr-delete-model", "tr-models", "set-splash", "set-scrollbar",
 ];
 
 /// Whether `url` is the settings page (whatever category it shows).
@@ -983,6 +983,7 @@ impl Sidebar {
                 },
                 "set-newtab" => self.settings.borrow_mut().set_new_tab_bar(argument == "1"),
                 "set-splash" => self.settings.borrow_mut().set_startup_animation(argument == "1"),
+                "set-scrollbar" => self.settings.borrow_mut().set_scrollbar(&argument),
                 "set-spaces" => {
                     let enabled = argument == "1";
                     self.settings.borrow_mut().set_spaces(enabled);

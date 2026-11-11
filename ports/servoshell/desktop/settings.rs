@@ -110,6 +110,8 @@ pub(crate) struct Settings {
     pub(crate) spaces: bool,
     /// Play the short animation that covers the window while Stillwater starts.
     pub(crate) startup_animation: bool,
+    /// How the page scrollbar shows: "auto" (overlay, fades out), "always" or "hidden".
+    pub(crate) scrollbar: crate::desktop::scrollbar::ScrollbarMode,
     /// Width of the docked sidebar in device-independent pixels (dragged by its right edge).
     pub(crate) sidebar_width: f32,
     path: Option<PathBuf>,
@@ -144,6 +146,10 @@ impl Settings {
             new_tab_bar: saved["newTabBar"].as_bool().unwrap_or(true),
             spaces: saved["spaces"].as_bool().unwrap_or(false),
             startup_animation: saved["startupAnimation"].as_bool().unwrap_or(true),
+            scrollbar: saved["scrollbar"]
+                .as_str()
+                .and_then(crate::desktop::scrollbar::ScrollbarMode::from_id)
+                .unwrap_or_default(),
             sidebar_width: saved["sidebarWidth"]
                 .as_f64()
                 .map(|width| width as f32)
@@ -152,6 +158,7 @@ impl Settings {
             path,
         };
         settings.publish_search_template();
+        crate::desktop::scrollbar::set_mode(settings.scrollbar);
         settings
     }
 
@@ -169,6 +176,7 @@ impl Settings {
             "newTabBar": self.new_tab_bar,
             "spaces": self.spaces,
             "startupAnimation": self.startup_animation,
+            "scrollbar": self.scrollbar.id(),
             "sidebarWidth": self.sidebar_width,
         });
         let result = path
@@ -255,6 +263,14 @@ impl Settings {
         self.save();
     }
 
+    pub(crate) fn set_scrollbar(&mut self, id: &str) {
+        if let Some(mode) = crate::desktop::scrollbar::ScrollbarMode::from_id(id) {
+            self.scrollbar = mode;
+            crate::desktop::scrollbar::set_mode(mode);
+            self.save();
+        }
+    }
+
     pub(crate) fn set_new_tab_bar(&mut self, enabled: bool) {
         self.new_tab_bar = enabled;
         self.save();
@@ -276,6 +292,7 @@ impl Settings {
             "newTabBar": self.new_tab_bar,
             "spaces": self.spaces,
             "startupAnimation": self.startup_animation,
+            "scrollbar": self.scrollbar.id(),
             "version": crate::desktop::updater::CURRENT_VERSION,
         })
     }

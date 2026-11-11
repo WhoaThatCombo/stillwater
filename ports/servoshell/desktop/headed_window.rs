@@ -756,6 +756,120 @@ impl HeadedWindow {
         }
     }
 
+    /// Whether the page scrollbars may take the pointer at `point`: not while another press
+    /// is under way (a selection drag passes over them), while a dialog or the floating
+    /// address bar owns the mouse, or over egui's own controls drawn on the page.
+    fn scrollbar_may_take(
+        &self,
+        gui: &Gui,
+        window: &ServoShellWindow,
+        point: Point2D<f32, DeviceIndependentPixel>,
+    ) -> bool {
+        self.page_buttons_held.borrow().is_empty() &&
+            self.pane_buttons_held.borrow().is_empty() &&
+            self.sidebar_resize_grab.get().is_none() &&
+            gui.command_bar.webview().is_none() &&
+            !window
+                .active_webview()
+                .is_some_and(|webview| self.has_active_dialog_for_webview(webview.id())) &&
+            !gui.top_bar_contains(point) &&
+            !gui.find_bar_contains(point) &&
+            !gui.pane_controls_contain(point) &&
+            gui.sidebar_relative_point(point).is_none()
+    }
+
+    /// The page scrollbars (see `scrollbar.rs`): the pointer near one widens it, and a press
+    /// on one drags its thumb or pages; neither the press, nor the moves and the release
+    /// that follow it (wherever the pointer goes), reach the page, so they can't start a
+    /// text selection. Returns true if the event was consumed.
+    fn handle_scrollbar_event(&self, window: &Rc<ServoShellWindow>, event: &WindowEvent) -> bool {
+        let gui = self.gui.borrow();
+        let mut bars = gui.scrollbars.borrow_mut();
+        match event {
+            WindowEvent::Focused(false) => {
+                // Alt+Tab mid-drag: the release goes to another app.
+                bars.released();
+                bars.pointer_left();
+                false
+            },
+            WindowEvent::CursorLeft { .. } if !bars.captured() => {
+                if bars.pointer_left() {
+                    self.winit_window.request_redraw();
+                }
+                false
+            },
+            WindowEvent::CursorMoved { position, .. } => {
+                let point =
+                    winit_position_to_euclid_point(*position).to_f32() / self.hidpi_scale_factor();
+                // Belt and braces, as for the page: the release went somewhere else.
+                if bars.captured() && !crate::desktop::gui::left_button_held() {
+                    diagnostics::log("scrollbar: releasing a stuck drag");
+                    bars.released();
+                }
+                if !bars.captured() && !self.scrollbar_may_take(&gui, window, point) {
+                    if bars.pointer_left() {
+                        self.winit_window.request_redraw();
+                    }
+                    return false;
+                }
+                let moved = bars.pointer_moved([point.x, point.y]);
+                if moved.redraw {
+                    self.winit_window.request_redraw();
+                }
+                if let Some(page) = moved.left_page {
+                    page.notify_input_event(InputEvent::MouseLeftViewport(
+                        MouseLeftViewportEvent::default(),
+                    ));
+                    self.set_cursor(Cursor::Default);
+                }
+                if moved.consumed {
+                    drop(bars);
+                    drop(gui);
+                    // egui still needs the pointer position (tooltips, the top bar).
+                    let _ = self.gui.borrow_mut().on_window_event(&self.winit_window, event);
+                }
+                moved.consumed
+            },
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button,
+                ..
+            } if bars.captured() => {
+                if *button == MouseButton::Left {
+                    bars.released();
+                    self.winit_window.request_redraw();
+                }
+                true
+            },
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } => {
+                if bars.captured() {
+                    return true;
+                }
+                let Some(point) = self.last_mouse_position.get() else {
+                    return false;
+                };
+                if !self.scrollbar_may_take(&gui, window, point) {
+                    return false;
+                }
+                if *button != MouseButton::Left {
+                    // Other buttons on a bar do nothing (and don't reach the page).
+                    return bars.over(point.x, point.y);
+                }
+                if bars.pressed([point.x, point.y]) {
+                    diagnostics::log(format!("click: scrollbar at {point:?}"));
+                    self.winit_window.request_redraw();
+                    return true;
+                }
+                false
+            },
+            _ => false,
+        }
+    }
+
     /// Helper function to handle mouse move events.
     fn handle_mouse_move_event(&self, webview: &WebView, position: PhysicalPosition<f64>) {
         let mut point = winit_position_to_euclid_point(position).to_f32();
@@ -1521,6 +1635,11 @@ impl HeadedWindow {
         } = event &&
             self.release_pane_button(button)
         {
+            return;
+        }
+
+        // The page scrollbars: presses on them, and drags that started on them, are theirs.
+        if self.handle_scrollbar_event(&window, &event) {
             return;
         }
 

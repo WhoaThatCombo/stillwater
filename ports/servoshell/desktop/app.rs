@@ -360,6 +360,10 @@ impl App {
             if self.fine_timers {
                 wake = wake.min(Instant::now() + std::time::Duration::from_secs(1));
             }
+            // A page scrollbar fading out (nothing once it has: see `scrollbar::next_wake`).
+            if let Some(at) = crate::desktop::scrollbar::next_wake() {
+                wake = wake.min(at);
+            }
             ControlFlow::WaitUntil(wake)
         }
     }
