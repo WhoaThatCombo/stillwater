@@ -48,13 +48,14 @@ first install.
 - **Vertical tabs**: favicons, a close button on hover, middle-click to close, double-click a title to rename.
 - **Essentials**: favicon tiles at the top of the sidebar, shared by every space.
 - **Pinned tabs and folders**: each space has a pinned section above its tabs, with collapsible folders.
-  Pinned tabs are remembered and load only when you click them; closing one unloads it to free memory,
+  Pinned tabs are remembered (and load in the background at startup, see below); closing one unloads it to free memory,
   and a reset button takes it back to its pinned page.
 - **Tab menu**: right-click a tab (or use its `…` button) to pin it, add it to Essentials, move it to a folder or
   another space, rename it or close it.
 - **Session restore**: your tabs in every space come back when you start Stillwater again, even after a crash.
-  Only the tab you were on loads; the others load when you click them. Settings → **On startup** can open a
-  new tab instead. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> (or **Reopen closed tab** in the tab menu) brings
+  The tab you were on loads first; once it has loaded, the others load quietly in the background (two at a time,
+  silent, at most 12 tabs, never while memory is low), so they're ready when you click them. Settings → **On startup**
+  can limit that to pinned tabs and Essentials, turn it off (tabs load when clicked), or open a new tab instead. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> (or **Reopen closed tab** in the tab menu) brings
   back the last closed tab, up to 25.
 - **Drag and drop**: drag tabs to reorder them, onto the pinned section or a folder to pin them, onto Essentials,
   back into the tab list to unpin them, or onto a space's button to move them there.
@@ -73,7 +74,8 @@ first install.
 - **Compact mode**: the sidebar hides and slides back in when your mouse touches the left edge.
 - **Rounded content card**: web pages sit in an inset, rounded frame, like Zen.
 - **No title bar**: like Zen, the page runs to the top edge. Touch the top of the window and a slim bar with
-  minimise, maximise and close slides in; drag it (or empty sidebar space) to move the window
+  minimise, maximise and close slides in; drag it to move the window and double-click it to maximise; the bar is the only place the
+  window moves from
   (`--native-titlebar` brings the Windows title bar back).
 - **Site compatibility**: Servo's experimental web features are on, small built-in shims fill web APIs Servo
   lacks (`ports/servoshell/desktop/compat.js`), and a disk cache speeds up revisits. **Report site isn't working**

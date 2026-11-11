@@ -355,7 +355,7 @@ function renderRow(item, isPin) {
   row.className = "tab" +
     (item.active ? " selected" : "") +
     (item.loading ? " loading" : "") +
-    (item.loaded === false ? " unloaded" : "");
+    (item.loaded === false || item.preloading ? " unloaded" : "");
   row.title = item.url;
   // For drag and drop (session.js).
   if (isPin) {
@@ -424,7 +424,7 @@ function renderEssentials() {
   grid.hidden = essentials.length === 0;
   grid.replaceChildren(...essentials.map((pin) => {
     const tile = document.createElement("button");
-    tile.className = "essential" + (pin.active ? " selected" : "") + (pin.loaded ? "" : " unloaded");
+    tile.className = "essential" + (pin.active ? " selected" : "") + (pin.loaded && !pin.preloading ? "" : " unloaded");
     tile.title = pin.title;
     tile.dataset.pin = pin.pinId;
     tile.dataset.essential = "1";
@@ -1114,7 +1114,8 @@ $("tab-area").addEventListener("contextmenu", (event) => {
   ], event.clientX, event.clientY);
 });
 
-// Frameless window: caption buttons, and dragging/double-clicking empty sidebar space.
+// The update button. (Empty sidebar space does nothing on press: only the top bar moves
+// or maximises the window.)
 update.addEventListener("click", () => send("update"));
 
 // The app menu (≡), under its button.
@@ -1132,20 +1133,6 @@ $("shield").addEventListener("click", (event) => {
   event.stopPropagation();
   const box = $("shield").getBoundingClientRect();
   openMenu(shieldMenu(), box.left, box.bottom);
-});
-const isDragSurface = (target) =>
-  target.matches("[data-drag], body, #tab-area, #tabs, #pinned, #essentials, #footer, #workspaces, #workspace-header, .spacer");
-let lastDragDown = 0;
-document.addEventListener("mousedown", (event) => {
-  if (event.button !== 0 || !state.frameless || !isDragSurface(event.target)) return;
-  const now = Date.now();
-  if (now - lastDragDown < 400) {
-    lastDragDown = 0;
-    send("win-max"); // double-click toggles maximise, like a title bar
-  } else {
-    lastDragDown = now;
-    send("win-drag");
-  }
 });
 
 // Workspace header: click icon / colour dot to cycle them, click the name to rename.

@@ -3,8 +3,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Session restore: the ordinary tabs of every space are saved to `<config dir>/session.json`
-//! while Stillwater runs, and come back as unloaded tabs on the next launch. Only the active
-//! tab of the current space loads; the others load when clicked.
+//! while Stillwater runs, and come back as unloaded tabs on the next launch. The active tab of
+//! the current space loads first; the others load in the background after it (Settings → On
+//! startup, see `Workspaces::preload_tick`) or when clicked.
 //!
 //! The file is written by a background thread, at most about once a second, through a
 //! temporary file that is renamed over the old one, so a crash loses at most a second of
@@ -15,7 +16,8 @@
 //! { "version": 1, "current": <space id>, "activeUrl": "<url of the active tab>",
 //!   "activePin": <pin id or null>,
 //!   "spaces": [ { "id": <space id>, "active": <index into tabs or null>,
-//!                 "tabs": [ { "url", "title", "customTitle", "favicon" } ] } ] }
+//!                 "tabs": [ { "url", "title", "customTitle", "favicon",
+//!                             "used": <ms since 1970 it was last active, optional> } ] } ] }
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -55,7 +57,10 @@ fn path() -> Option<PathBuf> {
 /// command line (or by the app that launched Stillwater), if any. Returns the page the first
 /// tab should open instead of the default one: the previous session's active tab.
 pub(crate) fn init(requested: Option<&str>, headless: bool, webdriver: bool) -> Option<url::Url> {
-    if headless || webdriver {
+    // STILLWATER_TEST_SESSION_RESTORE: save and restore the session under WebDriver too (for
+    // testing session restore and background loading with a scratch profile).
+    let test_restore = std::env::var_os("STILLWATER_TEST_SESSION_RESTORE").is_some();
+    if headless || (webdriver && !test_restore) {
         return None;
     }
     ENABLED.store(true, Ordering::Relaxed);

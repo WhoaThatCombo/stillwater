@@ -202,8 +202,20 @@ pub(crate) enum UserInterfaceCommand {
     /// A new tab that loads in the background (the page context menu's "Open link in
     /// background tab").
     NewBackgroundWebViewWithUrl(Url),
+    /// Load one of the last session's tabs in the background at startup (see
+    /// `Workspaces::preload_tick`): hidden, unfocused, media blocked until the user interacts.
+    PreloadWebView(Url, PreloadTarget),
     CloseWebView(WebViewId),
     NewWindow(TopLevelWebViewCreationRequest),
+}
+
+/// What a background preload at startup is for: an unloaded tab (by its sidebar key) or a
+/// pinned tab / Essential (by its pin id).
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
+pub(crate) enum PreloadTarget {
+    Tab(u32),
+    Pin(u32),
 }
 
 pub(crate) struct RunningAppState {
@@ -661,6 +673,12 @@ impl RunningAppState {
         self.window_for_webview(webview).platform_window()
     }
 
+    /// Whether `webview` was loaded in the background at startup and hasn't been shown yet.
+    fn is_untouched_preload(&self, webview: &WebView) -> bool {
+        self.maybe_window_for_webview(webview)
+            .is_some_and(|window| window.is_untouched_preload(webview.id()))
+    }
+
     /// If we are exiting after achieving a stable image or we want to save the display of the
     /// [`WebView`] to an image file, request a screenshot of the [`WebView`].
     fn maybe_request_screenshot(&self, webview: WebView) {
@@ -1093,11 +1111,17 @@ impl WebViewDelegate for RunningAppState {
     }
 
     fn request_move_to(&self, webview: WebView, new_position: DeviceIntPoint) {
+        if self.is_untouched_preload(&webview) {
+            return;
+        }
         self.platform_window_for_webview(&webview)
             .set_position(new_position);
     }
 
     fn request_resize_to(&self, webview: WebView, requested_outer_size: DeviceIntSize) {
+        if self.is_untouched_preload(&webview) {
+            return;
+        }
         self.platform_window_for_webview(&webview)
             .request_resize(&webview, requested_outer_size);
     }
@@ -1122,6 +1146,16 @@ impl WebViewDelegate for RunningAppState {
             let Some(request) = crate::desktop::capture::claim(request) else {
                 return;
             };
+            // A tab loaded in the background at startup never downloads anything before the
+            // user has looked at it.
+            if self.is_untouched_preload(&webview) {
+                crate::desktop::diagnostics::log(format!(
+                    "download refused (background-loaded tab not opened yet): {}",
+                    request.suggested_filename()
+                ));
+                request.cancel();
+                return;
+            }
             if automated && std::env::var_os("STILLWATER_DOWNLOAD_DIR").is_none() {
                 crate::desktop::diagnostics::log(format!(
                     "download not saved (automated run without STILLWATER_DOWNLOAD_DIR): {}",
@@ -1141,6 +1175,14 @@ impl WebViewDelegate for RunningAppState {
 
     fn request_create_new(&self, parent_webview: WebView, request: CreateNewWebViewRequest) {
         let window = self.window_for_webview(&parent_webview);
+
+        // A tab loaded in the background at startup may not open popups (which would take
+        // over the window) before the user has looked at it.
+        if window.is_untouched_preload(parent_webview.id()) {
+            #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+            crate::desktop::diagnostics::log("popup refused (background-loaded tab not opened yet)");
+            return;
+        }
 
         // When WebDriver wants to open a new WebView, do this in a new window. Normally, servoshell
         // throttles WebViews that are hidden, but WebDriver expects all opened WebViews to stay
@@ -1271,6 +1313,9 @@ impl WebViewDelegate for RunningAppState {
     }
 
     fn notify_fullscreen_state_changed(&self, webview: WebView, fullscreen_state: bool) {
+        if fullscreen_state && self.is_untouched_preload(&webview) {
+            return;
+        }
         self.platform_window_for_webview(&webview)
             .set_fullscreen(fullscreen_state);
     }

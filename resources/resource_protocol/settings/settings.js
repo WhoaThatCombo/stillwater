@@ -89,6 +89,7 @@ const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 wireChoices($("theme"), (value) => send("set-theme", value));
 wireChoices($("startup"), (value) => send("session-startup", value));
+wireChoices($("preload"), (value) => send("set-preload", value));
 wireChoices($("newtab"), (value) => send("set-newtab", value));
 wireChoices($("scrollbar"), (value) => send("set-scrollbar", value));
 $("compact").addEventListener("click", () => send("toggle-compact"));
@@ -101,6 +102,7 @@ function renderGeneral() {
   const settings = state.settings || {};
   markChoices($("theme"), settings.theme || "system");
   markChoices($("startup"), settings.startup || "restore");
+  markChoices($("preload"), settings.preloadTabs || "all");
   markChoices($("newtab"), settings.newTabBar === false ? "0" : "1");
   markChoices($("scrollbar"), settings.scrollbar || "auto");
   pressed($("compact"), state.compact);

@@ -14,11 +14,13 @@ use log::warn;
 use serde_json::{Value, json};
 use servo::{Theme, WebViewId};
 
-use crate::running_app_state::UserInterfaceCommand;
+use crate::running_app_state::{PreloadTarget, UserInterfaceCommand};
 use crate::window::ServoShellWindow;
 
 /// Session restore, reopening closed tabs, drag and drop.
 mod session;
+/// Loading the last session's tabs in the background at startup.
+mod preload;
 
 /// Segoe Fluent Icons glyphs offered as workspace icons.
 const ICONS: &[&str] = &[
@@ -117,6 +119,9 @@ struct UnloadedTab {
     favicon: Option<String>,
     space: u32,
     order: u64,
+    /// When it was last the active tab (milliseconds since 1970), if known: background loading
+    /// at startup takes the most recently used first.
+    used: Option<u64>,
 }
 
 /// A tab in the sidebar's tab list: open, or unloaded.
@@ -186,6 +191,8 @@ pub(crate) struct Workspaces {
     session_active: HashMap<u32, u32>,
     /// Spaces are turned on (Settings → Tabs). Off, there's one list of tabs, untinted.
     enabled: bool,
+    /// Loading the restored tabs in the background, while that's going on.
+    preload: Option<preload::Preloader>,
 }
 
 impl Workspaces {
@@ -246,6 +253,7 @@ impl Workspaces {
             closed: Vec::new(),
             session_active: Default::default(),
             enabled: true,
+            preload: None,
         }
         .with_spaces(crate::desktop::settings::Settings::load().spaces)
     }
@@ -352,6 +360,15 @@ impl Workspaces {
         tabs
     }
 
+    /// When `webview` was last used, in milliseconds since 1970 (saved with the session).
+    fn used_millis(&self, webview: WebViewId) -> Option<u64> {
+        let used = self.last_used.get(&webview)?;
+        let when = std::time::SystemTime::now().checked_sub(used.elapsed())?;
+        when.duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|since| since.as_millis() as u64)
+    }
+
     fn order_of(&self, webview: WebViewId) -> u64 {
         self.tab_order.get(&webview).copied().unwrap_or(u64::MAX)
     }
@@ -401,8 +418,20 @@ impl Workspaces {
             }
         }
         let now = Instant::now();
+        let new_preloads: HashMap<WebViewId, PreloadTarget> =
+            window.take_new_preloads().into_iter().collect();
         for id in &ids {
             if !self.tab_workspace.contains_key(id) {
+                // A restored tab loaded in the background at startup.
+                if let Some(target) = new_preloads.get(id) {
+                    self.adopt_preload(window, *id, *target);
+                    if !self.tab_order.contains_key(id) {
+                        self.next_order += 1;
+                        self.tab_order.insert(*id, self.next_order);
+                    }
+                    self.last_used.insert(*id, now);
+                    continue;
+                }
                 // An unloaded tab loading again, the tab a pinned tab asked for, or an
                 // ordinary new tab.
                 let restored = self.pending_restore.take().and_then(|key| {
@@ -776,6 +805,9 @@ impl Workspaces {
         let Ok(url) = url::Url::parse(&pin.url) else {
             return;
         };
+        if self.activate_when_preloaded(PreloadTarget::Pin(pin_id)) {
+            return;
+        }
         self.pending_pin = Some(pin_id);
         self.awaiting_new_tab = true;
         window.queue_user_interface_command(UserInterfaceCommand::NewWebViewWithUrl(url));
@@ -974,6 +1006,11 @@ impl Workspaces {
             "url": pin.url,
             "favicon": pin.favicon,
             "loaded": pin.webview.is_some(),
+            // Loading in the background at startup: still shown greyed.
+            "preloading": live.as_ref().is_some_and(|view| {
+                window.is_untouched_preload(view.id()) &&
+                    matches!(view.load_status(), servo::LoadStatus::Started | servo::LoadStatus::HeadParsed)
+            }),
             "active": pin.webview.is_some() && pin.webview == active,
             "changed": current_url.is_some_and(|url| url != pin.url),
             "folder": pin.folder,
@@ -1045,6 +1082,7 @@ impl Workspaces {
                 favicon,
                 space: self.tab_workspace.get(&webview).copied().unwrap_or(self.current),
                 order: self.order_of(webview),
+                used: self.used_millis(webview),
             });
         }
         crate::desktop::diagnostics::log(format!("unloading tab {webview:?}"));
@@ -1064,6 +1102,10 @@ impl Workspaces {
         // Show the tab's space (it may be another one, e.g. when cycling tabs).
         if self.enabled {
             self.current = tab.space;
+        }
+        // Its background load at startup is already on its way: show that one.
+        if self.activate_when_preloaded(PreloadTarget::Tab(key)) {
+            return;
         }
         self.pending_restore = Some(key);
         self.awaiting_new_tab = true;
@@ -1320,6 +1362,7 @@ impl Workspaces {
                     favicon: None,
                     space,
                     order: self.next_order,
+                    used: None,
                 });
                 counts.tabs += 1;
             }

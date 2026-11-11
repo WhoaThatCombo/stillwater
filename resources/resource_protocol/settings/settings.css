@@ -201,6 +201,13 @@ h2 {
   font-size: 13px;
 }
 
+/* A second question inside a group (e.g. under "On startup"). */
+.sublabel {
+  margin: 14px 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
 .empty {
   color: var(--muted);
 }

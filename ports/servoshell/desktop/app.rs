@@ -66,6 +66,10 @@ pub struct App {
     fine_timers: bool,
     /// Since when the fine timer resolution has been continuously unneeded while held.
     fine_timers_unwanted_since: Option<Instant>,
+    /// Restored tabs may still be waiting to load in the background (see
+    /// `Sidebar::preload_tick`), and when to look next.
+    preloading: bool,
+    next_preload_tick: Instant,
 }
 
 #[cfg(target_os = "windows")]
@@ -80,6 +84,8 @@ const MEMORY_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 const LOW_MEMORY_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 /// How long the fine timer resolution must have been unneeded before it is given back.
 const FINE_TIMER_RELEASE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+/// How often to start background loads of restored tabs while there are some left.
+const PRELOAD_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl App {
     pub fn new(
@@ -124,6 +130,8 @@ impl App {
             last_memory_pressure: None,
             fine_timers: false,
             fine_timers_unwanted_since: None,
+            preloading: true,
+            next_preload_tick: t,
         }
     }
 
@@ -360,12 +368,35 @@ impl App {
             if self.fine_timers {
                 wake = wake.min(Instant::now() + std::time::Duration::from_secs(1));
             }
+            if self.preloading {
+                wake = wake.min(self.next_preload_tick);
+            }
             // A page scrollbar fading out (nothing once it has: see `scrollbar::next_wake`).
             if let Some(at) = crate::desktop::scrollbar::next_wake() {
                 wake = wake.min(at);
             }
             ControlFlow::WaitUntil(wake)
         }
+    }
+
+    /// Start background loads of restored tabs when it's their turn (see
+    /// `Sidebar::preload_tick`), at most every `PRELOAD_TICK_INTERVAL`. Called after every turn
+    /// of the event loop: a page that animates keeps the loop from ever reaching a timed wake-up.
+    fn maybe_preload(&mut self) {
+        if !self.preloading || Instant::now() < self.next_preload_tick {
+            return;
+        }
+        let AppState::Running(state) = &self.state else {
+            return;
+        };
+        self.next_preload_tick = Instant::now() + PRELOAD_TICK_INTERVAL;
+        let mut more = false;
+        for window in state.windows().iter() {
+            if let Some(headed_window) = window.platform_window().as_headed_window() {
+                more |= headed_window.preload_tick(window);
+            }
+        }
+        self.preloading = more;
     }
 
     /// Unload tabs that haven't been used for a while (see the sidebar's settings) and, when
@@ -445,8 +476,13 @@ impl ApplicationHandler<AppEvent> for App {
         event_loop.set_control_flow(self.control_flow());
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.update_timer_resolution();
+        if self.preloading {
+            self.maybe_preload();
+            // Wake up for the next look (see `control_flow_without_repaint`).
+            event_loop.set_control_flow(self.control_flow());
+        }
     }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
@@ -466,6 +502,8 @@ impl ApplicationHandler<AppEvent> for App {
         if let AppState::Running(state) = &self.state {
             state.maybe_collect_garbage();
         }
+        self.maybe_preload();
+
         if let AppState::Running(state) = &self.state {
             // "Copying GIF…" / "GIF copied" in the status line.
             let copy_notice_changed = crate::desktop::capture::take_changed();
@@ -530,6 +568,7 @@ impl ApplicationHandler<AppEvent> for App {
         // Also here, not only in `about_to_wait`: a loop that never runs dry (frames arriving
         // faster than the window can show them) never gets there.
         self.update_timer_resolution();
+        self.maybe_preload();
         let AppState::Running(state) = &self.state else {
             return;
         };

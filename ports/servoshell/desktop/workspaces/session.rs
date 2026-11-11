@@ -57,6 +57,9 @@ impl Workspaces {
             },
             _ => Value::Null,
         };
+        // When each tab was last used changes all the time; it's saved along with other
+        // changes, but doesn't cause a save by itself.
+        let used_json = |used: Option<u64>| if full { json!(used) } else { Value::Null };
         let mut spaces = Vec::with_capacity(self.list.len());
         for workspace in &self.list {
             let mut kept = Vec::new();
@@ -75,6 +78,7 @@ impl Workspaces {
                             "title": view.page_title().unwrap_or_default(),
                             "customTitle": self.custom_titles.get(&id),
                             "favicon": favicon_json(favicons.get(&id)),
+                            "used": used_json(self.used_millis(id)),
                         })
                     },
                     TabEntry::Unloaded(key) => {
@@ -86,6 +90,7 @@ impl Workspaces {
                             "title": tab.title,
                             "customTitle": tab.custom_title,
                             "favicon": favicon_json(tab.favicon.as_ref()),
+                            "used": used_json(tab.used),
                         })
                     },
                 };
@@ -135,7 +140,8 @@ impl Workspaces {
     }
 
     /// Add the previous session's tabs as unloaded tabs. If Stillwater's first tab is the
-    /// session's active tab, that tab takes the active tab's place (or its pin's).
+    /// session's active tab, that tab takes the active tab's place (or its pin's). The others
+    /// load in the background after it (`preload_tick`) or when clicked.
     pub(crate) fn restore_session(
         &mut self,
         session: &PendingSession,
@@ -152,6 +158,8 @@ impl Workspaces {
         }
         let shown_space = saved_current.unwrap_or(self.current);
         let mut first_tab = None;
+        // Load the other tabs in the background once the window is up (if settings say so).
+        self.preload = Some(super::preload::Preloader::new());
         for space in data["spaces"].as_array().into_iter().flatten() {
             // Tabs of a space that's gone (spaces were merged) come back in the current one.
             let Some(id) = space["id"].as_u64().map(|id| id as u32) else {
@@ -176,6 +184,7 @@ impl Workspaces {
                     favicon: tab["favicon"].as_str().map(str::to_owned),
                     space: id,
                     order: self.next_order,
+                    used: tab["used"].as_u64(),
                 });
                 // With spaces merged, the first space's active tab wins.
                 if active == Some(index) && !self.session_active.contains_key(&id) {
@@ -235,6 +244,7 @@ impl Workspaces {
                     favicon,
                     space: self.tab_workspace.get(&id).copied().unwrap_or(self.current),
                     order: self.order_of(id),
+                    used: self.used_millis(id),
                 }
             },
             TabEntry::Unloaded(key) => {
@@ -249,6 +259,7 @@ impl Workspaces {
                     favicon: tab.favicon.clone(),
                     space: tab.space,
                     order: tab.order,
+                    used: tab.used,
                 }
             },
         };
@@ -445,6 +456,7 @@ impl Workspaces {
                     favicon: pin.favicon,
                     space: self.current,
                     order: self.next_order,
+                    used: None,
                 });
                 TabEntry::Unloaded(key)
             },

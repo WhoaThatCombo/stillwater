@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
 
@@ -18,7 +19,9 @@ use servo::{
 use url::Url;
 
 use crate::parser::location_bar_input_to_url;
-use crate::running_app_state::{RunningAppState, UserInterfaceCommand, WebViewCollection};
+use crate::running_app_state::{
+    PreloadTarget, RunningAppState, UserInterfaceCommand, WebViewCollection,
+};
 
 // This should vary by zoom level and maybe actual text size (focused or under cursor)
 #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
@@ -81,6 +84,11 @@ pub(crate) struct ServoShellWindow {
     pending_favicon_loads: RefCell<Vec<WebViewId>>,
     /// Pending [`UserInterfaceCommand`] that have yet to be processed by the main loop.
     pending_commands: RefCell<Vec<UserInterfaceCommand>>,
+    /// WebViews created by `PreloadWebView` that the tab list hasn't picked up yet.
+    new_preloads: RefCell<Vec<(WebViewId, PreloadTarget)>>,
+    /// Preloaded WebViews that haven't been shown yet: they may not open popups, download,
+    /// move or resize the window, or go fullscreen.
+    untouched_preloads: RefCell<HashSet<WebViewId>>,
 }
 
 pub(crate) enum TopLevelWebViewCreationRequest {
@@ -99,6 +107,8 @@ impl ServoShellWindow {
             new_frame_ready: Default::default(),
             pending_favicon_loads: Default::default(),
             pending_commands: Default::default(),
+            new_preloads: Default::default(),
+            untouched_preloads: Default::default(),
         }
     }
 
@@ -247,7 +257,23 @@ impl ServoShellWindow {
             .collect()
     }
 
+    /// WebViews created by `PreloadWebView` since the last call, with what they are for.
+    pub(crate) fn take_new_preloads(&self) -> Vec<(WebViewId, PreloadTarget)> {
+        std::mem::take(&mut *self.new_preloads.borrow_mut())
+    }
+
+    /// Whether `webview` was loaded in the background at startup and hasn't been shown yet.
+    pub(crate) fn is_untouched_preload(&self, webview: WebViewId) -> bool {
+        let mut untouched = self.untouched_preloads.borrow_mut();
+        // Shown some other way (e.g. the tab next to it was closed): no longer untouched.
+        if self.webview_collection.borrow().active_id() == Some(webview) {
+            untouched.remove(&webview);
+        }
+        untouched.contains(&webview)
+    }
+
     pub(crate) fn activate_webview(&self, webview_id: WebViewId) {
+        self.untouched_preloads.borrow_mut().remove(&webview_id);
         self.webview_collection
             .borrow_mut()
             .activate_webview(webview_id);
@@ -292,6 +318,7 @@ impl ServoShellWindow {
         if webview_collection.remove(webview_id).is_none() {
             return;
         }
+        self.untouched_preloads.borrow_mut().remove(&webview_id);
         self.platform_window
             .dismiss_embedder_controls_for_webview(webview_id);
 
@@ -429,6 +456,19 @@ impl ServoShellWindow {
                     );
                     webview.set_focused(false);
                     webview.hide();
+                },
+                UserInterfaceCommand::PreloadWebView(url, target) => {
+                    self.set_needs_update();
+                    let webview = self.create_toplevel_webview(
+                        state.clone(),
+                        TopLevelWebViewCreationRequest::WithUrl(url),
+                    );
+                    // Before the page's script runs: its media waits for the user.
+                    webview.block_autoplay_until_activation();
+                    webview.set_focused(false);
+                    webview.hide();
+                    self.untouched_preloads.borrow_mut().insert(webview.id());
+                    self.new_preloads.borrow_mut().push((webview.id(), target));
                 },
                 UserInterfaceCommand::CloseWebView(id) => {
                     self.set_needs_update();

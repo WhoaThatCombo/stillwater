@@ -88,6 +88,38 @@ impl ThemeChoice {
     }
 }
 
+/// "Load my tabs in the background at startup": which of the last session's tabs load by
+/// themselves after launch (the rest load when clicked).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) enum PreloadMode {
+    /// All restored tabs, pinned tabs and Essentials.
+    #[default]
+    All,
+    /// Only pinned tabs and Essentials.
+    Pinned,
+    /// None: tabs load when clicked.
+    Off,
+}
+
+impl PreloadMode {
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            PreloadMode::All => "all",
+            PreloadMode::Pinned => "pinned",
+            PreloadMode::Off => "off",
+        }
+    }
+
+    pub(crate) fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "all" => Some(PreloadMode::All),
+            "pinned" => Some(PreloadMode::Pinned),
+            "off" => Some(PreloadMode::Off),
+            _ => None,
+        }
+    }
+}
+
 /// Choices for "Unload inactive tabs after", in minutes (0 = never).
 const TAB_UNLOAD_CHOICES: &[u32] = &[0, 10, 30, 60, 120];
 /// Like Zen's tab unloader, background tabs are unloaded after this long by default.
@@ -110,6 +142,8 @@ pub(crate) struct Settings {
     pub(crate) spaces: bool,
     /// Play the short animation that covers the window while Stillwater starts.
     pub(crate) startup_animation: bool,
+    /// Which restored tabs load in the background right after launch.
+    pub(crate) preload_tabs: PreloadMode,
     /// How the page scrollbar shows: "auto" (overlay, fades out), "always" or "hidden".
     pub(crate) scrollbar: crate::desktop::scrollbar::ScrollbarMode,
     /// Width of the docked sidebar in device-independent pixels (dragged by its right edge).
@@ -146,6 +180,10 @@ impl Settings {
             new_tab_bar: saved["newTabBar"].as_bool().unwrap_or(true),
             spaces: saved["spaces"].as_bool().unwrap_or(false),
             startup_animation: saved["startupAnimation"].as_bool().unwrap_or(true),
+            preload_tabs: saved["preloadTabs"]
+                .as_str()
+                .and_then(PreloadMode::from_id)
+                .unwrap_or_default(),
             scrollbar: saved["scrollbar"]
                 .as_str()
                 .and_then(crate::desktop::scrollbar::ScrollbarMode::from_id)
@@ -176,6 +214,7 @@ impl Settings {
             "newTabBar": self.new_tab_bar,
             "spaces": self.spaces,
             "startupAnimation": self.startup_animation,
+            "preloadTabs": self.preload_tabs.id(),
             "scrollbar": self.scrollbar.id(),
             "sidebarWidth": self.sidebar_width,
         });
@@ -263,6 +302,13 @@ impl Settings {
         self.save();
     }
 
+    pub(crate) fn set_preload_tabs(&mut self, id: &str) {
+        if let Some(mode) = PreloadMode::from_id(id) {
+            self.preload_tabs = mode;
+            self.save();
+        }
+    }
+
     pub(crate) fn set_scrollbar(&mut self, id: &str) {
         if let Some(mode) = crate::desktop::scrollbar::ScrollbarMode::from_id(id) {
             self.scrollbar = mode;
@@ -292,6 +338,7 @@ impl Settings {
             "newTabBar": self.new_tab_bar,
             "spaces": self.spaces,
             "startupAnimation": self.startup_animation,
+            "preloadTabs": self.preload_tabs.id(),
             "scrollbar": self.scrollbar.id(),
             "version": crate::desktop::updater::CURRENT_VERSION,
         })

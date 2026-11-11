@@ -63,7 +63,7 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "toggle-compact", "session-startup", "adblock-enabled", "pw-autofill", "pw-delete", "pw-reveal",
     "pw-copy", "pw-copy-user", "pw-forget-never", "zen-scan", "zen-import", "check-updates",
     "hist-clear", "hist-show", "dl-ask", "dl-panel", "set-spaces", "tr-auto", "tr-target", "tr-unlist",
-    "tr-delete-model", "tr-models", "set-splash", "set-scrollbar",
+    "tr-delete-model", "tr-models", "set-splash", "set-scrollbar", "set-preload",
 ];
 
 /// Whether `url` is the settings page (whatever category it shows).
@@ -119,9 +119,7 @@ fn is_navigating(webview: &WebView) -> bool {
 #[derive(Clone, Debug)]
 pub(crate) enum WindowAction {
     Minimize,
-    ToggleMaximize,
     Close,
-    Drag,
     /// Install the available update (or open its release page for portable copies).
     Update,
     /// Check GitHub for an update right now (settings panel).
@@ -322,7 +320,7 @@ impl Sidebar {
         self.last_pushed_state = None;
     }
 
-    /// Window operations requested since the last call (caption buttons, dragging).
+    /// Window operations requested since the last call (caption buttons, update, panes...).
     pub(crate) fn take_window_actions(&mut self) -> Vec<WindowAction> {
         std::mem::take(&mut self.window_actions)
     }
@@ -840,6 +838,27 @@ impl Sidebar {
         unloaded
     }
 
+    /// Load the last session's tabs in the background at startup, when it's their turn (see
+    /// `workspaces/preload.rs`). Returns whether there's more to do.
+    pub(crate) fn preload_tick(&mut self, window: &ServoShellWindow) -> bool {
+        if !self.workspaces.preload_pending() {
+            return false;
+        }
+        self.sync_workspaces(window);
+        // Right after launch the first tab may briefly report its placeholder about:blank as
+        // loaded, before its real page has even started: that doesn't count as loaded.
+        let foreground_busy = window.active_webview().is_some_and(|webview| {
+            is_navigating(&webview) ||
+                webview.url().is_none_or(|url| url.as_str() == "about:blank")
+        });
+        let mode = self.settings.borrow().preload_tabs;
+        let (more, changed) = self.workspaces.preload_tick(window, mode, foreground_busy);
+        if changed {
+            window.set_needs_update();
+        }
+        more
+    }
+
     /// Act on messages sent by the sidebar page. Returns true if the layout may have changed.
     pub(crate) fn handle_messages(&mut self, window: &ServoShellWindow) -> bool {
         let messages = std::mem::take(&mut *self.inbox.borrow_mut());
@@ -983,6 +1002,7 @@ impl Sidebar {
                 },
                 "set-newtab" => self.settings.borrow_mut().set_new_tab_bar(argument == "1"),
                 "set-splash" => self.settings.borrow_mut().set_startup_animation(argument == "1"),
+                "set-preload" => self.settings.borrow_mut().set_preload_tabs(argument),
                 "set-scrollbar" => self.settings.borrow_mut().set_scrollbar(&argument),
                 "set-spaces" => {
                     let enabled = argument == "1";
@@ -1112,9 +1132,7 @@ impl Sidebar {
                 },
                 "blur" => self.set_focused(false, window),
                 "win-min" => self.window_actions.push(WindowAction::Minimize),
-                "win-max" => self.window_actions.push(WindowAction::ToggleMaximize),
                 "win-close" => self.window_actions.push(WindowAction::Close),
-                "win-drag" => self.window_actions.push(WindowAction::Drag),
                 "update" => self.window_actions.push(WindowAction::Update),
                 // The settings page, in a tab: `[<category>]`.
                 "open-settings" => self.open_settings(window, argument),
@@ -1262,6 +1280,8 @@ impl Sidebar {
                         "loading": is_navigating(webview),
                         "favicon": self.favicons.get(&id),
                         "loaded": true,
+                        // Loading in the background at startup: still shown greyed.
+                        "preloading": window.is_untouched_preload(id) && is_navigating(webview),
                         "playing": self.playing_media.contains(&id),
                     }));
                 },

@@ -57,11 +57,17 @@
           <button data-value="hidden">Hidden</button>
         </div>
       </div>
-      <div class="group" data-words="startup restore session tabs launch open animation splash">
+      <div class="group" data-words="startup restore session tabs launch open animation splash preload background load">
         <h2>On startup</h2>
         <div class="options" id="startup" role="radiogroup" aria-label="On startup">
-          <button data-value="restore">Restore previous tabs<span>Restored tabs load when you click them.</span></button>
+          <button data-value="restore">Restore previous tabs<span>Your last tabs come back where you left them.</span></button>
           <button data-value="newtab">Open a new tab</button>
+        </div>
+        <p class="sublabel" id="preload-label">Load my tabs in the background at startup</p>
+        <div class="options" id="preload" role="radiogroup" aria-labelledby="preload-label">
+          <button data-value="all">On<span>After the tab you were on has loaded, the others load quietly behind it, two at a time, so they're ready when you click them. Nothing plays until you open a tab.</span></button>
+          <button data-value="pinned">Only pinned tabs and Essentials</button>
+          <button data-value="off">Off<span>Restored tabs load when you click them.</span></button>
         </div>
         <button class="toggle" id="splash"><span>Startup animation<span>A few seconds of the Stillwater waves settling while your tabs and sidebar load behind them. Click or press a key to skip it.</span></span><span class="switch" aria-hidden="true"></span></button>
       </div>

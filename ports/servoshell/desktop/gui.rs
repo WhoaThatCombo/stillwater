@@ -783,25 +783,14 @@ impl Gui {
         load_pending_favicons(window, &mut self.sidebar);
         self.sidebar.handle_messages(window);
 
-        // Caption buttons and window dragging for the frameless window.
+        // Window operations asked for by the sidebar page. Moving and maximising the window
+        // are the top bar's alone (`HeadedWindow::handle_top_bar_event`).
         let winit_window = headed_window.winit_window();
         for action in self.sidebar.take_window_actions() {
             crate::desktop::diagnostics::log(format!("window action: {action:?}"));
             match action {
                 WindowAction::Minimize => winit_window.set_minimized(true),
-                WindowAction::ToggleMaximize => {
-                    winit_window.set_maximized(!winit_window.is_maximized())
-                },
                 WindowAction::Close => window.schedule_close(),
-                WindowAction::Drag => {
-                    // The sidebar asks for this after its page saw the mouse press. If the button
-                    // is already up by now (a quick click), Windows would start a drag that waits
-                    // for a release that already happened, holding the mouse until something
-                    // takes it back.
-                    if left_button_held() {
-                        let _ = winit_window.drag_window();
-                    }
-                },
                 WindowAction::ReportSite(tab) => {
                     let webview = tab
                         .and_then(|id| window.webview_by_id(id))

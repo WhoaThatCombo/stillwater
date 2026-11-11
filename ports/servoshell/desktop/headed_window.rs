@@ -117,8 +117,8 @@ pub struct HeadedWindow {
     repaint_pending: Cell<bool>,
     /// When the window was last painted.
     last_paint: Cell<Option<std::time::Instant>>,
-    /// The last press in the gaps around the page, to detect double-clicks there.
-    last_gutter_press: Cell<Option<std::time::Instant>>,
+    /// The last press on the empty part of the top bar, to detect double-clicks there.
+    last_top_bar_press: Cell<Option<std::time::Instant>>,
     /// Light/dark chosen in Stillwater's settings; `None` follows Windows.
     theme_override: Cell<Option<Theme>>,
     /// Mouse buttons pressed on the page whose release the page hasn't seen yet. The release
@@ -318,7 +318,7 @@ impl HeadedWindow {
             resize_direction: Default::default(),
             repaint_pending: Cell::new(false),
             last_paint: Cell::new(None),
-            last_gutter_press: Cell::new(None),
+            last_top_bar_press: Cell::new(None),
             theme_override: Cell::new(None),
             page_buttons_held: Default::default(),
             pane_buttons_held: Default::default(),
@@ -389,6 +389,12 @@ impl HeadedWindow {
             .borrow_mut()
             .sidebar
             .unload_inactive_tabs(window, keep, low_memory)
+    }
+
+    /// Load restored tabs in the background (see `Sidebar::preload_tick`). Returns whether
+    /// there's more to do.
+    pub(crate) fn preload_tick(&self, window: &ServoShellWindow) -> bool {
+        self.gui.borrow_mut().sidebar.preload_tick(window)
     }
 
     /// Change the sidebar's state from outside a UI update (e.g. updater progress).
@@ -627,11 +633,11 @@ impl HeadedWindow {
                 }
                 let now = std::time::Instant::now();
                 let double = self
-                    .last_gutter_press
+                    .last_top_bar_press
                     .replace(Some(now))
                     .is_some_and(|last| now.duration_since(last) < double_click_time());
                 if double {
-                    self.last_gutter_press.set(None);
+                    self.last_top_bar_press.set(None);
                     self.winit_window
                         .set_maximized(!self.winit_window.is_maximized());
                     diagnostics::log("click: top bar double-click (maximise)");
@@ -1726,8 +1732,8 @@ impl HeadedWindow {
             return;
         }
 
-        // Pressing in the gaps around the page acts like a title bar: drag to move,
-        // double-click to maximise.
+        // Presses in the gaps around the page do nothing: only the top bar moves the window.
+        // They are swallowed so they don't reach the page or start a selection.
         if !self.winit_window.is_decorated() &&
             !dialog_open &&
             matches!(
@@ -1746,20 +1752,7 @@ impl HeadedWindow {
                     gui.find_bar_contains(point)
             })
         {
-            let now = std::time::Instant::now();
-            let double = self
-                .last_gutter_press
-                .replace(Some(now))
-                .is_some_and(|last| now.duration_since(last) < double_click_time());
-            if double {
-                self.last_gutter_press.set(None);
-                self.winit_window
-                    .set_maximized(!self.winit_window.is_maximized());
-                diagnostics::log("click: gutter double-click (maximise)");
-            } else {
-                diagnostics::log("click: gutter (drag window)");
-                let _ = self.winit_window.drag_window();
-            }
+            diagnostics::log("click: gutter (ignored)");
             return;
         }
 
