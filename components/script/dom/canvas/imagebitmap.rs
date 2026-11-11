@@ -359,7 +359,8 @@ impl ImageBitmap {
 
                 // If no ImageBitmap object can be constructed, then the promise
                 // is rejected instead.
-                let Some(snapshot) = image.get_raster_image_data() else {
+                // An SVG image is rasterized at its natural size.
+                let Some(snapshot) = image.get_raster_image_data_rasterizing_vector() else {
                     p.reject_error(realm, Error::InvalidState(None));
                     return p;
                 };

@@ -281,7 +281,12 @@ impl WebGLTexture {
             return Err(WebGLError::InvalidOperation);
         }
 
-        if !base_image_info.is_power_of_two() {
+        // Only WebGL 1 requires power-of-two sizes for mipmaps; WebGL 2 (GLES 3) allows any size.
+        let is_webgl1 = self
+            .upcast()
+            .context()
+            .is_none_or(|context| context.webgl_version() == WebGLVersion::WebGL1);
+        if is_webgl1 && !base_image_info.is_power_of_two() {
             return Err(WebGLError::InvalidOperation);
         }
 
