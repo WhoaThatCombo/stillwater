@@ -148,9 +148,16 @@ impl App {
     /// after it has been unneeded for `FINE_TIMER_RELEASE_DELAY` (a page between two animation
     /// frames looks idle for a moment; flipping on every such gap cost a system call each time).
     fn update_timer_resolution(&mut self) {
+        // Also while the user interacts (the 750 ms grace after every input event,
+        // `keep_awake_for`): input waits for the page's next rendering update, which the script
+        // thread schedules with a 20 ms timer (script_thread.rs:1347-1366); at the default 15.6 ms
+        // tick that is 31 ms, so hovering, typing and wheel-scrolling a static page answered a
+        // frame or two later than they had to.
+        let interacting = self.tick_until.is_some_and(|until| Instant::now() < until);
         let wanted = match &self.state {
             AppState::Running(state) => {
-                state.showing_moving_pictures() ||
+                interacting ||
+                    state.showing_moving_pictures() ||
                     state.windows().iter().any(|window| {
                         window.active_webview().is_some_and(|webview| {
                             webview.animating() ||
