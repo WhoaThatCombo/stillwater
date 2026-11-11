@@ -1527,6 +1527,12 @@ impl LayoutThread {
                 &std::mem::take(&mut *damaged_elements.lock()),
             )
         {
+            // Queries and hit tests read transforms from the scroll tree, which is not rebuilt
+            // on this path.
+            if let Some(tree) = self.stacking_context_tree.borrow_mut().as_mut() {
+                let paint_info = &mut tree.paint_info;
+                tree.animated.refresh_scroll_tree(&mut paint_info.scroll_tree);
+            }
             // Values equal to those on screen need no new frame.
             *self.pending_animated_properties.borrow_mut() =
                 (self.sent_animated_properties.borrow().as_ref() != Some(&values)).then_some(values);

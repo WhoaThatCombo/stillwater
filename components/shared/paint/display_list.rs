@@ -653,6 +653,18 @@ impl ScrollTree {
         result
     }
 
+    /// Replace the transform of the reference frame at `index`, for a transform that changed
+    /// without the tree being rebuilt (an animation shown through a WebRender binding).
+    pub fn set_reference_frame_transform(&mut self, index: usize, transform: FastLayoutTransform) {
+        let Some(node) = self.nodes.get_mut(index) else {
+            return;
+        };
+        if let SpatialTreeNodeInfo::ReferenceFrame(ref mut info) = node.info {
+            info.transform = transform;
+            self.invalidate_cached_transforms();
+        }
+    }
+
     /// Set the offsets of all scrolling nodes in this tree to 0.
     pub fn reset_all_scroll_offsets(&mut self) {
         for node in self.nodes.iter_mut() {

@@ -206,6 +206,8 @@ button {
 .field .placeholder {
   position: absolute;
   left: 0;
+  /* Cut at the field's edge in a narrow sidebar rather than running past the box. */
+  max-width: 100%;
   top: 50%;
   transform: translateY(-50%);
   opacity: 0.55;

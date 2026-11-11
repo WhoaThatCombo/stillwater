@@ -18,6 +18,7 @@
 use std::sync::Arc;
 
 use app_units::Au;
+use paint_api::display_list::ScrollTree;
 use rustc_hash::{FxHashMap, FxHashSet};
 use style::dom::OpaqueNode;
 use style::properties::ComputedValues;
@@ -158,6 +159,21 @@ impl AnimatedProperties {
             .animated_reference_frame_transform(containing_block_rect)
             .filter(LayoutTransform::is_invertible);
         Some((*key, transform))
+    }
+
+    /// Bring the transforms of the animated reference frames in `scroll_tree` up to date
+    /// with their fragments' styles. Hit testing and geometry queries (`elementFromPoint`,
+    /// `getBoundingClientRect`, where a click lands) read them from this tree, so it has to
+    /// follow what the bindings show on screen.
+    pub(crate) fn refresh_scroll_tree(&self, scroll_tree: &mut ScrollTree) {
+        for (index, (_, fragment, containing_block_rect)) in &self.reference_frames {
+            if let Some(transform) = fragment
+                .animated_reference_frame_transform(containing_block_rect)
+                .filter(LayoutTransform::is_invertible)
+            {
+                scroll_tree.set_reference_frame_transform(*index, transform.into());
+            }
+        }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
