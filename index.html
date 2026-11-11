@@ -375,6 +375,7 @@
       </a>
       <nav aria-label="Page">
         <a href="#features">Features</a>
+        <a href="#sites">Sites</a>
         <a href="https://github.com/WhoaThatCombo/stillwater/releases">Download</a>
         <a href="#build">Build it</a>
         <a href="https://github.com/WhoaThatCombo/stillwater">GitHub</a>
@@ -396,6 +397,7 @@
               View on GitHub
             </a>
           </div>
+          <p class="hint">The installer isn't code-signed yet, so Windows SmartScreen will say "Windows protected your PC". Choose <strong>More info</strong>, then <strong>Run anyway</strong>.</p>
           <p class="hint">The browser mock is live: click its coloured dots to switch spaces.</p>
         </div>
 
@@ -432,6 +434,10 @@
           <img src="assets/stillwater-workspaces.png" width="1296" height="839" alt="Stillwater showing servo.org, with a blue-tinted Work space selected in the sidebar">
           <figcaption>A "Work" space with a blue accent. Each space keeps its own tabs, and its colour tints the window around the page.</figcaption>
         </figure>
+        <figure>
+          <img src="assets/stillwater-github.png" width="1296" height="839" loading="lazy" alt="Stillwater 0.8.9 showing the servo/servo repository on GitHub, with the file list, tabs and sidebar rendered">
+          <figcaption>Stillwater 0.8.9 on GitHub. This is an unedited capture of the browser window: the page is laid out and drawn by Servo.</figcaption>
+        </figure>
       </section>
 
       <section id="features">
@@ -443,7 +449,7 @@
           </li>
           <li>
             <strong>Spaces</strong>
-            <p>Group tabs into spaces with their own name, icon and colour. Switch with a click or <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>1</kbd>–<kbd>9</kbd>. Your spaces are remembered between launches.</p>
+            <p>Group tabs into spaces with their own name, icon and colour. Switch with a click or <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>1</kbd>–<kbd>9</kbd>. Your spaces and open tabs come back when you start Stillwater again.</p>
           </li>
           <li>
             <strong>Compact mode</strong>
@@ -461,6 +467,22 @@
             <strong>Light and dark</strong>
             <p>Follows your Windows theme, with colours adapted from Zen Browser's open-source styles.</p>
           </li>
+          <li>
+            <strong>Split view and Glance</strong>
+            <p>Put two pages side by side, or peek at a link in a floating card without leaving the page you're on.</p>
+          </li>
+          <li>
+            <strong>Passwords</strong>
+            <p>Saved logins fill in on sign-in pages, with a list to pick from when you have several accounts for a site.</p>
+          </li>
+          <li>
+            <strong>Ad blocking</strong>
+            <p>Built in and on by default, using uBlock Origin's default filter lists.</p>
+          </li>
+          <li>
+            <strong>Moving in from Zen</strong>
+            <p>Import your spaces, pinned tabs, bookmarks, history, passwords and cookies from Zen Browser on the same computer.</p>
+          </li>
         </ul>
       </section>
 
@@ -476,7 +498,7 @@
               <li><span>Clone the repository and open a PowerShell window in it.</span></li>
               <li><span>Run <code>.\mach bootstrap</code> to install LLVM, CMake, GStreamer and the rest.</span></li>
               <li><span>Run <code>.\mach build --release</code>.</span></li>
-              <li><span>Start <code>servoshell.exe</code> from <code>target\release</code>.</span></li>
+              <li><span>Start <code>servoshell.exe</code> from <code>target\release</code>. That file is Stillwater: the build keeps Servo's name for it, and the installer renames it to <code>Stillwater.exe</code>.</span></li>
             </ol>
           </div>
           <pre><code><span class="c"># PowerShell</span>
@@ -492,18 +514,28 @@ rustup set default-host x86_64-pc-windows-msvc</code></pre>
         </div>
       </section>
 
+      <section id="sites">
+        <h2>Which sites work</h2>
+        <div class="prose">
+          <p>Servo is a young engine, so this is the first thing to ask. Each release is checked against a list of 25 popular sites; in 0.8.9, 23 of them are usable.</p>
+          <p><strong>Work well in our testing:</strong> GitHub, Wikipedia, YouTube, Reddit, X, Twitch, the Steam store, and most news, documentation and blog sites.</p>
+          <p><strong>Known to break:</strong> microsoft.com and Notion have layout problems, Discord's sign-in page doesn't display, and anything that needs DRM, such as Netflix, won't play.</p>
+          <p class="muted">Emoji show as outlines, and text that should end in "…" is cut off without it. If a site is broken for you, right-click its tab and choose <strong>Report site isn't working</strong>.</p>
+        </div>
+      </section>
+
       <section>
         <h2>What it can't do yet</h2>
         <div class="prose">
-          <p>Stillwater is a hobby project on top of an engine that's still maturing. Some sites will look wrong or not load. There are no extensions, no DRM video like Netflix, and open tabs aren't restored after you close the browser.</p>
-          <p>Next up: split view, session restore, and moving tabs between spaces. Ideas and bug reports are welcome on <a href="https://github.com/WhoaThatCombo/stillwater/issues">GitHub</a>.</p>
+          <p>Stillwater is a hobby project on top of an engine that's still maturing. Some sites will look wrong or not load. There are no extensions and no DRM video like Netflix, and it runs on Windows only for now.</p>
+          <p>Next up: a private browsing mode, faster tab switching and start-up, and scrollbars for scrolling areas inside pages. Follow along in the <a href="https://github.com/WhoaThatCombo/stillwater/releases">release notes</a>, or bring ideas and bug reports to the <a href="https://github.com/WhoaThatCombo/stillwater/issues">issue tracker</a>.</p>
         </div>
       </section>
     </main>
 
     <footer>
       <p>Stillwater is built on <a href="https://servo.org">Servo</a> and inspired by <a href="https://github.com/zen-browser/desktop">Zen Browser</a>. It's not affiliated with or endorsed by either project.</p>
-      <p>Licensed under the <a href="https://github.com/WhoaThatCombo/stillwater/blob/stillwater/LICENSE">Mozilla Public License 2.0</a>.</p>
+      <p>Licensed under the <a href="https://github.com/WhoaThatCombo/stillwater/blob/stillwater/LICENSE">Mozilla Public License 2.0</a>. The sidebar's colours and spacing are adapted from Zen Browser's MPL-2.0 styles; the <a href="https://github.com/WhoaThatCombo/stillwater/blob/stillwater/resources/resource_protocol/sidebar/zen-sidebar.css">adapted file</a> carries the licence notice and names its sources.</p>
     </footer>
   </div>
 
