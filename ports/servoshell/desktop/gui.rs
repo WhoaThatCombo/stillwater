@@ -1473,6 +1473,9 @@ fn zen_scan(profile: usize) -> serde_json::Value {
     })
 }
 
+/// Largest favicon kept for the sidebar, in pixels a side (20 CSS px at up to 240% scaling).
+const FAVICON_MAX: u32 = 48;
+
 /// Converts all favicons that have not yet been processed into PNG data URLs for the sidebar.
 fn load_pending_favicons(window: &ServoShellWindow, sidebar: &mut Sidebar) {
     for id in window.take_pending_favicon_loads() {
@@ -1484,14 +1487,26 @@ fn load_pending_favicons(window: &ServoShellWindow, sidebar: &mut Sidebar) {
         };
 
         let image = embedder_image_to_egui_image(&favicon);
-        let rgba = image
+        let rgba: Vec<u8> = image
             .pixels
             .iter()
             .flat_map(|pixel| pixel.to_srgba_unmultiplied())
             .collect();
-        if let Some(data_url) =
-            png_data_url(image.size[0] as u32, image.size[1] as u32, rgba)
-        {
+        let (width, height) = (image.size[0] as u32, image.size[1] as u32);
+        // The sidebar shows icons at 16-20 CSS px. Sites often offer 64-512 px icons, and the
+        // data URL goes into every state push, every sidebar render and the session file
+        // (which drops icons over 16 KB): keep at most FAVICON_MAX px a side.
+        let (width, height, rgba) = match image::RgbaImage::from_raw(width, height, rgba) {
+            Some(full) if width.max(height) > FAVICON_MAX => {
+                let scale = FAVICON_MAX as f32 / width.max(height) as f32;
+                let fit = |side: u32| ((side as f32 * scale).round() as u32).max(1);
+                let small = image::imageops::thumbnail(&full, fit(width), fit(height));
+                (small.width(), small.height(), small.into_raw())
+            },
+            Some(full) => (width, height, full.into_raw()),
+            None => continue,
+        };
+        if let Some(data_url) = png_data_url(width, height, rgba) {
             sidebar.set_favicon(id, data_url);
         }
     }
