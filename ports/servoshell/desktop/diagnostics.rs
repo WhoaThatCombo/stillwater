@@ -27,14 +27,12 @@ static LOG: Mutex<Option<Log>> = Mutex::new(None);
 
 /// Open the log. Safe to call once at startup; later calls are ignored.
 pub(crate) fn init() {
-    let Some(dir) = dirs::data_local_dir().map(|dir| dir.join("Stillwater")) else {
+    let Some(path) = log_path() else {
         return;
     };
-    let _ = std::fs::create_dir_all(&dir);
-    // STILLWATER_LOG_FILE lets test copies log elsewhere instead of overwriting the user's log.
-    let path = std::env::var_os("STILLWATER_LOG_FILE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| dir.join("stillwater.log"));
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     let Ok(file) = File::create(path) else {
         return;
     };
@@ -48,6 +46,19 @@ pub(crate) fn init() {
             last_summary: Instant::now(),
         });
     }
+}
+
+/// Where the log goes. STILLWATER_LOG_FILE lets test copies log elsewhere instead of
+/// overwriting the user's log.
+fn log_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("STILLWATER_LOG_FILE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::data_local_dir().map(|dir| dir.join("Stillwater").join("stillwater.log")))
+}
+
+/// The folder holding the log, for other files meant for bug reports.
+pub(crate) fn dir() -> Option<std::path::PathBuf> {
+    log_path().and_then(|path| path.parent().map(std::path::Path::to_path_buf))
 }
 
 /// Write one line, prefixed with seconds since launch.

@@ -63,6 +63,17 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    static LAYOUT_REPORTS: std::cell::RefCell<Vec<(f32, f32)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Points (CSS px in the page) where "Save layout report for this element" was picked since
+/// the last call.
+pub(crate) fn take_layout_report_requests() -> Vec<(f32, f32)> {
+    LAYOUT_REPORTS.with(|reports| std::mem::take(&mut *reports.borrow_mut()))
+}
+
 /// Link actions picked in the page's context menu since the last call.
 pub(crate) fn take_link_actions() -> Vec<(LinkAction, url::Url)> {
     LINK_ACTIONS.with(|actions| std::mem::take(&mut *actions.borrow_mut()))
@@ -744,6 +755,15 @@ impl Dialog {
                             _ => None,
                         };
                     }
+                    // The point the menu was opened at: CSS px in the page (see
+                    // `show_embedder_control`).
+                    let report_point = {
+                        let origin = context_menu.position().min;
+                        (origin.x as f32, origin.y as f32)
+                    };
+                    let mut report_picked =
+                        std::env::var("STILLWATER_TEST_CONTEXT_MENU_PICK").as_deref() ==
+                            Ok("Save layout report");
                     let mut position = context_menu.position();
                     position.min.x += toolbar_offset.x as i32;
                 position.max.x += toolbar_offset.x as i32;
@@ -864,8 +884,22 @@ impl Dialog {
                                         ui.close();
                                     }
                                 }
+                                ui.separator();
+                                if extra_menu_button(ui, "Save layout report for this element") {
+                                    report_picked = true;
+                                    ui.close();
+                                }
                             })
                         });
+
+                    if report_picked {
+                        crate::desktop::diagnostics::log("context menu: layout report");
+                        LAYOUT_REPORTS.with(|reports| reports.borrow_mut().push(report_point));
+                        if let Some(context_menu) = menu.take() {
+                            context_menu.dismiss();
+                        }
+                        return false;
+                    }
 
                     if response.response.clicked_elsewhere() {
                         is_open = false;

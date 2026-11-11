@@ -26,6 +26,7 @@ pub(crate) mod headed_window;
 pub(crate) mod history;
 mod headless_window;
 mod keyutils;
+pub(crate) mod layout_report;
 mod memory;
 pub(crate) mod passwords;
 pub(crate) mod panes;

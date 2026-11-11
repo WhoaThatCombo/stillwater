@@ -332,12 +332,14 @@ impl DocumentEmbedderControls {
 
         let mut info = ContextMenuElementInformation::default();
         // A video shown like an animated GIF: looping, muted, no controls, a plain file source.
+        // X's GIFs are clips under /tweet_video/ that its script loops itself, without the
+        // `loop` attribute, so those count whatever their attributes say.
         if let Some(media) = video_element
             .as_ref()
             .and_then(|node| node.downcast::<HTMLMediaElement>()) &&
-            media.Loop() &&
-            media.Muted() &&
-            !media.Controls()
+            !media.Controls() &&
+            ((media.Loop() && media.Muted()) ||
+                media.CurrentSrc().0.to_string().contains("/tweet_video/"))
         {
             let source = media.CurrentSrc().0;
             info.gif_video_url = self

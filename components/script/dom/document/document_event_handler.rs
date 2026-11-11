@@ -1410,8 +1410,15 @@ impl DocumentEventHandler {
         // Step 3. Let result = dispatch menuevent at target.
         let result = menu_event.upcast::<Event>().fire(cx, target);
 
-        // Step 4. If result is true, then show the UA context menu
-        if result {
+        // Step 4. If result is true, then show the UA context menu.
+        // Stillwater: Shift+right-click shows it even when the page cancels the event (as in
+        // Firefox), so the browser's own entries stay reachable on sites with their own menus
+        // (X's GIFs and videos, for one).
+        if result ||
+            input_event
+                .active_keyboard_modifiers
+                .contains(Modifiers::SHIFT)
+        {
             self.window
                 .Document()
                 .embedder_controls()

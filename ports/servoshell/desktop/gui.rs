@@ -547,6 +547,11 @@ impl Gui {
                 },
             }
         }
+        for point in crate::desktop::dialog::take_layout_report_requests() {
+            if let Some(webview) = window.active_webview() {
+                crate::desktop::layout_report::save(&webview, point);
+            }
+        }
         let requests = std::mem::take(&mut *self.pane_requests.borrow_mut());
         for request in requests {
             match request {

@@ -59,7 +59,8 @@ static CHANGED: AtomicBool = AtomicBool::new(false);
 static WORKERS: AtomicUsize = AtomicUsize::new(0);
 static NEXT_FILE: AtomicUsize = AtomicUsize::new(0);
 
-fn set_notice(text: impl Into<String>, lasts: Option<Duration>) {
+/// Show `text` in the status line (for `lasts`, or until replaced).
+pub(crate) fn set_notice(text: impl Into<String>, lasts: Option<Duration>) {
     if let Ok(mut notice) = NOTICE.lock() {
         *notice = Some((text.into(), lasts.map(|lasts| Instant::now() + lasts)));
     }
