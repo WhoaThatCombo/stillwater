@@ -417,7 +417,7 @@ function renderRow(item, isPin) {
     else renameTab(item);
   });
 
-  const items = () => (isPin ? pinMenu(item, false) : tabMenu(item));
+  const items = () => (isPin ? pinMenu(item, false) : tabMenu(state.tabs.find((tab) => tab.id === item.id) || item));
   const more = iconButton("tab-more", "", "More", () => {
     const box = more.getBoundingClientRect();
     openMenu(items(), box.left, box.bottom);
@@ -451,6 +451,47 @@ function renderRow(item, isPin) {
   });
   attachMenu(row, items);
   return row;
+}
+
+// Tab rows are kept from one state push to the next and rebuilt only when what they show
+// changed: most pushes change one row (a title, a loading flag, the active tab) or nothing in
+// the list at all (download progress, ad-block counts), and rebuilding every row restyled and
+// relaid the whole list, dropped hover states and decoded every icon again. What a row shows
+// only as a class (selected, loading, unloaded) is set on the kept row instead (`syncRow`), so
+// switching tabs rebuilds nothing, not even under a press that is still going on.
+const rowCache = new Map(); // tab id -> { key, row }
+const rowKey = (tab) => JSON.stringify([tab.title, tab.url, tab.favicon, !!tab.playing]);
+function syncRow(row, tab) {
+  row.classList.toggle("selected", !!tab.active);
+  row.classList.toggle("loading", !!tab.loading);
+  row.classList.toggle("unloaded", tab.loaded === false || !!tab.preloading);
+}
+function keyedRow(tab) {
+  const key = rowKey(tab);
+  const cached = rowCache.get(tab.id);
+  if (cached && cached.key === key) {
+    syncRow(cached.row, tab);
+    return cached.row;
+  }
+  const row = renderRow(tab, false);
+  rowCache.set(tab.id, { key, row });
+  return row;
+}
+// Make `parent`'s children exactly `rows`, moving only the rows that are out of place.
+function placeRows(parent, rows) {
+  const wanted = new Set(rows);
+  for (const child of [...parent.children]) {
+    if (!wanted.has(child)) child.remove();
+  }
+  let at = parent.firstElementChild;
+  for (const row of rows) {
+    if (row === at) at = at.nextElementSibling;
+    else parent.insertBefore(row, at);
+  }
+  const ids = new Set(state.tabs.map((tab) => tab.id));
+  for (const id of rowCache.keys()) {
+    if (!ids.has(id)) rowCache.delete(id);
+  }
 }
 
 // The page shown in split view, under the tab list.
@@ -950,9 +991,9 @@ function render() {
   if (!document.querySelector(".rename-input")) {
     renderEssentials();
     renderPinned();
-    const rows = withClosedGaps(state.tabs.map((tab) => renderRow(tab, false)));
+    const rows = withClosedGaps(state.tabs.map((tab) => keyedRow(tab)));
     if (state.split) rows.push(renderSplitRow(state.split));
-    tabs.replaceChildren(...rows);
+    placeRows(tabs, rows);
     applyPendingSelect();
     revealActiveRow();
   }
