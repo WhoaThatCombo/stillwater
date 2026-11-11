@@ -385,6 +385,11 @@ impl App {
             {
                 wake = wake.min(gc_due);
             }
+            if let AppState::Running(state) = &self.state &&
+                let Some(at) = state.paint_holding_wake()
+            {
+                wake = wake.min(at);
+            }
             if self.fine_timers {
                 wake = wake.min(Instant::now() + std::time::Duration::from_secs(1));
             }

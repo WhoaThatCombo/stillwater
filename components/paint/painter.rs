@@ -318,6 +318,17 @@ impl Painter {
     }
 
     pub(crate) fn perform_updates(&mut self) {
+        // Paint holding that has lasted too long (a page that draws nothing contentful): show
+        // the new page as it is.
+        let mut released = false;
+        for webview_renderer in self.webview_renderers.values_mut() {
+            released |= webview_renderer.held_root_pipeline.is_some() &&
+                webview_renderer.maybe_release_held_root(false);
+        }
+        if released {
+            self.send_root_pipeline_display_list();
+        }
+
         let mut need_zoom = false;
         let scroll_offset_updates: Vec<_> = self
             .webview_renderers
@@ -764,7 +775,8 @@ impl Painter {
             if webview_renderer.hidden() {
                 continue;
             }
-            let Some(pipeline_id) = webview_renderer.root_pipeline_id else {
+            // While paint holding, the previous page (see `WebViewRenderer::held_root_pipeline`).
+            let Some(pipeline_id) = webview_renderer.displayed_root_pipeline_id() else {
                 continue;
             };
 
@@ -1004,6 +1016,15 @@ impl Painter {
         // entry per navigation for the lifetime of the process.
         if fully_exited {
             let mut transaction = Transaction::new();
+            // The page being held on screen is gone: show the new one.
+            if self
+                .webview_renderers
+                .get_mut(&webview_id)
+                .is_some_and(|webview_renderer| webview_renderer.maybe_release_held_root(false))
+            {
+                self.send_root_pipeline_display_list_in_transaction(&mut transaction);
+                self.generate_frame(&mut transaction, RenderReasons::SCENE);
+            }
             transaction.remove_pipeline(pipeline_id.into());
             self.send_transaction(transaction);
         }
@@ -1181,10 +1202,27 @@ impl Painter {
 
         let mut transaction = Transaction::new();
         let is_root_pipeline = Some(pipeline_id.into()) == webview_renderer.root_pipeline_id;
-        if is_root_pipeline {
+        // While the previous page is held on screen (paint holding), note what the new one
+        // drew: its canvas colour, and that it has drawn at all.
+        if is_root_pipeline && webview_renderer.held_root_pipeline.is_some() {
+            webview_renderer.held_page_drew = true;
+            webview_renderer.held_page_background = display_list_info.root_background_color;
+        }
+        // The new page drew something worth showing: stop showing the previous one. The root
+        // display list goes in the same transaction as the page's first content, so no empty
+        // frame is shown in between.
+        let released = is_root_pipeline &&
+            webview_renderer.maybe_release_held_root(
+                display_list_info
+                    .paint_timing_report
+                    .contains(PaintTimingReport::FirstContentfulPaint),
+            );
+        if is_root_pipeline && webview_renderer.held_root_pipeline.is_none() {
             webview_renderer.root_background_color = display_list_info.root_background_color;
         }
-        if is_root_pipeline && old_scale != webview_renderer.device_pixels_per_page_pixel() {
+        if is_root_pipeline &&
+            (released || old_scale != webview_renderer.device_pixels_per_page_pixel())
+        {
             self.send_root_pipeline_display_list_in_transaction(&mut transaction);
         }
 

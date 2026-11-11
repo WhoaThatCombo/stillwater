@@ -34,7 +34,7 @@ use webrender_api::units::{
 use webrender_api::{DocumentId, ExternalScrollId, PropertyBindingKey, ScrollLocation};
 
 use crate::paint::RepaintReason;
-use crate::painter::Painter;
+use crate::painter::{PaintMetricState, Painter};
 use crate::pinch_zoom::PinchZoom;
 use crate::pipeline_details::PipelineDetails;
 use crate::refresh_driver::BaseRefreshDriver;
@@ -81,6 +81,18 @@ pub(crate) enum PinchZoomResult {
     DidNotPinchZoom,
 }
 
+/// Paint holding never keeps the previous page on screen for longer than this after the new
+/// document replaced it (Chromium holds until first contentful paint, with a timeout).
+const PAINT_HOLDING_LIMIT: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// Paint holding is on unless STILLWATER_PAINT_HOLDING=0 (for comparisons).
+fn paint_holding_enabled() -> bool {
+    static ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var_os("STILLWATER_PAINT_HOLDING").is_none_or(|value| value != "0")
+    });
+    *ENABLED
+}
+
 /// A renderer for a libservo `WebView`. This is essentially the [`ServoRenderer`]'s interface to a
 /// libservo `WebView`, but the code here cannot depend on libservo in order to prevent circular
 /// dependencies, which is why we store a `dyn WebViewTrait` here instead of the `WebView` itself.
@@ -93,6 +105,19 @@ pub(crate) struct WebViewRenderer {
     pub webview: Box<dyn WebViewTrait>,
     /// The root [`PipelineId`] of the currently displayed page in this WebView.
     pub root_pipeline_id: Option<PipelineId>,
+    /// Paint holding: the previous page's root pipeline, still shown (with when the new page
+    /// replaced it) until the new page has drawn something. A new pipeline starts with an empty
+    /// display list (`Painter::send_initial_pipeline_transaction`), so without this every
+    /// navigation showed a blank (white) page from the moment the new document was created until
+    /// its first render-unblocked reflow: the "white flash" between pages.
+    pub(crate) held_root_pipeline: Option<(PipelineId, std::time::Instant)>,
+    /// While paint holding: the new page's canvas colour (from its display lists so far),
+    /// which becomes `root_background_color` when the new page is shown.
+    pub(crate) held_page_background: Option<webrender_api::ColorF>,
+    /// While paint holding: whether the new page has sent any display list yet. Until it has
+    /// (it is render-blocked by its stylesheets, say), there is nothing to switch to, and the
+    /// previous page stays even after `PAINT_HOLDING_LIMIT`, as it always did.
+    pub(crate) held_page_drew: bool,
     /// Stillwater: the canvas background colour of the root pipeline's latest display list
     /// (`None`: transparent, so the default canvas colour shows).
     pub root_background_color: Option<webrender_api::ColorF>,
@@ -160,6 +185,9 @@ impl WebViewRenderer {
             id: webview_id,
             webview: renderer_webview,
             root_pipeline_id: None,
+            held_root_pipeline: None,
+            held_page_background: None,
+            held_page_drew: false,
             root_background_color: None,
             rect,
             pipelines: Default::default(),
@@ -233,6 +261,35 @@ impl WebViewRenderer {
             .or_insert_with(PipelineDetails::new)
     }
 
+    /// The pipeline to show for this WebView: the previous page while paint holding lasts,
+    /// otherwise the root pipeline.
+    pub(crate) fn displayed_root_pipeline_id(&self) -> Option<PipelineId> {
+        self.held_root_pipeline
+            .map(|(held, _)| held)
+            .filter(|held| self.pipelines.contains_key(held))
+            .or(self.root_pipeline_id)
+    }
+
+    /// Stop paint holding if the new page drew something contentful, if holding has lasted
+    /// `PAINT_HOLDING_LIMIT`, or if the held page is gone. Returns true if the shown page
+    /// changed, so the caller re-sends the root display list.
+    pub(crate) fn maybe_release_held_root(&mut self, contentful: bool) -> bool {
+        let Some((held, since)) = self.held_root_pipeline else {
+            return false;
+        };
+        if contentful ||
+            (self.held_page_drew && since.elapsed() >= PAINT_HOLDING_LIMIT) ||
+            !self.pipelines.contains_key(&held)
+        {
+            self.held_root_pipeline = None;
+            // The frame is cleared with the new page's colour from now on (white if it has
+            // drawn nothing), not the previous page's.
+            self.root_background_color = self.held_page_background.take();
+            return true;
+        }
+        false
+    }
+
     /// Record that `source` has reported `pipeline_id` as exited. Returns `true`
     /// once every source has done so and the pipeline details have been discarded,
     /// so that the caller can also drop the pipeline's scene state in WebRender.
@@ -271,6 +328,25 @@ impl WebViewRenderer {
                 "Updating webview ({:?}) from pipeline {:?} to {:?}",
                 3, old_pipeline_id, self.root_pipeline_id
             );
+            let has_drawn = |id: Option<PipelineId>| {
+                id.and_then(|id| self.pipelines.get(&id))
+                    .is_some_and(|details| details.first_paint_metric != PaintMetricState::Waiting)
+            };
+            if has_drawn(Some(pipeline_id)) ||
+                self.held_root_pipeline
+                    .is_some_and(|(held, _)| held == pipeline_id)
+            {
+                // Back to a page that has drawn (session history): show it at once.
+                self.held_root_pipeline = None;
+            } else if self.held_root_pipeline.is_none() &&
+                has_drawn(old_pipeline_id) &&
+                paint_holding_enabled()
+            {
+                self.held_root_pipeline =
+                    old_pipeline_id.map(|old| (old, std::time::Instant::now()));
+                self.held_page_background = None;
+                self.held_page_drew = false;
+            }
         }
 
         self.set_frame_tree_on_pipeline_details(frame_tree, None);

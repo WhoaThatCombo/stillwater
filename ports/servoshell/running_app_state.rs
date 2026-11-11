@@ -284,6 +284,10 @@ pub(crate) struct RunningAppState {
     /// When to run an idle garbage collection: a few seconds after pages finish loading or
     /// close, once things have settled.
     gc_due: Cell<Option<std::time::Instant>>,
+    /// When a page that has just replaced another may still be held back by Paint's paint
+    /// holding (which keeps the previous page on screen for at most 0.8 s, released on a turn
+    /// of the event loop): the loop wakes up then even if nothing else is going on.
+    paint_holding_until: Cell<Option<std::time::Instant>>,
     /// Page loads in progress (any tab), from their `LoadStatus::Started`: the idle garbage
     /// collection waits for them, since it stalls frames for tens of milliseconds.
     loads_in_progress: RefCell<HashMap<WebViewId, std::time::Instant>>,
@@ -392,6 +396,7 @@ impl RunningAppState {
             playing_media: Default::default(),
             color_scheme_hint: Cell::new(None),
             gc_due: Default::default(),
+            paint_holding_until: Default::default(),
             loads_in_progress: Default::default(),
             render_caches_stale: Default::default(),
             gc_held_for_media_since: Default::default(),
@@ -959,6 +964,14 @@ impl RunningAppState {
     }
 
     /// When the next idle garbage collection is due, if one is scheduled.
+    /// See `paint_holding_until`.
+    #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
+    pub(crate) fn paint_holding_wake(&self) -> Option<std::time::Instant> {
+        self.paint_holding_until
+            .get()
+            .filter(|at| *at > std::time::Instant::now())
+    }
+
     pub(crate) fn idle_gc_due(&self) -> Option<std::time::Instant> {
         self.gc_due.get()
     }
@@ -1286,6 +1299,10 @@ impl WebViewDelegate for RunningAppState {
         }
         if matches!(status, LoadStatus::Complete | LoadStatus::Stopped) {
             self.loads_in_progress.borrow_mut().remove(&webview.id());
+        }
+        if status != LoadStatus::Started {
+            self.paint_holding_until
+                .set(Some(std::time::Instant::now() + std::time::Duration::from_millis(900)));
         }
         #[cfg(not(any(target_os = "android", target_env = "ohos")))]
         self.translation.borrow_mut().on_load(&webview, status);
