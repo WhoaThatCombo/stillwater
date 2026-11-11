@@ -234,6 +234,30 @@ pub(crate) fn system_double_click() -> Option<(u32, u32)> {
     None
 }
 
+/// The system's selection colours (Highlight and HighlightText) as `[r, g, b, a]` in 0-1, if
+/// the platform says.
+pub(crate) fn system_selection_colors() -> Option<([f64; 4], [f64; 4])> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Graphics::Gdi::{COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, GetSysColor};
+        // A COLORREF is 0x00BBGGRR.
+        let rgba = |color: u32| {
+            [
+                (color & 0xff) as f64 / 255.0,
+                ((color >> 8) & 0xff) as f64 / 255.0,
+                ((color >> 16) & 0xff) as f64 / 255.0,
+                1.0,
+            ]
+        };
+        // Safety: plain Win32 queries with no pointers.
+        let (background, text) =
+            unsafe { (GetSysColor(COLOR_HIGHLIGHT), GetSysColor(COLOR_HIGHLIGHTTEXT)) };
+        return Some((rgba(background), rgba(text)));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
 /// Get a Servo [`Preferences`] to use when initializing Servo by first reading the user
 /// preferences file and then overriding these preferences with the ones from the `--prefs-file`
 /// command-line argument, if given.
@@ -264,6 +288,12 @@ fn get_preferences(prefs_files: &[PathBuf], config_dir: &Option<PathBuf>) -> Pre
     if let Some((time, distance)) = system_double_click() {
         preferences.dom_document_dblclick_timeout = time.into();
         preferences.dom_document_dblclick_dist = distance.into();
+    }
+    // Selected text uses the Windows selection colours (Highlight / HighlightText), like other
+    // apps; preference files and --pref still override this.
+    if let Some((background, text)) = system_selection_colors() {
+        preferences.layout_selection_background_rgba = background;
+        preferences.layout_selection_text_rgba = text;
     }
     apply_preferences(&mut preferences, user_prefs_hash);
     for pref_file_path in prefs_files.iter() {
