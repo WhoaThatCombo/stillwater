@@ -21,6 +21,22 @@ struct Log {
     start: Instant,
     counters: BTreeMap<&'static str, u64>,
     last_summary: Instant,
+    /// Since the last summary: milliseconds between presents that showed a new frame of the
+    /// active page (its frame pacing), and the UI thread's time for every window repaint.
+    frame_intervals: Vec<f32>,
+    repaint_work: Vec<f32>,
+    last_new_frame_present: Option<Instant>,
+    /// When the active tab last changed, until its first frame is presented; and the
+    /// time from each switch to that present.
+    switch_started: Option<Instant>,
+    switch_shown: Vec<f32>,
+}
+
+/// p50/p95/max of `values` in milliseconds, for the summary line.
+fn percentiles(values: &mut [f32]) -> String {
+    values.sort_by(f32::total_cmp);
+    let at = |q: f32| values[((values.len() - 1) as f32 * q).round() as usize];
+    format!("{:.1}/{:.1}/{:.1}", at(0.5), at(0.95), values[values.len() - 1])
 }
 
 static LOG: Mutex<Option<Log>> = Mutex::new(None);
@@ -44,6 +60,11 @@ pub(crate) fn init() {
             start: Instant::now(),
             counters: BTreeMap::new(),
             last_summary: Instant::now(),
+            frame_intervals: Vec::new(),
+            repaint_work: Vec::new(),
+            last_new_frame_present: None,
+            switch_started: None,
+            switch_shown: Vec::new(),
         });
     }
 }
@@ -128,6 +149,19 @@ pub(crate) fn frame_ready() {
     }
 }
 
+/// The window's active tab changed: the next new page frame presented is its first
+/// (`switch_ms=` in the summary: tab switch to page shown).
+pub(crate) fn tab_switched() {
+    let mut guard = LOG.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(log) = guard.as_mut() {
+        log.switch_started = Some(Instant::now());
+        *log.counters.entry("switch").or_default() += 1;
+        if frame_log() {
+            write_line(log, "switch: active changed");
+        }
+    }
+}
+
 /// The active page's new frame has been painted into the window's buffer.
 pub(crate) fn frame_painted() {
     FRAME_PAINTED.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -136,11 +170,35 @@ pub(crate) fn frame_painted() {
 /// The window was presented, `update` and `paint` after the start of its frame. Counts a
 /// `present` (in the summary) if it showed a new frame of the active page.
 pub(crate) fn window_presented(update: std::time::Duration, paint: std::time::Duration) {
-    if !FRAME_PAINTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+    let new_frame = FRAME_PAINTED.swap(false, std::sync::atomic::Ordering::Relaxed);
+    let mut guard = LOG.lock().unwrap_or_else(|poison| poison.into_inner());
+    let Some(log) = guard.as_mut() else {
+        return;
+    };
+    // Every repaint's cost on the UI thread (GUI update + WebRender passes + present), and the
+    // spacing of new page frames, summarised once a second (see `maybe_summarize`): on a
+    // 164 Hz monitor smooth animation shows as "frames_ms=6.1/6.6/..." (p50/p95/max), and
+    // "repaint_ms" includes waiting for vsync in the present, so up to ~6 ms is normal.
+    log.repaint_work.push(paint.as_secs_f32() * 1000.0);
+    if !new_frame {
         return;
     }
-    let mut guard = LOG.lock().unwrap_or_else(|poison| poison.into_inner());
-    if let Some(log) = guard.as_mut() {
+    let now = Instant::now();
+    if let Some(started) = log.switch_started.take() {
+        let shown = now.duration_since(started).as_secs_f32() * 1000.0;
+        log.switch_shown.push(shown);
+        if frame_log() {
+            write_line(log, &format!("switch: shown after {shown:.1} ms"));
+        }
+    }
+    if let Some(last) = log.last_new_frame_present.replace(now) {
+        let interval = now.duration_since(last).as_secs_f32() * 1000.0;
+        // A gap of more than a quarter second is a pause between animations, not a frame.
+        if interval < 250.0 {
+            log.frame_intervals.push(interval);
+        }
+    }
+    {
         *log.counters.entry("present").or_default() += 1;
         if frame_log() {
             let line = format!(
@@ -160,7 +218,9 @@ pub(crate) fn maybe_summarize(extra: impl FnOnce() -> String) {
         let Some(log) = guard.as_mut() else {
             return;
         };
-        if log.last_summary.elapsed().as_secs_f64() < 1.0 || log.counters.is_empty() {
+        if log.last_summary.elapsed().as_secs_f64() < 1.0 ||
+            (log.counters.is_empty() && log.repaint_work.is_empty())
+        {
             return;
         }
         log.last_summary = Instant::now();
@@ -170,7 +230,20 @@ pub(crate) fn maybe_summarize(extra: impl FnOnce() -> String) {
             .map(|(name, count)| format!("{name}={count}"))
             .collect();
         log.counters.clear();
-        counters.join(" ")
+        let mut summary = counters.join(" ");
+        if !log.frame_intervals.is_empty() {
+            summary += &format!(" frames_ms={}", percentiles(&mut log.frame_intervals));
+            log.frame_intervals.clear();
+        }
+        if !log.repaint_work.is_empty() {
+            summary += &format!(" repaint_ms={}", percentiles(&mut log.repaint_work));
+            log.repaint_work.clear();
+        }
+        if !log.switch_shown.is_empty() {
+            summary += &format!(" switch_ms={}", percentiles(&mut log.switch_shown));
+            log.switch_shown.clear();
+        }
+        summary
     };
     log(format!("summary: {summary} | {}", extra()));
 }

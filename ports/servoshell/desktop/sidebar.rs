@@ -1343,6 +1343,7 @@ impl Sidebar {
             }
         }
         if self.last_pushed_state.as_ref() != Some(&state) {
+            crate::desktop::diagnostics::count("sidebar_push");
             self.call(&format!("setState({state})"));
             self.last_pushed_state = Some(state);
         }

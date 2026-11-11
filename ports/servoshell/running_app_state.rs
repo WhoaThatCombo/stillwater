@@ -151,6 +151,10 @@ impl WebViewCollection {
     pub(crate) fn activate_webview(&mut self, id_to_activate: WebViewId) {
         assert!(self.creation_order.contains(&id_to_activate));
 
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        if self.active_webview_id != Some(id_to_activate) {
+            crate::desktop::diagnostics::tab_switched();
+        }
         self.active_webview_id = Some(id_to_activate);
         for (webview_id, webview) in self.all_in_creation_order() {
             // WebViews start out "focused", so set this both ways: a tab opened or switched to
