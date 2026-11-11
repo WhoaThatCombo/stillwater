@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use embedder_traits::{
@@ -29,6 +29,7 @@ use script_bindings::str::DOMString;
 use servo_base::generic_channel::GenericCallback;
 use servo_base::text::RangeAny;
 
+use crate::dom::clipboard::clipboard::may_write_clipboard;
 use crate::dom::clipboardevent::ClipboardEventType;
 use crate::dom::event::{EventBubbles, EventCancelable};
 use crate::dom::execcommand::execcommands::DocumentExecCommandSupport;
@@ -109,6 +110,33 @@ impl Document {
         }
 
         EditingContext::Document(DomRoot::from_ref(self))
+    }
+
+    /// Stillwater: `document.execCommand('copy')` and `execCommand('cut')`, the commands
+    /// "Copy" buttons use to copy a selected (often hidden) text field or a selected range,
+    /// often with a `copy` handler that sets its own data. They run the same clipboard action
+    /// as Ctrl+C / Ctrl+X on the focused element (the text field `select()` focused, else the
+    /// document's selection), but only while the page has transient activation
+    /// (see [`may_write_clipboard`]); otherwise they do nothing and return false.
+    /// `execCommand('paste')` stays unsupported: pages can't read the clipboard.
+    pub(crate) fn exec_clipboard_command(
+        &self,
+        cx: &mut JSContext,
+        action: ClipboardAction,
+    ) -> bool {
+        thread_local! {
+            /// A `copy` handler calling `execCommand('copy')` again does nothing.
+            static RUNNING: Cell<bool> = const { Cell::new(false) };
+        }
+        if RUNNING.get() || !may_write_clipboard(self.window()) {
+            return false;
+        }
+        RUNNING.set(true);
+        let focused_node = self.focus_handler().focused_area().dom_anchor(self);
+        let editing_context = self.editing_context(cx.no_gc(), &focused_node);
+        self.handle_clipboard_action(cx, &editing_context, action);
+        RUNNING.set(false);
+        true
     }
 
     /// <https://www.w3.org/TR/clipboard-apis/#clipboard-actions>

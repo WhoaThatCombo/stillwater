@@ -133,6 +133,25 @@ impl ClipboardItem {
     ) -> DomRoot<ClipboardItem> {
         reflect_dom_object_with_proto(cx, Box::new(ClipboardItem::new_inherited()), window, proto)
     }
+
+    /// Stillwater: the representations `navigator.clipboard.write()` can put on the system
+    /// clipboard, `text/plain` and `text/html`, as (is it HTML, its data promise).
+    pub(super) fn text_representations(&self, cx: &JSContext) -> Vec<(bool, RootedPromise)> {
+        self.representations
+            .borrow()
+            .iter()
+            .filter(|representation| !representation.is_custom)
+            .filter_map(|representation| {
+                let mime = &representation.mime_type;
+                let is_html = match (mime.type_.as_str(), mime.subtype.as_str()) {
+                    ("text", "plain") => false,
+                    ("text", "html") => true,
+                    _ => return None,
+                };
+                Some((is_html, representation.data.root(cx)))
+            })
+            .collect()
+    }
 }
 
 impl ClipboardItemMethods<crate::DomTypeHolder> for ClipboardItem {
@@ -320,7 +339,7 @@ impl ClipboardItemMethods<crate::DomTypeHolder> for ClipboardItem {
     fn Supports(_: &Window, type_: DOMString) -> bool {
         // TODO Step 1 If type is in mandatory data types or optional data types, then return true.
         // Step 2 If not, then return false.
-        // NOTE: We only supports text/plain
-        type_ == "text/plain"
+        // NOTE: We only support text/plain and text/html
+        type_ == "text/plain" || type_ == "text/html"
     }
 }

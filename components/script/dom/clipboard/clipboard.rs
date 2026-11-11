@@ -13,7 +13,14 @@ use js::rust::HandleValue as SafeHandleValue;
 use script_bindings::reflector::reflect_dom_object;
 use servo_constellation_traits::BlobImpl;
 
-use super::clipboarditem::Representation;
+use std::rc::Rc;
+
+use js::rust::HandleValue;
+
+use super::clipboarditem::{ClipboardItem, Representation};
+use crate::dom::bindings::conversions::{
+    ConversionResult, FromJSValConvertible, StringificationBehavior,
+};
 use crate::dom::bindings::codegen::Bindings::ClipboardBinding::{
     ClipboardMethods, PresentationStyle,
 };
@@ -25,7 +32,7 @@ use crate::dom::bindings::str::DOMString;
 use crate::dom::blob::Blob;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::promise::{Promise, RootedPromise, TracedPromise};
+use crate::dom::promise::{Promise, RootedPromise, TracedPromise, wait_for_all};
 use crate::dom::promisenativehandler::{Callback, PromiseNativeHandler};
 use crate::dom::window::Window;
 use crate::realms::enter_auto_realm;
@@ -80,6 +87,17 @@ impl Callback for RepresentationDataPromiseRejectionHandler {
 
 /// Whether `navigator.clipboard.read()` and `readText()` hand pages the system clipboard.
 const PAGES_MAY_READ_CLIPBOARD: bool = false;
+
+/// Stillwater's check clipboard write permission
+/// (<https://w3c.github.io/clipboard-apis/#check-clipboard-write-permission>): a page may
+/// write the clipboard only while its window has transient activation, i.e. within
+/// `dom_transient_activation_duration_ms` (5 s) of a real click, tap or key press in it (or in
+/// a same-origin frame of the same page). As in Firefox and Safari, a page can't put
+/// anything on the clipboard without a user gesture. The activation isn't consumed, so one
+/// click can run a handler that copies after an `await`.
+pub(crate) fn may_write_clipboard(window: &Window) -> bool {
+    window.has_transient_activation()
+}
 
 #[dom_struct]
 pub(crate) struct Clipboard {
@@ -143,12 +161,17 @@ impl ClipboardMethods<crate::DomTypeHolder> for Clipboard {
 
         // Step 3 Run the following steps in parallel:
 
-        // TODO write permission could be removed from spec
         // Step 3.1 Let r be the result of running check clipboard write permission.
         // Step 3.2 If r is false, then:
         // Step 3.2.1 Queue a global task on the permission task source, given realm’s global object,
         // to reject p with "NotAllowedError" DOMException in realm.
         // Step 3.2.2 Abort these steps.
+        if !may_write_clipboard(global.as_window()) {
+            p.reject_error(realm, Error::NotAllowed(Some(
+                "Writing to the clipboard needs a click or key press".into(),
+            )));
+            return p;
+        }
 
         let trusted_promise = TrustedPromise::from(&p);
         let bytes = Vec::from(data);
@@ -186,6 +209,85 @@ impl ClipboardMethods<crate::DomTypeHolder> for Clipboard {
         );
 
         // Step 3.4 Return p.
+        p
+    }
+
+    /// <https://w3c.github.io/clipboard-apis/#dom-clipboard-write>
+    ///
+    /// Stillwater: the first item's `text/plain` and `text/html` go on the system clipboard
+    /// (like Chrome, one item); other types are left out, and an item with neither is
+    /// refused.
+    fn Write(&self, realm: &mut CurrentRealm, data: Vec<DomRoot<ClipboardItem>>) -> RootedPromise {
+        let global = self.global();
+        let p = Promise::new_in_realm(realm);
+
+        // Check clipboard write permission (see `may_write_clipboard`).
+        if !may_write_clipboard(global.as_window()) {
+            p.reject_error(realm, Error::NotAllowed(Some(
+                "Writing to the clipboard needs a click or key press".into(),
+            )));
+            return p;
+        }
+
+        let Some(item) = data.first() else {
+            p.resolve_native(realm, &());
+            return p;
+        };
+        let representations = item.text_representations(realm);
+        if representations.is_empty() {
+            p.reject_error(realm, Error::NotAllowed(Some(
+                "Only text/plain and text/html can be written to the clipboard".into(),
+            )));
+            return p;
+        }
+        let (kinds, promises): (Vec<bool>, Vec<RootedPromise>) =
+            representations.into_iter().unzip();
+
+        // Once every representation's data is known, write them together.
+        let success_promise = p.clone();
+        let success_steps = Rc::new(move |cx: &mut JSContext, values: Vec<HandleValue>| {
+            let mut plain_text = None;
+            let mut html = None;
+            for (is_html, value) in kinds.iter().zip(values) {
+                let text = if value.get().is_string() {
+                    match DOMString::from_jsval(cx, value, StringificationBehavior::Default) {
+                        Ok(ConversionResult::Success(string)) => string.to_string(),
+                        _ => continue,
+                    }
+                } else if let Ok(ConversionResult::Success(blob)) =
+                    DomRoot::<Blob>::from_jsval(cx, value, ())
+                {
+                    String::from_utf8_lossy(&blob.get_bytes().unwrap_or_default()).into_owned()
+                } else {
+                    continue;
+                };
+                if *is_html {
+                    html = Some(text);
+                } else {
+                    plain_text = Some(text);
+                }
+            }
+            let global = success_promise.global();
+            let window = global.as_window();
+            match (plain_text, html) {
+                (plain_text, Some(html)) => window.send_to_embedder(EmbedderMsg::SetClipboardHtml(
+                    window.webview_id(),
+                    plain_text.unwrap_or_default(),
+                    html,
+                )),
+                (Some(plain_text), None) => window.send_to_embedder(
+                    EmbedderMsg::SetClipboardText(window.webview_id(), plain_text),
+                ),
+                (None, None) => {},
+            }
+            success_promise.resolve_native(cx, &());
+        });
+        // A representation whose data promise was rejected: nothing is written.
+        let failure_promise = p.clone();
+        let failure_steps = Rc::new(move |cx: &mut JSContext, _reason: HandleValue| {
+            failure_promise.reject_error(cx, Error::NotAllowed(None));
+        });
+        wait_for_all(realm, &global, promises, success_steps, failure_steps);
         p
     }
 }

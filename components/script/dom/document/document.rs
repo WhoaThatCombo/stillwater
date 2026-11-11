@@ -7706,6 +7706,10 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         _show_ui: bool,
         value: TrustedHTMLOrString,
     ) -> Fallible<bool> {
+        // Stillwater: the clipboard commands (see `exec_clipboard_command`).
+        if let Some(action) = clipboard_command(&command_id) {
+            return Ok(self.exec_clipboard_command(cx, action));
+        }
         let value = if command_id == "insertHTML" {
             TrustedHTML::get_trusted_type_compliant_string(
                 cx,
@@ -7727,6 +7731,9 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
 
     /// <https://w3c.github.io/editing/docs/execCommand/#querycommandenabled()>
     fn QueryCommandEnabled(&self, cx: &mut JSContext, command_id: DOMString) -> bool {
+        if clipboard_command(&command_id).is_some() {
+            return crate::dom::clipboard::clipboard::may_write_clipboard(&self.window);
+        }
         // Step 2. Return true if command is both supported and enabled, false otherwise.
         self.check_support_and_enabled(cx, &command_id).is_some()
     }
@@ -7736,7 +7743,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         // > When the queryCommandSupported(command) method on the Document interface is invoked,
         // the user agent must return true if command is supported and available
         // within the current script on the current site, and false otherwise.
-        self.is_command_supported(command_id)
+        clipboard_command(&command_id).is_some() || self.is_command_supported(command_id)
     }
 
     /// <https://w3c.github.io/editing/docs/execCommand/#querycommandindeterm()>
@@ -8129,6 +8136,18 @@ impl Iterator for SameOriginDescendantNavigablesIterator {
                 continue;
             };
         }
+        None
+    }
+}
+
+/// Stillwater: `execCommand`'s clipboard commands, "copy" and "cut" (ASCII case-insensitive).
+fn clipboard_command(command_id: &DOMString) -> Option<embedder_traits::ClipboardAction> {
+    let command_id = command_id.str();
+    if command_id.eq_ignore_ascii_case("copy") {
+        Some(embedder_traits::ClipboardAction::Copy)
+    } else if command_id.eq_ignore_ascii_case("cut") {
+        Some(embedder_traits::ClipboardAction::Cut)
+    } else {
         None
     }
 }

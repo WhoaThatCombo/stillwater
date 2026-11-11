@@ -495,10 +495,10 @@ fn create_native_handler_function(
 }
 
 /// The success steps of <https://webidl.spec.whatwg.org/#wait-for-all>
-type WaitForAllSuccessSteps = Rc<dyn Fn(&mut JSContext, Vec<HandleValue>)>;
+pub(crate) type WaitForAllSuccessSteps = Rc<dyn Fn(&mut JSContext, Vec<HandleValue>)>;
 
 /// The failure steps of <https://webidl.spec.whatwg.org/#wait-for-all>
-type WaitForAllFailureSteps = Rc<dyn Fn(&mut JSContext, HandleValue)>;
+pub(crate) type WaitForAllFailureSteps = Rc<dyn Fn(&mut JSContext, HandleValue)>;
 
 /// The fulfillment handler for the list of promises in
 /// <https://webidl.spec.whatwg.org/#wait-for-all>.
@@ -600,7 +600,7 @@ impl MicrotaskRunnable for WaitForAllSuccessStepsMicrotask {
 
 /// <https://webidl.spec.whatwg.org/#wait-for-all>
 #[cfg_attr(crown, expect(crown::unrooted_must_root))]
-fn wait_for_all(
+pub(crate) fn wait_for_all(
     cx: &mut CurrentRealm,
     global: &GlobalScope,
     promises: Vec<RootedPromise>,

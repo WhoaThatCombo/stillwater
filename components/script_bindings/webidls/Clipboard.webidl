@@ -10,7 +10,7 @@ typedef sequence<ClipboardItem> ClipboardItems;
 interface Clipboard : EventTarget {
   // Promise<ClipboardItems> read();
   Promise<DOMString> readText();
-  // Promise<undefined> write(ClipboardItems data);
+  Promise<undefined> write(ClipboardItems data);
   Promise<undefined> writeText(DOMString data);
 };
 
