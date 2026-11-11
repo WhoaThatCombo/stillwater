@@ -15,17 +15,18 @@
 //!   looping forever.
 //!
 //! The clip folder (`%TEMP%\Stillwater\clips`, or `STILLWATER_CLIP_DIR`) is emptied at startup.
-//! `STILLWATER_CLIPBOARD_TEST_LOG=<file>`: tests get a JSON line per clipboard write in that
-//! file instead of the clipboard being touched.
+//! The clipboard writes go through `desktop::clipboard`, so tests get a JSON line per write in
+//! `STILLWATER_CLIPBOARD_TEST_LOG` instead of the clipboard being touched.
 
 use std::cell::RefCell;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use servo::{DownloadId, DownloadRequest, DownloadUpdate, Servo, WebViewId};
+
+use crate::desktop::clipboard;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Kind {
@@ -433,140 +434,3 @@ fn video_to_gif(_source: &Path, _target: &Path) -> Result<(), String> {
     Err("this build has no video decoder".into())
 }
 
-mod clipboard {
-    use std::path::PathBuf;
-
-    use super::Write;
-
-    /// Tests: describe the clipboard write in this file instead of making it.
-    fn test_log(entry: serde_json::Value) -> Option<Result<(), String>> {
-        let path = std::env::var_os("STILLWATER_CLIPBOARD_TEST_LOG")?;
-        Some(
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .and_then(|mut file| writeln!(file, "{entry}"))
-                .map_err(|error| error.to_string()),
-        )
-    }
-
-    pub(super) fn set_image(width: u32, height: u32, rgba: Vec<u8>) -> Result<(), String> {
-        if let Some(result) = test_log(serde_json::json!({
-            "kind": "image", "formats": ["CF_DIBV5", "PNG"],
-            "width": width, "height": height, "bytes": rgba.len(),
-        })) {
-            return result;
-        }
-        let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
-        clipboard
-            .set_image(arboard::ImageData {
-                width: width as usize,
-                height: height as usize,
-                bytes: rgba.into(),
-            })
-            .map_err(|error| error.to_string())
-    }
-
-    pub(super) fn set_files(paths: &[PathBuf]) -> Result<(), String> {
-        if let Some(result) = test_log(serde_json::json!({
-            "kind": "files", "formats": ["CF_HDROP", "Preferred DropEffect"],
-            "paths": paths.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>(),
-        })) {
-            return result;
-        }
-        set_files_on_clipboard(paths)
-    }
-
-    /// CF_HDROP with the files, and "Preferred DropEffect" = copy, so pasting copies them.
-    #[cfg(target_os = "windows")]
-    fn set_files_on_clipboard(paths: &[PathBuf]) -> Result<(), String> {
-        use std::ffi::c_void;
-        use std::os::windows::ffi::OsStrExt;
-
-        #[link(name = "user32")]
-        unsafe extern "system" {
-            fn OpenClipboard(owner: *mut c_void) -> i32;
-            fn EmptyClipboard() -> i32;
-            fn CloseClipboard() -> i32;
-            fn SetClipboardData(format: u32, memory: *mut c_void) -> *mut c_void;
-            fn RegisterClipboardFormatW(name: *const u16) -> u32;
-        }
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn GlobalAlloc(flags: u32, bytes: usize) -> *mut c_void;
-            fn GlobalLock(memory: *mut c_void) -> *mut c_void;
-            fn GlobalUnlock(memory: *mut c_void) -> i32;
-            fn GlobalFree(memory: *mut c_void) -> *mut c_void;
-        }
-        const CF_HDROP: u32 = 15;
-        const GMEM_MOVEABLE: u32 = 2;
-        const DROPEFFECT_COPY: u32 = 1;
-
-        // DROPFILES (20 bytes: pFiles, pt.x, pt.y, fNC, fWide), then the wide paths, each
-        // ending in a null, and a final null.
-        let mut data: Vec<u8> = Vec::new();
-        for value in [20u32, 0, 0, 0, 1] {
-            data.extend_from_slice(&value.to_le_bytes());
-        }
-        for path in paths {
-            for unit in path.as_os_str().encode_wide().chain([0]) {
-                data.extend_from_slice(&unit.to_le_bytes());
-            }
-        }
-        data.extend_from_slice(&[0, 0]);
-
-        // SAFETY: plain Win32 clipboard calls; memory handed to SetClipboardData belongs to the
-        // clipboard afterwards and is freed here only if it was refused.
-        unsafe {
-            let global = |bytes: &[u8]| {
-                let memory = GlobalAlloc(GMEM_MOVEABLE, bytes.len());
-                if memory.is_null() {
-                    return memory;
-                }
-                let pointer = GlobalLock(memory);
-                if pointer.is_null() {
-                    GlobalFree(memory);
-                    return std::ptr::null_mut();
-                }
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer as *mut u8, bytes.len());
-                GlobalUnlock(memory);
-                memory
-            };
-            let mut opened = false;
-            for _ in 0..10 {
-                if OpenClipboard(std::ptr::null_mut()) != 0 {
-                    opened = true;
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(30));
-            }
-            if !opened {
-                return Err("the clipboard is busy".into());
-            }
-            EmptyClipboard();
-            let files = global(&data);
-            let ok = !files.is_null() && !SetClipboardData(CF_HDROP, files).is_null();
-            if !ok && !files.is_null() {
-                GlobalFree(files);
-            }
-            let name: Vec<u16> = "Preferred DropEffect".encode_utf16().chain([0]).collect();
-            let format = RegisterClipboardFormatW(name.as_ptr());
-            if format != 0 {
-                let effect = global(&DROPEFFECT_COPY.to_le_bytes());
-                if !effect.is_null() && SetClipboardData(format, effect).is_null() {
-                    GlobalFree(effect);
-                }
-            }
-            CloseClipboard();
-            if ok { Ok(()) } else { Err("the clipboard refused the file".into()) }
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn set_files_on_clipboard(paths: &[PathBuf]) -> Result<(), String> {
-        arboard::Clipboard::new()
-            .and_then(|mut clipboard| clipboard.set().file_list(paths))
-            .map_err(|error| error.to_string())
-    }
-}

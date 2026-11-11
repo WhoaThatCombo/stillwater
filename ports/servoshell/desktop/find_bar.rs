@@ -360,10 +360,7 @@ fn draw(
             let response = ui.put(field_rect.shrink2(vec2(8.0, 4.0)), edit);
             // Right-click: Cut, Copy, Paste, Select all (like the sidebar's text fields).
             if response.secondary_clicked() {
-                let clipboard = arboard::Clipboard::new()
-                    .ok()
-                    .and_then(|mut clipboard| clipboard.get_text().ok())
-                    .unwrap_or_default();
+                let clipboard = crate::desktop::clipboard::get_text().unwrap_or_default();
                 ui.data_mut(|data| data.insert_temp(input_id.with("clipboard"), clipboard));
             }
             response.context_menu(|ui| text_field_menu(ui, input_id, &mut state.query));
@@ -520,11 +517,7 @@ fn text_field_menu(ui: &mut egui::Ui, input_id: Id, text: &mut String) {
         .data(|data| data.get_temp::<String>(input_id.with("clipboard")))
         .unwrap_or_default()
         .replace(['\r', '\n'], " ");
-    let set_clipboard = |value: &str| {
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            let _ = clipboard.set_text(value.to_owned());
-        }
-    };
+    let set_clipboard = |value: &str| crate::desktop::clipboard::set_text(value, "find-bar");
     // Replace characters `from..to` with `with`, and put the caret after it.
     let mut replace = |from: usize, to: usize, with: &str| {
         let range = byte(text, from)..byte(text, to);

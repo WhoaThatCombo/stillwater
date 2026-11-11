@@ -1013,20 +1013,7 @@ fn fill(webview: &WebView, page_origin: &str, login: &Login, mode: &str) {
 /// Put a username or password on the clipboard, kept out of Windows' clipboard history and
 /// cloud clipboard.
 fn copy_secret(text: &str) {
-    let Ok(mut clipboard) = arboard::Clipboard::new() else {
-        return;
-    };
-    #[cfg(windows)]
-    {
-        use arboard::SetExtWindows;
-        let _ = clipboard
-            .set()
-            .exclude_from_history()
-            .exclude_from_cloud()
-            .text(text.to_owned());
-    }
-    #[cfg(not(windows))]
-    let _ = clipboard.set_text(text.to_owned());
+    crate::desktop::clipboard::set_secret(text, "passwords");
 }
 
 /// Extra input for DPAPI, so other programs' DPAPI blobs and ours can't be swapped.

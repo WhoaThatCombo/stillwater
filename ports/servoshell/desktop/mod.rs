@@ -8,6 +8,7 @@ mod accelerated_gl_media;
 pub(crate) mod adblock;
 pub(crate) mod app;
 pub(crate) mod capture;
+pub(crate) mod clipboard;
 mod bookmarks;
 pub(crate) mod cli;
 pub(crate) mod compare;

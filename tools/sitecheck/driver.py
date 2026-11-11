@@ -84,6 +84,8 @@ class Stillwater:
         if "STILLWATER_TEST_SOUND" not in environment:
             environment["STILLWATER_MUTE_AUDIO"] = "1"
         environment["STILLWATER_BACKGROUND_WINDOW"] = "1"
+        # Automated runs never read or change what the user has copied.
+        environment["STILLWATER_NO_OS_CLIPBOARD"] = "1"
         # Files a page downloads stay in the test profile, never the user's Downloads folder.
         environment.setdefault("STILLWATER_DOWNLOAD_DIR", str(Path(profile) / "downloads"))
         # Tests never write to the real Stillwater folders: the log and the HTTP cache go in the

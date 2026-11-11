@@ -139,6 +139,7 @@ impl Pane {
             .url(url)
             .hidpi_scale_factor(scale)
             .user_content_manager(state.user_content_manager.clone())
+            .clipboard_delegate(crate::desktop::clipboard::delegate())
             .delegate(Rc::new(PaneDelegate {
                 shared: shared.clone(),
                 downloads: state.downloads.clone(),

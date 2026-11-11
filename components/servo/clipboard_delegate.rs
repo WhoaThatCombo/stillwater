@@ -106,9 +106,12 @@ impl ClipboardDelegate for DefaultClipboardDelegate {
 /// Stillwater: with the `dom_clipboard_test_mode` pref, the default delegate never touches
 /// the system clipboard. It keeps the contents in memory (so paste in the same process gets
 /// them back) and logs what would have been written, so automated tests can check copy
-/// without reading or replacing the user's clipboard.
+/// without reading or replacing the user's clipboard. `STILLWATER_NO_OS_CLIPBOARD` (set by
+/// the test driver) does the same, for a WebView an embedder created without a delegate of
+/// its own (servoshell gives every WebView one: `desktop/clipboard.rs`).
 fn test_mode() -> bool {
-    servo_config::pref!(dom_clipboard_test_mode)
+    servo_config::pref!(dom_clipboard_test_mode) ||
+        std::env::var_os("STILLWATER_NO_OS_CLIPBOARD").is_some()
 }
 
 mod fallback_clipboard {

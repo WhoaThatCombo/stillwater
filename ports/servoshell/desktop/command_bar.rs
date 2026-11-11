@@ -181,6 +181,7 @@ impl CommandBar {
             .url(Url::parse(PAGE_URL).expect("valid command bar URL"))
             .hidpi_scale_factor(scale)
             .delegate(delegate)
+            .clipboard_delegate(crate::desktop::clipboard::delegate())
             .build();
         webview.notify_theme_change(theme);
         webview.show();

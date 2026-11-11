@@ -345,6 +345,17 @@ impl Gui {
         winit_window: &Window,
         event: &WindowEvent,
     ) -> EventResponse {
+        // Tests: egui's text fields paste from the clipboard stand-in, never the OS clipboard.
+        let modifiers = self.context.egui_winit.egui_input().modifiers;
+        if let Some(paste) = crate::desktop::clipboard::egui_paste_instead(event, modifiers) {
+            if let Some(paste) = paste {
+                self.context.egui_winit.egui_input_mut().events.push(paste);
+            }
+            return EventResponse {
+                consumed: true,
+                repaint: true,
+            };
+        }
         self.context.on_window_event(winit_window, event)
     }
 
@@ -1340,6 +1351,8 @@ impl Gui {
             {
                 *splash = None;
             }
+
+            crate::desktop::clipboard::take_egui_copies(ctx.ctx());
         });
 
         if let Some((webview, index)) = picked_login {

@@ -148,6 +148,11 @@ impl ServoShellWindow {
             .hidpi_scale_factor(self.platform_window.hidpi_scale_factor())
             .user_content_manager(state.user_content_manager.clone())
             .delegate(state.clone());
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        {
+            webview_builder =
+                webview_builder.clipboard_delegate(crate::desktop::clipboard::delegate());
+        }
 
         #[cfg(all(
             feature = "gamepad",

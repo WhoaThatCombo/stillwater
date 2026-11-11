@@ -1215,8 +1215,10 @@ impl WebViewDelegate for RunningAppState {
         let webview = request
             .builder(platform_window.rendering_context())
             .hidpi_scale_factor(platform_window.hidpi_scale_factor())
-            .delegate(parent_webview.delegate())
-            .build();
+            .delegate(parent_webview.delegate());
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        let webview = webview.clipboard_delegate(crate::desktop::clipboard::delegate());
+        let webview = webview.build();
 
         window.add_webview(webview.clone());
         window.activate_webview(webview.id());

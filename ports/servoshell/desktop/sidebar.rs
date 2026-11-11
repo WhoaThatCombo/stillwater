@@ -603,6 +603,7 @@ impl Sidebar {
             .url(Url::parse(SIDEBAR_URL).expect("valid sidebar URL"))
             .hidpi_scale_factor(scale)
             .delegate(delegate)
+            .clipboard_delegate(crate::desktop::clipboard::delegate())
             .build();
         webview.notify_theme_change(theme);
         webview.show();
@@ -984,16 +985,9 @@ impl Sidebar {
                 // The text fields' right-click menu (the page has no clipboard access of its own):
                 // Copy and Cut put text on the clipboard; opening the menu asks for its text, for
                 // Paste.
-                "clip-copy" => {
-                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                        let _ = clipboard.set_text(argument.to_owned());
-                    }
-                },
+                "clip-copy" => crate::desktop::clipboard::set_text(argument, "sidebar"),
                 "clip-read" => {
-                    let text = arboard::Clipboard::new()
-                        .ok()
-                        .and_then(|mut clipboard| clipboard.get_text().ok())
-                        .filter(|text| !text.is_empty());
+                    let text = crate::desktop::clipboard::get_text();
                     self.call(&format!(
                         "clipboardText({})",
                         serde_json::to_string(&text).unwrap_or_else(|_| "null".into())
