@@ -193,7 +193,12 @@ pub(crate) struct Workspaces {
     enabled: bool,
     /// Loading the restored tabs in the background, while that's going on.
     preload: Option<preload::Preloader>,
+    /// A pin's title or icon changed and hasn't been saved yet: since when (`refresh_pins`).
+    pins_unsaved_since: Option<Instant>,
 }
+
+/// How often at most a pin's changing title or icon is written to disk.
+const PIN_REFRESH_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Workspaces {
     pub(crate) fn load() -> Self {
@@ -254,6 +259,7 @@ impl Workspaces {
             session_active: Default::default(),
             enabled: true,
             preload: None,
+            pins_unsaved_since: None,
         }
         .with_spaces(crate::desktop::settings::Settings::load().spaces)
     }
@@ -304,7 +310,8 @@ impl Workspaces {
         entries.into_iter().map(|(_, entry)| entry).collect()
     }
 
-    fn save(&self) {
+    fn save(&mut self) {
+        self.pins_unsaved_since = None;
         let Some(path) = &self.path else {
             return;
         };
@@ -990,7 +997,17 @@ impl Workspaces {
                 changed = true;
             }
         }
+        // Pinned mail and chat pages change their titles often ("(3) Inbox"), and every save is
+        // a synchronous write of the whole file (icons included) on the UI thread: save such
+        // changes at most every PIN_REFRESH_SAVE_INTERVAL. Any other change saves at once and
+        // takes these along; one that is still waiting at exit is only a page title.
         if changed {
+            self.pins_unsaved_since.get_or_insert_with(Instant::now);
+        }
+        if self
+            .pins_unsaved_since
+            .is_some_and(|since| since.elapsed() >= PIN_REFRESH_SAVE_INTERVAL)
+        {
             self.save();
         }
     }
