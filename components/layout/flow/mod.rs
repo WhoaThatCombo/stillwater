@@ -614,7 +614,9 @@ fn compute_inline_content_sizes_for_block_level_boxes(
                     false,               /* is_replaced */
                     !is_anonymous_block, /* establishes_containing_block */
                     skippable_for_block_percentage_quirk(layout_context, base, None),
-                    |_| None, /* TODO: support preferred aspect ratios on non-replaced boxes */
+                    |padding_border_sums| {
+                        base.style.preferred_aspect_ratio(None, padding_border_sums)
+                    },
                     |constraint_space| {
                         base.inline_content_sizes(layout_context, constraint_space, contents)
                     },

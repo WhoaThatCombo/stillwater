@@ -156,6 +156,9 @@ pub(crate) fn outer_inline(
     // TODO: Replace `depends_on_contents` with `content_size.get().is_some()` once `LazyCell::get()`
     // becomes stable.
     let depends_on_contents = Cell::new(false);
+    let aspect_ratio = establishes_containing_block
+        .then(|| get_preferred_aspect_ratio(&pbm.padding_border_sums))
+        .flatten();
     let content_size = LazyCell::new(|| {
         depends_on_contents.set(true);
         let constraint_space = if establishes_containing_block {
@@ -168,7 +171,6 @@ pub(crate) fn outer_inline(
             } else {
                 Size::FitContent
             };
-            let aspect_ratio = get_preferred_aspect_ratio(&pbm.padding_border_sums);
             let mut block_size =
                 if let Some(block_content_size) = get_tentative_block_content_size(aspect_ratio) {
                     SizeConstraint::Definite(content_box_sizes.block.resolve(
@@ -241,15 +243,55 @@ pub(crate) fn outer_inline(
             Size::QuirkyStretch => unreachable!("Quirky stretch can't be an inline size"),
         })
     };
+    // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-size-transfers>
+    // A non-replaced box with a preferred aspect ratio, an automatic inline size and a
+    // definite block size gets its inline size from the block size through the ratio, and
+    // that is also its min-content and max-content contribution (as in other browsers).
+    // Replaced boxes already get this from their content sizes. For example a slide with
+    // `aspect-ratio` and `height: 100%` in a flex item stretched to a definite height.
+    let transferred_inline_size = aspect_ratio
+        .filter(|_| {
+            !is_replaced &&
+                !is_table &&
+                content_box_sizes.inline.preferred.is_initial() &&
+                !content_box_sizes.block.preferred.is_initial()
+        })
+        .and_then(|ratio| {
+            match content_box_sizes.block.resolve_extrinsic(
+                Size::FitContent,
+                Au::zero(),
+                containing_block.block_stretch_size(pbm_sums.block),
+            ) {
+                SizeConstraint::Definite(block_size) => {
+                    Some(ratio.compute_dependent_size(LogicalAxis::Inline, block_size))
+                },
+                SizeConstraint::MinMax(..) => None,
+            }
+        });
     let (mut preferred_min_content, preferred_max_content, preferred_depends_on_block_constraints) =
-        resolve_non_initial(content_box_sizes.inline.preferred, None)
-            .unwrap_or_else(|| resolve_non_initial(Size::FitContent, None).unwrap());
+        match transferred_inline_size {
+            Some(size) => (size, size, true),
+            None => resolve_non_initial(content_box_sizes.inline.preferred, None)
+                .unwrap_or_else(|| resolve_non_initial(Size::FitContent, None).unwrap()),
+        };
     let (mut min_min_content, mut min_max_content, mut min_depends_on_block_constraints) =
         resolve_non_initial(
             content_box_sizes.inline.min,
             Some((Au::zero(), Au::zero(), false)),
         )
-        .unwrap_or((auto_minimum.inline, auto_minimum.inline, false));
+        .unwrap_or_else(|| {
+            // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-minimum>
+            // With a transferred inline size, `min-inline-size: auto` is the min-content size
+            // of the contents, unless the box is a scroll container.
+            if transferred_inline_size.is_some() &&
+                !style.establishes_scroll_container(base.base_fragment_info.flags)
+            {
+                let floor = auto_minimum.inline.max(content_size.sizes.min_content);
+                (floor, floor, content_size.depends_on_block_constraints)
+            } else {
+                (auto_minimum.inline, auto_minimum.inline, false)
+            }
+        });
     let (mut max_min_content, max_max_content, max_depends_on_block_constraints) =
         resolve_non_initial(content_box_sizes.inline.max, None)
             .map(|(min_content, max_content, depends_on_block_constraints)| {

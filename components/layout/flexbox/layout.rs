@@ -1809,7 +1809,7 @@ impl FlexItem<'_> {
         let aspect_ratio_cross_sizes = if cross_axis_is_item_block_axis &&
             used_cross_size_override.is_none()
         {
-            self.aspect_ratio_block_sizes(used_main_size)
+            self.aspect_ratio_cross_sizes(LogicalAxis::Block, used_main_size)
         } else {
             None
         };
@@ -1853,14 +1853,19 @@ impl FlexItem<'_> {
             let cross_size = used_cross_size_override.unwrap_or_else(|| {
                 let stretch_size =
                     containing_block.inline_stretch_size(self.pbm_auto_is_zero.cross);
-                self.content_cross_sizes.resolve(
-                    LogicalAxis::Inline,
-                    Size::FitContent,
-                    Au::zero,
-                    stretch_size,
-                    || self.inline_content_sizes(flex_context, used_main_size),
-                    is_table,
-                )
+                let aspect_ratio_cross_sizes =
+                    self.aspect_ratio_cross_sizes(LogicalAxis::Inline, used_main_size);
+                aspect_ratio_cross_sizes
+                    .as_ref()
+                    .unwrap_or(&self.content_cross_sizes)
+                    .resolve(
+                        LogicalAxis::Inline,
+                        Size::FitContent,
+                        Au::zero,
+                        stretch_size,
+                        || self.inline_content_sizes(flex_context, used_main_size),
+                        is_table,
+                    )
             });
             // The main size of a flex item is considered to be definite if its flex basis is definite
             // or the flex container has a definite main size.
@@ -2190,10 +2195,15 @@ impl FlexItem<'_> {
         )
     }
 
-    /// `aspect-ratio` on a non-replaced item whose block size is its cross size and is
-    /// automatic: the block size comes from the used main (inline) size, as if specified, but
-    /// still grows to fit the contents when `min-block-size` is `auto` and overflow is visible.
-    fn aspect_ratio_block_sizes(&self, used_main_size: Au) -> Option<Sizes> {
+    /// `aspect-ratio` on a non-replaced item with an automatic cross size that isn't stretched:
+    /// the cross size comes from the used main size through the ratio, as if specified, but
+    /// still grows to fit the contents when the minimum cross size is `auto` and overflow is
+    /// visible. <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-size-transfers>
+    fn aspect_ratio_cross_sizes(
+        &self,
+        cross_axis: LogicalAxis,
+        used_main_size: Au,
+    ) -> Option<Sizes> {
         let ratio = self.preferred_aspect_ratio?;
         let context = &self.box_.independent_formatting_context;
         if context.is_replaced() || !self.content_cross_sizes.preferred.is_initial() {
@@ -2201,7 +2211,7 @@ impl FlexItem<'_> {
         }
         let mut sizes = self.content_cross_sizes.clone();
         sizes.preferred =
-            Size::Numeric(ratio.compute_dependent_size(LogicalAxis::Block, used_main_size));
+            Size::Numeric(ratio.compute_dependent_size(cross_axis, used_main_size));
         if sizes.min.is_initial() &&
             !context
                 .style()
@@ -2221,11 +2231,9 @@ impl FlexItem<'_> {
         used_main_size: Au,
         get_content_size: impl FnOnce() -> ContentSizes,
     ) -> Au {
-        // A stretched item fills the line instead; otherwise its block size follows the ratio.
-        let aspect_ratio_sizes = if cross_axis == LogicalAxis::Block &&
-            self.automatic_cross_size != Size::Stretch
-        {
-            self.aspect_ratio_block_sizes(used_main_size)
+        // A stretched item fills the line instead; otherwise its cross size follows the ratio.
+        let aspect_ratio_sizes = if self.automatic_cross_size != Size::Stretch {
+            self.aspect_ratio_cross_sizes(cross_axis, used_main_size)
         } else {
             None
         };
@@ -2815,7 +2823,7 @@ impl FlexItemBox {
                     .block_stretch_size(pbm_auto_is_zero.main);
                 // The block size contribution of a non-replaced item with `aspect-ratio` and an
                 // automatic block size is the size transferred from its inline size, as when it
-                // is laid out (`FlexItem::aspect_ratio_block_sizes`, case B of the flex base
+                // is laid out (`FlexItem::aspect_ratio_cross_sizes`, case B of the flex base
                 // size), growing to fit its contents only when `min-block-size` is `auto` and
                 // overflow is visible. Without this, an empty or abspos-filled ratio box (X's
                 // media boxes, `flex flex-col` > `relative` + `aspect-ratio`) contributes 0,
