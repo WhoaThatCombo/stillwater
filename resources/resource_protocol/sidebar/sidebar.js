@@ -322,9 +322,14 @@ function closeByMouse(id, row) {
   const after = !above ? null : above.dataset.gap ? `gap:${above.dataset.gap}` : above.dataset.tab || null;
   closedGaps.push({ id: String(id), after });
   send("close", id);
+  // Gone at once (its place kept, as above), not when Rust's next state push arrives.
+  if (row) row.classList.add("closed-gap");
 }
 function withClosedGaps(rows) {
   const keyOf = (row) => (row.dataset.gap ? `gap:${row.dataset.gap}` : row.dataset.tab);
+  for (const row of rows) {
+    if (row.dataset.tab) row.classList.toggle("closed-gap", closedGaps.some((gap) => gap.id === row.dataset.tab));
+  }
   let pending = closedGaps.filter((gap) => !state.tabs.some((tab) => String(tab.id) === gap.id));
   // A placeholder can sit under another one (two rows closed in a row), so place them in passes.
   while (pending.length) {
@@ -348,6 +353,45 @@ tabs.addEventListener("mouseout", (event) => {
     render();
   }
 });
+
+// Selecting a tab: move the highlight at once, in this frame, rather than when Rust's next
+// state push arrives (a round trip through the shell and at least one more frame), then ask
+// Rust. The click that ends the press that already selected the row is not sent again (the
+// row may have been rebuilt in between, so this goes by key, not element).
+let pressed = { key: null, time: 0 };
+// The optimistic selection, kept over state pushes that left before Rust acted on it.
+let pendingSelect = null; // { key, until }
+function selectRow(key, sendCommand, event) {
+  const time = Date.now();
+  if (event.type === "click") {
+    const already = pressed.key === key && time - pressed.time < 1500;
+    pressed = { key: null, time: 0 };
+    if (already) return;
+  } else {
+    pressed = { key, time };
+  }
+  pendingSelect = { key, until: time + 1000 };
+  applyPendingSelect();
+  sendCommand();
+}
+// The keys (`tab:<id>`, `pin:<pinId>`) the state shows as active.
+function stateActiveKeys() {
+  const pinned = state.pinned || { folders: [], pins: [] };
+  const pins = [...(state.essentials || []), ...pinned.pins, ...pinned.folders.flatMap((folder) => folder.pins)];
+  return [...state.tabs.filter((tab) => tab.active).map((tab) => `tab:${tab.id}`),
+    ...pins.filter((pin) => pin.active).map((pin) => `pin:${pin.pinId}`)];
+}
+function applyPendingSelect() {
+  if (!pendingSelect) return;
+  if (Date.now() > pendingSelect.until || stateActiveKeys().includes(pendingSelect.key)) {
+    pendingSelect = null;
+    return;
+  }
+  const keyOf = (element) => (element.dataset.tab ? `tab:${element.dataset.tab}` : `pin:${element.dataset.pin}`);
+  for (const element of document.querySelectorAll("#tabs .tab[data-tab], #pinned .tab[data-pin], #essentials .essential")) {
+    element.classList.toggle("selected", keyOf(element) === pendingSelect.key);
+  }
+}
 
 // One row for an ordinary tab ({id, …}) or a pinned tab ({pinId, …}).
 function renderRow(item, isPin) {
@@ -391,7 +435,15 @@ function renderRow(item, isPin) {
   }
   row.append(...parts);
 
-  row.addEventListener("click", () => (isPin ? send("pin-open", item.pinId) : send("activate", item.id)));
+  const key = isPin ? `pin:${item.pinId}` : `tab:${item.id}`;
+  const select = (event) => selectRow(key, () => (isPin ? send("pin-open", item.pinId) : send("activate", item.id)), event);
+  // Select on press, like Chrome, Firefox and Zen: the tab shows while the button is still
+  // down rather than after the release. The row's own buttons and a rename field keep their
+  // meaning; a drag (session.js) starts from the same press.
+  row.addEventListener("mousedown", (event) => {
+    if (event.button === 0 && !event.target.closest("button, input")) select(event);
+  });
+  row.addEventListener("click", select); // script clicks, and presses the mousedown skipped
   row.addEventListener("mouseup", (event) => {
     if (event.button !== 1) return; // middle click closes / unloads
     if (isPin) send("pin-unload", item.pinId);
@@ -431,7 +483,11 @@ function renderEssentials() {
     const icon = tabIcon(pin);
     icon.classList.add("essential-icon");
     tile.append(icon);
-    tile.addEventListener("click", () => send("pin-open", pin.pinId));
+    const select = (event) => selectRow(`pin:${pin.pinId}`, () => send("pin-open", pin.pinId), event);
+    tile.addEventListener("mousedown", (event) => {
+      if (event.button === 0) select(event);
+    });
+    tile.addEventListener("click", select);
     tile.addEventListener("mouseup", (event) => {
       if (event.button === 1) send("pin-unload", pin.pinId);
     });
@@ -897,6 +953,7 @@ function render() {
     const rows = withClosedGaps(state.tabs.map((tab) => renderRow(tab, false)));
     if (state.split) rows.push(renderSplitRow(state.split));
     tabs.replaceChildren(...rows);
+    applyPendingSelect();
     revealActiveRow();
   }
   $("back").disabled = !state.canGoBack;
