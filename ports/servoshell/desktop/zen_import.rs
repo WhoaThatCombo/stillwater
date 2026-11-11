@@ -13,6 +13,8 @@
 //!
 //! - `places.sqlite` holds bookmarks (`moz_bookmarks`) and history (`moz_places`,
 //!   `moz_historyvisits`). Zen keeps it open, so a copy is read.
+//! - `cookies.sqlite` (`moz_cookies`) holds cookies, so sites stay signed in. Also read from a
+//!   copy.
 //!
 //! Nothing in the Zen profile is changed.
 
@@ -88,11 +90,27 @@ pub(crate) struct ZenPlaces {
     pub(crate) visits: Vec<ZenVisit>,
 }
 
+/// A cookie from Zen's cookie store (default container only, not expired).
+pub(crate) struct ZenCookie {
+    pub(crate) name: String,
+    pub(crate) value: String,
+    /// `example.com` for a host-only cookie, `.example.com` for one sent to subdomains too.
+    pub(crate) host: String,
+    pub(crate) path: String,
+    /// Seconds since 1970.
+    pub(crate) expiry: i64,
+    pub(crate) secure: bool,
+    pub(crate) http_only: bool,
+    /// Firefox's values: 0 none, 1 lax, 2 strict (anything else: not set).
+    pub(crate) same_site: i64,
+}
+
 /// Everything read from one Zen profile.
 pub(crate) struct ZenData {
     pub(crate) session: Result<ZenSession, String>,
     pub(crate) places: Result<ZenPlaces, String>,
     pub(crate) logins: Result<Vec<ZenLogin>, String>,
+    pub(crate) cookies: Result<Vec<ZenCookie>, String>,
     /// Saved logins that can't be imported (HTTP authentication, unreadable).
     pub(crate) skipped_logins: usize,
 }
@@ -184,6 +202,7 @@ pub(crate) fn read_profile(profile: &Path) -> ZenData {
         session: read_session(profile),
         places: read_places(profile),
         logins,
+        cookies: read_cookies(profile),
         skipped_logins,
     }
 }
@@ -585,6 +604,124 @@ fn read_logins(profile: &Path) -> Result<(Vec<ZenLogin>, usize), String> {
         });
     }
     Ok((logins, skipped))
+}
+
+// ---- Cookies: cookies.sqlite ----
+
+/// Zen's cookies from its default container (no container tabs, private windows or partitioned
+/// third-party cookies), skipping expired ones.
+fn read_cookies(profile: &Path) -> Result<Vec<ZenCookie>, String> {
+    let source = profile.join("cookies.sqlite");
+    if !source.exists() {
+        return Ok(Vec::new());
+    }
+    // A copy with its write-ahead log, as for places.sqlite: Zen keeps the original locked.
+    let temp = TempCopyDir::new()?;
+    let copy = &temp.0;
+    let result = (|| {
+        std::fs::copy(&source, copy.join("cookies.sqlite"))
+            .map_err(|_| "Zen's cookies (cookies.sqlite) couldn't be read.")?;
+        let wal = profile.join("cookies.sqlite-wal");
+        if wal.exists() {
+            let _ = std::fs::copy(&wal, copy.join("cookies.sqlite-wal"));
+        }
+        let connection = rusqlite::Connection::open(copy.join("cookies.sqlite"))
+            .map_err(|_| "Zen's cookies couldn't be opened.")?;
+        read_cookies_from(&connection, crate::desktop::history::now_ms() / 1000)
+            .map_err(|_| "Zen's cookies couldn't be read.")
+    })();
+    drop(temp);
+    result.map_err(str::to_owned)
+}
+
+/// Add Zen's cookies to the engine's cookie store, each through the same checks as a cookie a
+/// site sets (`SiteDataManager::set_cookie_for_url`, as the HTTP `Set-Cookie` header would). A
+/// cookie with the same host, path and name replaces the one Stillwater has. Returns how many
+/// were handed over; the store keeps them in memory and writes them to `cookie_jar.json` when
+/// Stillwater closes.
+pub(crate) fn import_cookies(manager: &servo::SiteDataManager, cookies: &[ZenCookie]) -> usize {
+    use cookie::time::OffsetDateTime;
+    use cookie::{Cookie, SameSite};
+
+    let mut imported = 0;
+    for zen in cookies {
+        let domain_cookie = zen.host.starts_with('.');
+        let host = zen.host.trim_start_matches('.');
+        // Secure or not, the cookie is stored as if set by the https:// page: whether it's
+        // later sent over plain http is decided by its Secure flag, as usual.
+        let Ok(url) = url::Url::parse(&format!("https://{host}/")) else {
+            continue;
+        };
+        let Ok(expires) = OffsetDateTime::from_unix_timestamp(zen.expiry) else {
+            continue;
+        };
+        let mut cookie = Cookie::new(zen.name.clone(), zen.value.clone());
+        // A host-only cookie has no Domain attribute; one for subdomains too has its host.
+        if domain_cookie {
+            cookie.set_domain(host.to_owned());
+        }
+        cookie.set_path(if zen.path.starts_with('/') {
+            zen.path.clone()
+        } else {
+            "/".to_owned()
+        });
+        cookie.set_expires(expires);
+        cookie.set_secure(zen.secure);
+        cookie.set_http_only(zen.http_only);
+        match zen.same_site {
+            1 => cookie.set_same_site(SameSite::Lax),
+            2 => cookie.set_same_site(SameSite::Strict),
+            0 if zen.secure => cookie.set_same_site(SameSite::None),
+            _ => {},
+        }
+        manager.set_cookie_for_url(url, cookie, Some(Box::new(|| {})));
+        imported += 1;
+    }
+    imported
+}
+
+/// Firefox stored `expiry` in seconds, and newer versions store milliseconds: anything past the
+/// year 5000 in seconds is taken for milliseconds.
+fn expiry_seconds(expiry: i64) -> i64 {
+    if expiry > 100_000_000_000 {
+        expiry / 1000
+    } else {
+        expiry
+    }
+}
+
+fn read_cookies_from(
+    connection: &rusqlite::Connection,
+    now_seconds: i64,
+) -> rusqlite::Result<Vec<ZenCookie>> {
+    let mut statement = connection.prepare(
+        "SELECT name, value, host, path, expiry, isSecure, isHttpOnly, sameSite
+         FROM moz_cookies
+         WHERE coalesce(originAttributes, '') = ''
+         ORDER BY host, path, name",
+    )?;
+    let cookies = statement
+        .query_map([], |row| {
+            Ok(ZenCookie {
+                name: row.get(0)?,
+                value: row.get(1)?,
+                host: row.get(2)?,
+                path: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                expiry: expiry_seconds(row.get(4)?),
+                secure: row.get::<_, Option<i64>>(5)?.unwrap_or(0) != 0,
+                http_only: row.get::<_, Option<i64>>(6)?.unwrap_or(0) != 0,
+                same_site: row.get::<_, Option<i64>>(7)?.unwrap_or(-1),
+            })
+        })?
+        .filter_map(Result::ok)
+        .filter(|cookie| {
+            cookie.expiry > now_seconds &&
+                !cookie.host.trim_start_matches('.').is_empty() &&
+                !(cookie.name.is_empty() && cookie.value.is_empty()) &&
+                cookie.name.len() + cookie.value.len() <= 4096
+        })
+        .collect();
+    Ok(cookies)
 }
 
 // ---- Bookmarks and history: places.sqlite ----

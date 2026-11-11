@@ -142,7 +142,8 @@ pub(crate) enum WindowAction {
     Compare,
     /// Look for Zen Browser profiles to import from, and count what profile number N holds.
     ZenScan(usize),
-    /// Import from a Zen profile (index from the scan): spaces and pins, open tabs, passwords.
+    /// Import from a Zen profile (index from the scan): spaces and pins, open tabs, passwords,
+    /// bookmarks, history, cookies.
     ZenImport {
         profile: usize,
         pins: bool,
@@ -150,6 +151,7 @@ pub(crate) enum WindowAction {
         passwords: bool,
         history: bool,
         bookmarks: bool,
+        cookies: bool,
     },
     /// History, address-bar suggestions and bookmarks: a `hist-` / `bm-` command and its argument.
     History(String, String),
@@ -1167,6 +1169,7 @@ impl Sidebar {
                         passwords: what.contains(&"passwords"),
                         history: what.contains(&"history"),
                         bookmarks: what.contains(&"bookmarks"),
+                        cookies: what.contains(&"cookies"),
                     });
                 },
                 // History panel (Ctrl+H) and bookmarking the page (Ctrl+D): show the sidebar.

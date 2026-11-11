@@ -175,8 +175,8 @@
 
     <section class="pane" data-pane="import">
       <h1>Import from Zen</h1>
-      <div class="group" data-words="import zen browser firefox spaces pinned tabs essentials passwords bookmarks history migrate">
-        <p class="hint">Copies your spaces, pinned tabs, Essentials, passwords, bookmarks and history from Zen Browser on this computer. Zen isn't changed.</p>
+      <div class="group" data-words="import zen browser firefox spaces pinned tabs essentials passwords bookmarks history cookies signed in migrate">
+        <p class="hint">Copies your spaces, pinned tabs, Essentials, passwords, bookmarks, history and cookies from Zen Browser on this computer. Zen isn't changed.</p>
         <div class="row"><button class="secondary" id="zen-scan">Find Zen's data</button></div>
         <div id="zen-found" hidden>
           <div class="options" id="zen-profiles" role="radiogroup" aria-label="Zen profile"></div>
@@ -185,6 +185,7 @@
           <button class="toggle" data-zen="passwords"><span>Passwords<span data-zen-count="passwords"></span></span><span class="switch" aria-hidden="true"></span></button>
           <button class="toggle" data-zen="bookmarks"><span>Bookmarks<span data-zen-count="bookmarks"></span></span><span class="switch" aria-hidden="true"></span></button>
           <button class="toggle" data-zen="history"><span>History<span data-zen-count="history"></span></span><span class="switch" aria-hidden="true"></span></button>
+          <button class="toggle" data-zen="cookies"><span>Cookies (stay signed in)<span data-zen-count="cookies"></span></span><span class="switch" aria-hidden="true"></span></button>
           <div class="row"><button class="primary" id="zen-import">Import</button></div>
         </div>
         <p class="status" id="zen-status" aria-live="polite"></p>
