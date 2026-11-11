@@ -24,6 +24,7 @@ pub mod geometry;
 mod gui;
 pub(crate) mod headed_window;
 pub(crate) mod history;
+pub(crate) mod incognito;
 mod headless_window;
 mod keyutils;
 pub(crate) mod layout_report;

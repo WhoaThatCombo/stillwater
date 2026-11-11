@@ -162,3 +162,77 @@ a {
 a:hover {
   color: var(--text);
 }
+
+/* Incognito windows: purple, with what is and isn't private. */
+:root.incognito {
+  --background: #ebe5f6;
+  --text: #241a38;
+  --muted: #64587a;
+  --accent: #6a46b0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root.incognito {
+    --background: #1f1830;
+    --text: #e6def5;
+    --muted: #a99bc4;
+    --field: #2b2240;
+    --logo-disc: #2b2240;
+    --accent: #b094ee;
+  }
+}
+
+#incognito {
+  width: min(640px, 100%);
+}
+
+#incognito[hidden] {
+  display: none;
+}
+
+#incognito h1 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 8px;
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.incognito-mark {
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets";
+  font-size: 20px;
+  color: var(--accent);
+}
+
+#incognito h2 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+#incognito p {
+  margin: 0 0 14px;
+  color: var(--muted);
+}
+
+#incognito .columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px 32px;
+  margin-bottom: 14px;
+}
+
+#incognito .columns > div {
+  flex: 1 1 240px;
+}
+
+#incognito ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+#incognito .kept {
+  margin: 0;
+}

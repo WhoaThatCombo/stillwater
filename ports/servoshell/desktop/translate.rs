@@ -616,7 +616,8 @@ impl Translations {
     }
 
     fn save(&self) {
-        let Some(dir) = translations_dir() else {
+        // Incognito: choices (like "never translate <site>") last for the session only.
+        let Some(dir) = translations_dir().filter(|_| !crate::desktop::incognito::active()) else {
             return;
         };
         let data = json!({

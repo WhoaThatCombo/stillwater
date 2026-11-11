@@ -200,7 +200,7 @@ impl HeadedWindow {
         let no_native_titlebar = servoshell_preferences.no_native_titlebar;
         let inner_size = servoshell_preferences.initial_window_size;
         let window_attr = winit::window::Window::default_attributes()
-            .with_title(INITIAL_WINDOW_TITLE.to_string())
+            .with_title(crate::desktop::incognito::app_name().to_string())
             .with_decorations(!no_native_titlebar)
             // Stillwater draws its own window background, so only macOS needs transparency
             // to blend its traffic-light area.
@@ -1149,6 +1149,7 @@ impl HeadedWindow {
             })
             .shortcut(CMD_OR_CONTROL, 'T', || post("new-tab"))
             .shortcut(CMD_OR_CONTROL | Modifiers::SHIFT, 'T', || post("session-reopen"))
+            .shortcut(CMD_OR_CONTROL | Modifiers::SHIFT, 'N', || post("incognito-window"))
             .shortcut(CMD_OR_CONTROL, ',', || post("open-settings"))
             .shortcut(CMD_OR_CONTROL | Modifiers::SHIFT, 'E', || post("compare"))
             .shortcut(CMD_OR_CONTROL, 'H', || post("hist-show"))
@@ -2260,8 +2261,8 @@ impl PlatformWindow for HeadedWindow {
                     .filter(|title| !title.is_empty())
                     .or_else(|| webview.url().map(|url| url.to_string()))
             })
-            .map(|title| format!("{title} — {INITIAL_WINDOW_TITLE}"))
-            .unwrap_or_else(|| INITIAL_WINDOW_TITLE.to_string());
+            .map(|title| format!("{title} — {}", crate::desktop::incognito::app_name()))
+            .unwrap_or_else(|| crate::desktop::incognito::app_name().to_string());
         if title != *self.last_title.borrow() {
             self.winit_window.set_title(&title);
             *self.last_title.borrow_mut() = title;

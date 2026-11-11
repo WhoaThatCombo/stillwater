@@ -108,7 +108,12 @@ impl ProtocolHandler for ServoProtocolHandler {
             "search-engine.js" => {
                 let template = serde_json::to_string(&crate::desktop::settings::search_template())
                     .unwrap_or_else(|_| "null".into());
-                script_response(request, format!("window.STILLWATER_SEARCH = {template};"))
+                // An incognito window's New Tab page says what is and isn't private.
+                let incognito = crate::desktop::incognito::active();
+                script_response(
+                    request,
+                    format!("window.STILLWATER_SEARCH = {template}; window.STILLWATER_INCOGNITO = {incognito};"),
+                )
             },
 
             "default-user-agent" => {

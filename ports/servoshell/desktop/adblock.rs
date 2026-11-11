@@ -367,7 +367,8 @@ fn is_allowlisted(url: &Url) -> bool {
 }
 
 fn save() {
-    let Some(path) = config_path() else {
+    // Incognito: per-site choices last for the session only (they name the sites).
+    let Some(path) = config_path().filter(|_| !crate::desktop::incognito::active()) else {
         return;
     };
     let mut allowlist: Vec<String> = SHARED

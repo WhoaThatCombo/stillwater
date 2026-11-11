@@ -19,6 +19,32 @@
           <path d="M32 54 C36.5 49 40.5 49 45 54 S53.5 59 58 54" stroke="#6f8591" stroke-width="3" />
         </svg>
       </div>
+      <!-- Shown in incognito windows (servo:search-engine.js sets STILLWATER_INCOGNITO). -->
+      <section id="incognito" hidden>
+        <h1><span class="incognito-mark" aria-hidden="true">&#xE72E;</span>You're incognito</h1>
+        <p>Pages you open in incognito windows aren't saved on this device. Everything from them
+          is deleted when you close the last incognito window.</p>
+        <div class="columns">
+          <div>
+            <h2>Not saved on this device</h2>
+            <ul>
+              <li>Your browsing history</li>
+              <li>Cookies and site data (you start signed out)</li>
+              <li>Cached files</li>
+              <li>Information you enter in forms (new passwords aren't saved)</li>
+            </ul>
+          </div>
+          <div>
+            <h2>Still visible to</h2>
+            <ul>
+              <li>Websites you visit</li>
+              <li>Your employer, school or whoever runs your network</li>
+              <li>Your internet service provider</li>
+            </ul>
+          </div>
+        </div>
+        <p class="kept">Files you download and bookmarks you add are kept.</p>
+      </section>
       <form action="https://duckduckgo.com/">
         <input name="q" aria-label="Search the web" autocomplete="off" />
         <span class="placeholder" aria-hidden="true">Search the web</span>
@@ -30,6 +56,11 @@
     </footer>
     <script src="servo:search-engine.js"></script>
     <script>
+      if (window.STILLWATER_INCOGNITO) {
+        document.documentElement.classList.add("incognito");
+        document.getElementById("incognito").hidden = false;
+        document.title = "New Incognito Tab";
+      }
       // Placeholder overlay (Servo can select an empty field's placeholder text).
       const form = document.querySelector("form");
       const input = form.querySelector("input");

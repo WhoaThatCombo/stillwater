@@ -195,11 +195,17 @@ pub(crate) struct Downloads {
 impl Downloads {
     pub(crate) fn load() -> SharedDownloads {
         let saved_path = config_dir().map(|dir| dir.join("downloads.json"));
-        let saved = saved_path
+        let mut saved = saved_path
             .as_ref()
             .and_then(|path| std::fs::read_to_string(path).ok())
             .and_then(|text| serde_json::from_str::<Value>(&text).ok())
             .unwrap_or(Value::Null);
+        // Incognito: the list starts empty and is never saved, so it is gone when the window
+        // closes. The downloaded files themselves stay (in the normal downloads folder).
+        let saved_path = saved_path.filter(|_| !crate::desktop::incognito::active());
+        if crate::desktop::incognito::active() {
+            saved["items"] = Value::Null;
+        }
         let mut next_key = 1;
         let mut leftover = false;
         let items: Vec<Item> = saved["items"]
@@ -820,7 +826,10 @@ fn mark_as_downloaded(path: &Path, url: &str) {
         let mut stream = path.as_os_str().to_owned();
         stream.push(":Zone.Identifier");
         let mut contents = String::from("[ZoneTransfer]\r\nZoneId=3\r\n");
-        if url.starts_with("http://") || url.starts_with("https://") {
+        // Incognito: the zone only, not where the file came from.
+        if (url.starts_with("http://") || url.starts_with("https://")) &&
+            !crate::desktop::incognito::active()
+        {
             contents.push_str(&format!("HostUrl={url}\r\n"));
         }
         if let Err(error) = std::fs::write(PathBuf::from(stream), contents) {

@@ -295,6 +295,10 @@ impl Passwords {
         let saved =
             unprotect(&bytes).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
         let Some(saved) = saved else {
+            // Incognito leaves the profile's files alone.
+            if crate::desktop::incognito::active() {
+                return;
+            }
             // Encrypted for another Windows user or computer. Keep the file, out of the way.
             let aside = path.with_extension(format!("dat.unreadable-{}", now()));
             let _ = std::fs::rename(path, &aside);
@@ -321,7 +325,8 @@ impl Passwords {
     }
 
     fn save(&self) {
-        let Some(path) = &self.path else {
+        // Incognito: saved logins are offered for filling, but nothing is ever saved.
+        let Some(path) = self.path.as_ref().filter(|_| !crate::desktop::incognito::active()) else {
             return;
         };
         let data = json!({
@@ -614,7 +619,8 @@ impl Passwords {
     }
 
     fn on_submit(&mut self, origin: String, url: &Url, data: &str) {
-        if !self.available() || self.never.contains(&origin) {
+        // Incognito: no offer to save, and saved logins' use isn't recorded.
+        if !self.available() || self.never.contains(&origin) || crate::desktop::incognito::active() {
             return;
         }
         let Ok(value) = serde_json::from_str::<Value>(data) else {

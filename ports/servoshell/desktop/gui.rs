@@ -537,6 +537,7 @@ impl Gui {
                 LinkAction::BackgroundTab => window.queue_user_interface_command(
                     UserInterfaceCommand::NewBackgroundWebViewWithUrl(url),
                 ),
+                LinkAction::Incognito => crate::desktop::incognito::open(window, Some(url)),
                 LinkAction::CopyImage | LinkAction::CopyGif => {
                     if let Some(webview) = window.active_webview() {
                         let kind = if action == LinkAction::CopyGif {

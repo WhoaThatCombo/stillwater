@@ -468,7 +468,8 @@ impl Sidebar {
     /// that `page` shows `servo:settings`; only settings commands are accepted.
     pub(crate) fn post_from_settings(&mut self, page: &WebView, message: &str) {
         let command = message.split_once('\t').map_or(message, |(command, _)| command);
-        if !SETTINGS_COMMANDS.contains(&command) {
+        // Settings are changed in a normal window, never from an incognito one.
+        if !SETTINGS_COMMANDS.contains(&command) || crate::desktop::incognito::active() {
             warn!("ignored settings page message: {command}");
             return;
         }
@@ -559,6 +560,13 @@ impl Sidebar {
 
     /// The window background colour, tinted by the current workspace.
     pub(crate) fn background(&self) -> [u8; 3] {
+        // Incognito windows are tinted purple (the sidebar and the window around the page).
+        if crate::desktop::incognito::active() {
+            return match self.theme {
+                Theme::Dark => [40, 31, 58],
+                Theme::Light => [226, 217, 243],
+            };
+        }
         self.workspaces.background(self.theme)
     }
 
@@ -877,6 +885,11 @@ impl Sidebar {
             // Workspace commands take `<workspace id>[\t<text>]`.
             let (workspace, text) = argument.split_once('\t').unwrap_or((argument, ""));
             let workspace: u32 = workspace.parse().unwrap_or(0);
+            // "New incognito window", and what an incognito window does differently.
+            if crate::desktop::incognito::sidebar_command(window, command, argument) {
+                window.set_needs_update();
+                continue;
+            }
             match command {
                 "ready" => {
                     self.last_pushed_state = None;
@@ -1315,6 +1328,7 @@ impl Sidebar {
             "commandBar": self.command_bar,
             "downloads": self.downloads,
             "compact": self.compact.get(),
+            "incognito": crate::desktop::incognito::active(),
             "workspaces": self.workspaces.to_json(),
             "background": background,
             "frameless": self.frameless,

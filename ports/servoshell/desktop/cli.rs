@@ -6,7 +6,7 @@ use std::{env, panic};
 
 use crate::desktop::app::App;
 use crate::desktop::event_loop::ServoShellEventLoop;
-use crate::desktop::{diagnostics, single_instance, updater};
+use crate::desktop::{diagnostics, incognito, single_instance, updater};
 use crate::panic_hook;
 use crate::prefs::{ArgumentParsingResult, parse_command_line_arguments};
 
@@ -20,7 +20,11 @@ pub fn main() {
 
     // Skip the first argument, which is the binary name.
     let args: Vec<String> = env::args().skip(1).collect();
-    let (opts, mut preferences, servoshell_preferences) = match parse_command_line_arguments(&*args) {
+    // A helper that deletes an ended incognito session's files (see `incognito::finish`).
+    if incognito::run_cleanup_helper(&args) {
+        return;
+    }
+    let (mut opts, mut preferences, servoshell_preferences) = match parse_command_line_arguments(&*args) {
         #[cfg(not(feature = "multiprocess"))]
         ArgumentParsingResult::ContentProcess(_) => {
             log::error!("IPC not enabled, cannot use contentprocesses");
@@ -46,11 +50,16 @@ pub fn main() {
     let single_instance = !servoshell_preferences.headless &&
         servoshell_preferences.webdriver_port.get().is_none() &&
         env::var_os("STILLWATER_NO_SINGLE_INSTANCE").is_none();
-    if single_instance &&
-        single_instance::forward_to_running_instance(
-            servoshell_preferences.url.as_deref().unwrap_or_default(),
-        )
-    {
+    // An incognito launch joins the running incognito session instead (its own pipe).
+    let incognito = servoshell_preferences.incognito;
+    if single_instance && {
+        let url = servoshell_preferences.url.as_deref().unwrap_or_default();
+        if incognito {
+            single_instance::forward_to_incognito_instance(url)
+        } else {
+            single_instance::forward_to_running_instance(url)
+        }
+    } {
         return;
     }
 
@@ -81,7 +90,20 @@ pub fn main() {
         }
     }
 
+    // Incognito: a temporary engine folder and a memory-only HTTP cache. Without them it must
+    // not run at all (it would use the normal profile).
+    if let Err(error) = incognito::startup(incognito, single_instance, &args, &mut opts, &mut preferences) {
+        eprintln!("Stillwater couldn't create a private folder for the incognito window: {error}");
+        std::process::exit(1);
+    }
+
     diagnostics::init();
+    if incognito {
+        diagnostics::log(format!(
+            "incognito: session started (Stillwater {}, single_instance={single_instance})",
+            updater::CURRENT_VERSION
+        ));
+    }
     diagnostics::log(format!(
         "Stillwater {} starting: exe={:?} url={:?} single_instance={single_instance}",
         updater::CURRENT_VERSION,
@@ -103,7 +125,8 @@ pub fn main() {
         if single_instance {
             single_instance::listen_for_other_instances(proxy.clone());
         }
-        if servoshell_preferences.webdriver_port.get().is_none() {
+        // Updates are left to the normal window.
+        if servoshell_preferences.webdriver_port.get().is_none() && !incognito {
             updater::check_in_background(proxy);
         }
     }
@@ -113,6 +136,7 @@ pub fn main() {
         event_loop.run_app(&mut app);
     }
     diagnostics::log("shutdown: event loop finished; exiting");
+    incognito::finish();
 
     crate::platform::deinit(clean_shutdown);
     // Everything that needs saving has been: the App (and with it Servo, the session writer,

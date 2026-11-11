@@ -4,13 +4,14 @@
 
 // Address-bar suggestion rows, shared by the sidebar's URL bar (history.js) and the floating
 // new-tab address bar (commandbar.js). Rows come from desktop/history.rs:
-//   { kind: search | visit | tab | pin | bookmark | history, title, url, space?, starred?,
+//   { kind: search | visit | tab | pin | bookmark | history | command, title, url, space?, starred?,
 //     command?, argument? }
 
 "use strict";
 
 const SUGGESTION_GLYPHS = {
   search: "", visit: "", tab: "", pin: "", bookmark: "", history: "",
+  command: "",
 };
 
 function suggestionHost(address) {
@@ -28,6 +29,7 @@ function suggestionDetail(row, engine, newTab) {
     case "visit": return newTab ? "Open in a new tab" : "Go to address";
     case "tab": return row.space ? `Switch to tab · ${row.space}` : "Switch to tab";
     case "pin": return row.space === "Essentials" ? "Switch to Essential" : "Switch to pinned tab";
+    case "command": return "Nothing from it is saved on this device";
     default: return suggestionHost(row.url);
   }
 }

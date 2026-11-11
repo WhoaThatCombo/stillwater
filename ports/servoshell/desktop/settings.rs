@@ -193,7 +193,8 @@ impl Settings {
                 .map(|width| width as f32)
                 .filter(|width| width.is_finite())
                 .unwrap_or(crate::desktop::sidebar::SIDEBAR_WIDTH),
-            path,
+            // Incognito reads the settings but never saves changes (they last for the session).
+            path: path.filter(|_| !crate::desktop::incognito::active()),
         };
         settings.publish_search_template();
         crate::desktop::scrollbar::set_mode(settings.scrollbar);

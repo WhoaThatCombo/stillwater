@@ -55,6 +55,8 @@ pub(crate) fn begin(reason: &str) {
                  ending the process",
                 started.elapsed().as_secs_f64()
             ));
+            // An incognito session's files go too (or are left to a cleanup process).
+            crate::desktop::incognito::finish();
             force_exit();
         });
     if spawned.is_err() {

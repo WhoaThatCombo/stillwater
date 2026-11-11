@@ -91,6 +91,14 @@ impl Bookmarks {
         }
     }
 
+    /// Read the file again before a change: an incognito window (a process of its own) may
+    /// have added bookmarks since, and saving must not drop them.
+    fn reload(&mut self) {
+        if self.path.is_some() {
+            *self = Self::load();
+        }
+    }
+
     fn save(&self) {
         let Some(path) = &self.path else {
             return;
@@ -138,6 +146,7 @@ impl Bookmarks {
 
     /// Bookmark a page (unless it already is).
     pub(crate) fn add(&mut self, url: &str, title: &str, folder: &str) {
+        self.reload();
         if self.insert(url, title, folder, now()) {
             self.save();
         }
@@ -146,6 +155,7 @@ impl Bookmarks {
     /// Add bookmarks from another browser: (url, title, folder, added). Pages that are already
     /// bookmarked are skipped. Returns how many were added.
     pub(crate) fn import(&mut self, bookmarks: &[(String, String, String, u64)]) -> usize {
+        self.reload();
         let added = bookmarks
             .iter()
             .filter(|(url, title, folder, added)| self.insert(url, title, folder, *added))
@@ -157,6 +167,7 @@ impl Bookmarks {
     }
 
     pub(crate) fn rename(&mut self, id: u64, title: &str) {
+        self.reload();
         let title = clean_title(title);
         if let Some(bookmark) = self.list.iter_mut().find(|bookmark| bookmark.id == id) {
             if !title.is_empty() && bookmark.title != title {
@@ -167,6 +178,7 @@ impl Bookmarks {
     }
 
     pub(crate) fn remove(&mut self, id: u64) {
+        self.reload();
         let count = self.list.len();
         self.list.retain(|bookmark| bookmark.id != id);
         if self.list.len() != count {

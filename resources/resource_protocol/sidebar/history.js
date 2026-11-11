@@ -65,7 +65,7 @@ function renderSuggestions() {
 function pickSuggestion(row) {
   const typed = url.value.trim();
   closeSuggestions();
-  if (row.kind === "tab" || row.kind === "pin") {
+  if (row.kind === "tab" || row.kind === "pin" || row.kind === "command") {
     send(row.command, row.argument);
     url.value = state.url === "servo:newtab" ? "" : state.url;
     url.blur();

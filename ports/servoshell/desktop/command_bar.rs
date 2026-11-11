@@ -359,7 +359,7 @@ impl CommandBar {
                 },
                 // `<sidebar command>\t<argument>`: show a tab that's already open.
                 "switch" if self.open => {
-                    if matches!(first, "activate" | "pin-open") {
+                    if matches!(first, "activate" | "pin-open" | "incognito-window") {
                         sidebar.post(&format!("{first}\t{rest}"));
                     }
                     self.close(window, true);

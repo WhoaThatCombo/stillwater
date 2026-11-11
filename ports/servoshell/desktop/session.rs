@@ -60,7 +60,8 @@ pub(crate) fn init(requested: Option<&str>, headless: bool, webdriver: bool) -> 
     // STILLWATER_TEST_SESSION_RESTORE: save and restore the session under WebDriver too (for
     // testing session restore and background loading with a scratch profile).
     let test_restore = std::env::var_os("STILLWATER_TEST_SESSION_RESTORE").is_some();
-    if headless || (webdriver && !test_restore) {
+    // Incognito tabs are never saved (nor the normal session restored into incognito).
+    if headless || (webdriver && !test_restore) || crate::desktop::incognito::active() {
         return None;
     }
     ENABLED.store(true, Ordering::Relaxed);
