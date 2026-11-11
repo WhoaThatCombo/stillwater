@@ -37,7 +37,10 @@ use webrender_api::{self as wr, BorderRadius};
 use wr::StickyOffsetBounds;
 use wr::units::{LayoutPixel, LayoutSize};
 
+use rustc_hash::FxHashSet;
+
 use super::ClipId;
+use super::animated_properties::{AnimatedKey, AnimatedProperties};
 use super::clip::StackingContextTreeClipStore;
 use crate::display_list::conversions::ToWebRender;
 use crate::display_list::{
@@ -219,6 +222,10 @@ pub(crate) struct StackingContextTree {
     /// for things like `overflow`. More clips may be created later during WebRender
     /// display list construction, but they are never added here.
     pub clip_store: StackingContextTreeClipStore,
+
+    /// The animated `transform` and `opacity` values bound as WebRender properties.
+    #[ignore_malloc_size_of = "Only holds references to fragments of the fragment tree"]
+    pub animated: AnimatedProperties,
 }
 
 impl StackingContextTree {
@@ -230,6 +237,7 @@ impl StackingContextTree {
         pipeline_id: wr::PipelineId,
         first_reflow: bool,
         debug: &DiagnosticsLogging,
+        animating: FxHashSet<AnimatedKey>,
     ) -> Self {
         let scrollable_overflow = fragment_tree.scrollable_overflow();
         let scroll_area = scrollable_overflow.union(&fragment_tree.initial_containing_block);
@@ -285,6 +293,7 @@ impl StackingContextTree {
             root_stacking_context: StackingContext::root(root_scroll_node_id),
             paint_info,
             clip_store: Default::default(),
+            animated: AnimatedProperties::new(pipeline_id, animating),
         };
 
         let mut root_stacking_context = StackingContext::root(root_scroll_node_id);
@@ -738,6 +747,14 @@ impl BoxFragment {
         // > If a transform function causes the current transformation matrix of an object
         // > to be non-invertible, the object and its content do not get displayed.
         if !reference_frame_data.transform.is_invertible() {
+            if let Some(key) = stacking_context_tree.animated.animating_key(self) {
+                stacking_context_tree.animated.add_transform(
+                    key,
+                    self,
+                    containing_block.rect,
+                    None,
+                );
+            }
             self.clear_stacking_context_tree_traversal_data_recursively();
             return;
         }
@@ -759,6 +776,14 @@ impl BoxFragment {
             reference_frame_data.transform,
             reference_frame_data.kind,
         );
+        if let Some(key) = stacking_context_tree.animated.animating_key(self) {
+            stacking_context_tree.animated.add_transform(
+                key,
+                self,
+                containing_block.rect,
+                Some(new_spatial_id.index),
+            );
+        }
 
         // WebRender reference frames establish a new coordinate system at their
         // origin (the border box of the fragment). We need to ensure that any
@@ -1373,6 +1398,16 @@ impl BoxFragment {
 
     /// Optionally returns the data for building a transform reference frame, without yet
     /// building it.
+    /// The transform of the reference frame this fragment establishes, computed from its
+    /// current style, as `build_stacking_context_tree` would. `None` if it has no transform.
+    pub(crate) fn animated_reference_frame_transform(
+        &self,
+        containing_block_rect: &PhysicalRect<Au>,
+    ) -> Option<LayoutTransform> {
+        self.transform_reference_frame_data_if_necessary(containing_block_rect)
+            .map(|data| data.transform)
+    }
+
     fn transform_reference_frame_data_if_necessary(
         &self,
         containing_block_rect: &PhysicalRect<Au>,

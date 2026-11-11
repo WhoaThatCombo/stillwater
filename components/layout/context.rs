@@ -23,6 +23,7 @@ use script::layout_dom::ServoLayoutNode;
 use servo_base::id::PainterId;
 use servo_url::{ImmutableOrigin, ServoUrl};
 use style::context::SharedStyleContext;
+use style::data::ElementStyles;
 use style::dom::OpaqueNode;
 use style::values::computed::color::Color;
 use style::values::computed::image::{Gradient, Image};
@@ -63,6 +64,10 @@ pub(crate) struct LayoutContext<'a> {
 
     /// The device dimensions on which this layout is running, in device pixels.
     pub device_size: Size2D<f32, DevicePixel>,
+
+    /// When set, the damage traversal records each element that got style damage, with its
+    /// new styles (see `animated_properties`).
+    pub damaged_elements: Option<Mutex<Vec<(OpaqueNode, ElementStyles)>>>,
 }
 
 impl LayoutContext<'_> {

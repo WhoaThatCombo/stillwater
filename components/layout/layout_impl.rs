@@ -26,7 +26,7 @@ use layout_api::{
     ContainerTimingRecord, DangerousStyleNode, HitTestFlags, HitTestResult, IFrameSizes, Layout,
     LayoutConfig, LayoutDamage, LayoutElement, LayoutFactory, LayoutNode, NodeRenderingType,
     OffsetParentResponse, PhysicalSides, QueryMsg, ReflowGoal, ReflowPhasesRun, ReflowRequest,
-    ReflowRequestAccessibility, ReflowRequestRestyle, ReflowResult, ReflowStatistics,
+    ReflowRequestAccessibility, ReflowRequestRestyle, ReflowResult, ReflowStatistics, RestyleReason,
     ScrollContainerQueryFlags, ScrollContainerResponse, SegmentGranularity, TrustedNodeAddress,
     with_layout_state,
 };
@@ -41,7 +41,7 @@ use profile_traits::time::{
     self as profile_time, TimerMetadata, TimerMetadataFrameType, TimerMetadataReflowType,
 };
 use profile_traits::{path, time_profile};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use script::layout_dom::{
     ServoDangerousStyleDocument, ServoDangerousStyleElement, ServoLayoutElement, ServoLayoutNode,
 };
@@ -68,7 +68,8 @@ use style::media_queries::{MediaList, MediaType};
 use style::properties::style_structs::Font;
 use style::properties::{ComputedValues, LonghandId, NonCustomPropertyId, PropertyId, ShorthandId};
 use style::queries::values::PrefersColorScheme;
-use style::selector_parser::{PseudoElement, SnapshotMap};
+use style::data::ElementStyles;
+use style::selector_parser::{EAGER_PSEUDO_COUNT, PseudoElement, SnapshotMap};
 use style::servo::media_features::PointerCapabilities;
 use style::shared_lock::{SharedRwLock, StylesheetGuards};
 use style::stylesheets::{DocumentStyleSheet, Origin, Stylesheet};
@@ -87,6 +88,9 @@ use webrender_api::units::{DevicePixel, LayoutVector2D};
 
 use crate::accessibility::{AccessibilityContext, AccessibilityDamageMap, AccessibilityTree};
 use crate::context::{CachedImageOrError, ImageResolver, LayoutContext};
+use crate::display_list::animated_properties::{
+    AnimatedKey, AnimatedPropertyValues, compositable_difference,
+};
 use crate::display_list::{DisplayListBuilder, HitTest, PaintTimingHandler, StackingContextTree};
 use crate::dom::NodeExt;
 use crate::query::{
@@ -194,6 +198,19 @@ pub struct LayoutThread {
     /// don't simply clear the stacking context tree when it becomes dirty is that we need
     /// to preserve scroll offsets from the old tree to the new one.
     need_new_stacking_context_tree: Cell<bool>,
+
+    /// The elements and pseudo-elements with running CSS animations or transitions, as of
+    /// the latest reflow request. Their `transform` and `opacity` are bound as WebRender
+    /// properties in the display list.
+    animating_keys: RefCell<FxHashSet<AnimatedKey>>,
+
+    /// New values of the animated `transform` and `opacity` bindings of the current display
+    /// list, from a restyle that changed nothing else, not yet sent to `Paint`.
+    pending_animated_properties: RefCell<Option<AnimatedPropertyValues>>,
+
+    /// The animated property values last sent to `Paint` for the current display list, so
+    /// that unchanged values (an element hidden by `scale(0)`, say) don't cost a frame.
+    sent_animated_properties: RefCell<Option<AnimatedPropertyValues>>,
 
     /// The box tree.
     box_tree: RefCell<Option<Arc<BoxTree>>>,
@@ -831,7 +848,7 @@ impl Layout for LayoutThread {
     }
 
     fn needs_new_display_list(&self) -> bool {
-        self.need_new_display_list.get()
+        self.need_new_display_list.get() || self.pending_animated_properties.borrow().is_some()
     }
 
     fn set_needs_new_display_list(&self) {
@@ -948,6 +965,9 @@ impl LayoutThread {
             need_containing_block_calculation: Cell::new(false),
             need_new_display_list: Cell::new(false),
             need_new_stacking_context_tree: Cell::new(false),
+            animating_keys: Default::default(),
+            pending_animated_properties: Default::default(),
+            sent_animated_properties: Default::default(),
             box_tree: Default::default(),
             fragment_tree: Default::default(),
             stacking_context_tree: Default::default(),
@@ -1027,7 +1047,7 @@ impl LayoutThread {
             necessary_phases,
             ReflowPhases::StackingContextTreeConstruction | ReflowPhases::DisplayListConstruction
         );
-        !self.need_new_display_list.get()
+        !self.need_new_display_list.get() && self.pending_animated_properties.borrow().is_none()
     }
 
     fn maybe_print_reflow_event(&self, reflow_request: &ReflowRequest) {
@@ -1143,6 +1163,15 @@ impl LayoutThread {
     fn handle_reflow(&mut self, mut reflow_request: ReflowRequest) -> Option<ReflowResult> {
         self.maybe_print_reflow_event(&reflow_request);
 
+        *self.animating_keys.borrow_mut() = reflow_request
+            .animations
+            .sets
+            .read()
+            .iter()
+            .filter(|(_, set)| set.needs_animation_ticks())
+            .map(|(key, _)| (key.node, key.pseudo_element))
+            .collect();
+
         if self.can_skip_reflow_request_entirely(&reflow_request) {
             // We can skip layout, but we might need to update a scroll node.
             return self
@@ -1197,6 +1226,22 @@ impl LayoutThread {
         }
         if self.build_display_list(&reflow_request, &image_resolver, &mut reflow_statistics) {
             reflow_phases_run.insert(ReflowPhasesRun::BuiltDisplayList);
+            // The new display list carries the current values of its animated properties.
+            self.pending_animated_properties.borrow_mut().take();
+            self.sent_animated_properties.borrow_mut().take();
+        } else if ReflowPhases::necessary(&reflow_request.reflow_goal)
+            .contains(ReflowPhases::DisplayListConstruction) &&
+            !self.need_new_display_list.get() &&
+            let Some((transforms, floats)) = self.pending_animated_properties.borrow_mut().take()
+        {
+            self.paint_api.update_animated_properties(
+                self.webview_id,
+                self.id,
+                transforms.clone(),
+                floats.clone(),
+            );
+            *self.sent_animated_properties.borrow_mut() = Some((transforms, floats));
+            reflow_phases_run.insert(ReflowPhasesRun::UpdatedAnimatedProperties);
         }
         if self.handle_update_scroll_node_request(&reflow_request) {
             reflow_phases_run.insert(ReflowPhasesRun::UpdatedScrollNodeOffset);
@@ -1331,6 +1376,7 @@ impl LayoutThread {
         image_resolver: &Arc<ImageResolver>,
         mut accessibility_damage: Option<&mut AccessibilityDamageMap<'dom>>,
     ) -> (ReflowPhasesRun, IFrameSizes, WebFontSetDifference) {
+        let animated_fast_path_styles = self.capture_styles_for_animated_fast_path(reflow_request);
         let mut snapshot_map = SnapshotMap::new();
         let _snapshot_setter = match reflow_request.restyle.as_mut() {
             Some(restyle) => SnapshotSetter::new(restyle, &mut snapshot_map),
@@ -1397,6 +1443,9 @@ impl LayoutThread {
             parallelism_job_count_minimum: pref!(layout_parallelism_job_count_minimum) as usize,
             parallelism_job_size_minimum: pref!(layout_parallelism_job_size_minimum) as usize,
             device_size: reflow_request.viewport_details.device_size.cast_unit(),
+            damaged_elements: animated_fast_path_styles
+                .as_ref()
+                .map(|_| Default::default()),
         };
 
         let restyle = reflow_request
@@ -1460,6 +1509,34 @@ impl LayoutThread {
                 compute_damage_and_build_box_tree()
             }
         };
+
+        // If the restyle changed only animated `transform` and `opacity` values that the current
+        // display list binds as WebRender properties, send their new values instead of building
+        // a new stacking context tree and display list.
+        if let Some(captured_styles) = animated_fast_path_styles &&
+            !damage.is_empty() &&
+            (damage -
+                (LayoutDamage::Repaint |
+                    LayoutDamage::RebuildStackingContextTree |
+                    LayoutDamage::RecalculateOverflow))
+                .is_empty() &&
+            layout_roots.is_empty() &&
+            let Some(damaged_elements) = layout_context.damaged_elements.as_ref() &&
+            let Some(values) = self.animated_property_values_after_restyle(
+                &captured_styles,
+                &std::mem::take(&mut *damaged_elements.lock()),
+            )
+        {
+            // Values equal to those on screen need no new frame.
+            *self.pending_animated_properties.borrow_mut() =
+                (self.sent_animated_properties.borrow().as_ref() != Some(&values)).then_some(values);
+            layout_context.style_context.stylist.rule_tree().maybe_gc();
+            return (
+                ReflowPhasesRun::empty(),
+                IFrameSizes::default(),
+                stylist_update.changed_web_fonts,
+            );
+        }
 
         if damage.contains(LayoutDamage::RebuildStackingContextTree) {
             self.need_new_stacking_context_tree.set(true);
@@ -1567,6 +1644,108 @@ impl LayoutThread {
         )
     }
 
+    /// If this reflow's restyle could change nothing but animated `transform` and `opacity`
+    /// values bound in the current display list, return the styles of the elements to be
+    /// restyled, to compare after the restyle. Otherwise (or if nothing is bound) `None`.
+    #[expect(unsafe_code)]
+    fn capture_styles_for_animated_fast_path(
+        &self,
+        reflow_request: &ReflowRequest,
+    ) -> Option<FxHashMap<OpaqueNode, ElementStyles>> {
+        let restyle = reflow_request.restyle.as_ref()?;
+        if restyle.stylesheets_changed ||
+            !(restyle.reason - (RestyleReason::DOMChanged | RestyleReason::PendingRestyles))
+                .is_empty() ||
+            restyle.pending_restyles.is_empty() ||
+            restyle.pending_restyles.len() > 64 ||
+            self.device_has_changed ||
+            self.need_new_display_list.get() ||
+            self.need_new_stacking_context_tree.get() ||
+            self.previously_highlighted_dom_node.get() != reflow_request.highlighted_dom_node
+        {
+            return None;
+        }
+        if self.stacking_context_tree.borrow().as_ref()?.animated.is_empty() {
+            return None;
+        }
+
+        let mut captured = FxHashMap::default();
+        for (address, pending_restyle) in &restyle.pending_restyles {
+            if !pending_restyle.damage.is_empty() {
+                return None;
+            }
+            let element = unsafe { ServoLayoutNode::new(address) }.as_element()?;
+            let style_data = element.style_data()?;
+            captured.insert(
+                element.as_node().opaque(),
+                style_data.element_data.borrow().styles.clone(),
+            );
+        }
+        Some(captured)
+    }
+
+    /// Compare the styles of the elements a restyle damaged with their `captured` styles. If
+    /// only animated `transform` and `opacity` values bound in the current display list
+    /// changed, return the new values of all bindings.
+    fn animated_property_values_after_restyle(
+        &self,
+        captured: &FxHashMap<OpaqueNode, ElementStyles>,
+        damaged_elements: &[(OpaqueNode, ElementStyles)],
+    ) -> Option<AnimatedPropertyValues> {
+        fn compare(
+            key: AnimatedKey,
+            old: Option<&ServoArc<ComputedValues>>,
+            new: Option<&ServoArc<ComputedValues>>,
+            changed_transforms: &mut FxHashSet<AnimatedKey>,
+            changed_opacities: &mut FxHashSet<AnimatedKey>,
+        ) -> Option<()> {
+            match (old, new) {
+                (None, None) => Some(()),
+                (Some(old), Some(new)) => {
+                    let (transform, opacity) = compositable_difference(old, new)?;
+                    if transform {
+                        changed_transforms.insert(key);
+                    }
+                    if opacity {
+                        changed_opacities.insert(key);
+                    }
+                    Some(())
+                },
+                _ => None,
+            }
+        }
+
+        let mut changed_transforms = FxHashSet::default();
+        let mut changed_opacities = FxHashSet::default();
+        for (node, new_styles) in damaged_elements {
+            let old_styles = captured.get(node)?;
+            compare(
+                (*node, None),
+                old_styles.primary.as_ref(),
+                new_styles.primary.as_ref(),
+                &mut changed_transforms,
+                &mut changed_opacities,
+            )?;
+            for index in 0..EAGER_PSEUDO_COUNT {
+                compare(
+                    (*node, Some(PseudoElement::from_eager_index(index))),
+                    old_styles.pseudos.as_array()[index].as_ref(),
+                    new_styles.pseudos.as_array()[index].as_ref(),
+                    &mut changed_transforms,
+                    &mut changed_opacities,
+                )?;
+            }
+        }
+        if changed_transforms.is_empty() && changed_opacities.is_empty() {
+            return None;
+        }
+        self.stacking_context_tree
+            .borrow()
+            .as_ref()?
+            .animated
+            .current_values(&changed_transforms, &changed_opacities)
+    }
+
     fn build_stacking_context_tree_for_reflow(&self, reflow_request: &ReflowRequest) -> bool {
         if !ReflowPhases::necessary(&reflow_request.reflow_goal)
             .contains(ReflowPhases::StackingContextTreeConstruction)
@@ -1603,6 +1782,7 @@ impl LayoutThread {
             self.id.into(),
             !self.have_ever_generated_display_list.get(),
             &self.debug,
+            self.animating_keys.borrow().clone(),
         );
 
         // When a new StackingContextTree is built, it contains a freshly built
@@ -1689,6 +1869,7 @@ impl LayoutThread {
             paint_timing_handler,
             reflow_statistics,
             reflow_request.frame_focused,
+            self.animating_keys.borrow().clone(),
         );
 
         stacking_context_tree.paint_info.paint_timing_info = reflow_request.paint_timing_info;

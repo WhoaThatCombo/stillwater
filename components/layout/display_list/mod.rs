@@ -14,6 +14,7 @@ use fonts::{FontMetrics, ShapedTextSlice};
 use gradient::WebRenderGradient;
 use layout_api::ReflowStatistics;
 use paint_api::display_list::{PaintDisplayListInfo, SpatialTreeNodeInfo};
+use rustc_hash::FxHashSet;
 use servo_arc::Arc as ServoArc;
 use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_base::id::{PipelineId, ScrollTreeNodeId};
@@ -56,6 +57,7 @@ use webrender_api::{
 use wr::units::LayoutVector2D;
 
 use crate::context::{ImageResolver, ResolvedImage};
+use crate::display_list::animated_properties::{AnimatedKey, AnimatedProperties};
 use crate::display_list::background::BackgroundPainter;
 use crate::display_list::conversions::FilterToWebRender;
 pub(crate) use crate::display_list::conversions::ToWebRender;
@@ -71,6 +73,7 @@ use crate::geom::{
 use crate::replaced::NaturalSizes;
 use crate::style_ext::{BorderStyleColor, ComputedValuesExt};
 
+pub(crate) mod animated_properties;
 mod background;
 mod clip;
 mod conversions;
@@ -148,6 +151,9 @@ pub(crate) struct DisplayListBuilder<'a> {
     /// Glyphs of the text fragment being built, reused across fragments to avoid
     /// an allocation per fragment.
     glyph_buffer: Vec<GlyphInstance>,
+
+    /// Animated `transform` and `opacity` values, bound as WebRender properties.
+    animated: &'a mut AnimatedProperties,
 }
 
 struct InspectorHighlight {
@@ -200,7 +206,13 @@ impl DisplayListBuilder<'_> {
         paint_timing_handler: &mut PaintTimingHandler,
         reflow_statistics: &mut ReflowStatistics,
         frame_focused: bool,
+        animating: FxHashSet<AnimatedKey>,
     ) -> BuiltDisplayList {
+        // Opacity bindings are made while building the display list; transform bindings
+        // belong to the stacking context tree.
+        stacking_context_tree.animated.animating = animating;
+        stacking_context_tree.animated.opacities.clear();
+
         // Build the rest of the display list which inclues all of the WebRender primitives.
         let paint_info = &mut stacking_context_tree.paint_info;
         let pipeline_id = paint_info.pipeline_id;
@@ -246,6 +258,7 @@ impl DisplayListBuilder<'_> {
             shell_background_color,
             frame_focused,
             glyph_buffer: Vec::new(),
+            animated: &mut stacking_context_tree.animated,
         };
 
         // Clear any caret color from previous display list constructions.
@@ -318,7 +331,7 @@ impl DisplayListBuilder<'_> {
         mapping.push(SpatialId::root_reference_frame(self.pipeline_id()));
         mapping.push(SpatialId::root_scroll_node(self.pipeline_id()));
 
-        for node in scroll_tree.nodes.iter().skip(2) {
+        for (index, node) in scroll_tree.nodes.iter_mut().enumerate().skip(2) {
             let parent_scroll_node_id = node
                 .parent
                 .expect("Should have already added root reference frame");
@@ -326,13 +339,22 @@ impl DisplayListBuilder<'_> {
                 .get(parent_scroll_node_id.index)
                 .expect("Should add spatial nodes to display list in order");
 
-            mapping.push(match &node.info {
+            mapping.push(match &mut node.info {
                 SpatialTreeNodeInfo::ReferenceFrame(info) => {
+                    let transform = match self.animated.reference_frame(index) {
+                        Some((key, current_transform)) => {
+                            if let Some(current_transform) = current_transform {
+                                info.transform = current_transform.into();
+                            }
+                            PropertyBinding::Binding(key, *info.transform.to_transform())
+                        },
+                        None => PropertyBinding::Value(*info.transform.to_transform()),
+                    };
                     let spatial_id = self.wr().push_reference_frame(
                         info.origin,
                         *parent_spatial_node_id,
                         info.transform_style,
-                        PropertyBinding::Value(*info.transform.to_transform()),
+                        transform,
                         info.kind,
                     );
                     self.wr().pop_reference_frame();
@@ -530,10 +552,14 @@ impl DisplayListBuilder<'_> {
                     .map(|filter| FilterToWebRender::to_webrender(filter, &style))
                     .collect();
                 if effects.opacity != 1.0 {
-                    filters.push(wr::FilterOp::Opacity(
-                        effects.opacity.into(),
-                        effects.opacity,
-                    ));
+                    let opacity = match self.animated.animating_key(fragment) {
+                        Some(key) => PropertyBinding::Binding(
+                            self.animated.add_opacity(key, fragment),
+                            effects.opacity,
+                        ),
+                        None => effects.opacity.into(),
+                    };
+                    filters.push(wr::FilterOp::Opacity(opacity, effects.opacity));
                 }
             },
             // WebRender only needs a stacking context at the root when the root stacking
