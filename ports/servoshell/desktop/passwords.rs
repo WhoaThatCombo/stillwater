@@ -4,11 +4,17 @@
 
 //! Saved passwords. A small script in every page (`passwords.js`) reports sign-in forms,
 //! focused sign-in fields and the username and password a form was submitted with; Stillwater
-//! offers to save new logins in the sidebar and fills saved ones into sign-in forms on exactly
-//! the same origin (scheme, host and port). With one saved login for the page's origin it's
-//! filled in as the form appears; with several, nothing is filled until the user picks one
-//! from the list Stillwater draws under the focused field (`draw_chooser`). Only top-level
-//! pages are filled, never frames.
+//! offers to save new logins in the sidebar and fills saved ones into sign-in forms of the same
+//! site (see `relation`): logins saved for the page's origin, for the same host with or without
+//! `www.` and for the `http:` version of an `https:` page are filled like the page's own; logins
+//! saved for another host of the same site (github.com on gist.github.com) are only listed,
+//! labelled with their host, and filled when picked. Nothing is offered across sites, or from an
+//! `https:` login on an `http:` page. With one fillable login it's filled in as the form
+//! appears; with several, nothing is filled until the user picks one from the list Stillwater
+//! draws under the focused field (`draw_chooser`). Only top-level pages are filled, never frames.
+//!
+//! Why something was or wasn't offered goes to the diagnostics log (host and counts only, never
+//! usernames or passwords).
 //!
 //! Logins are kept in `<config dir>/stillwater-passwords.dat`, encrypted with Windows' DPAPI for
 //! the current Windows user (like Chrome and Edge). Passwords never go through the log: the
@@ -51,7 +57,7 @@ impl Login {
     fn from_json(value: &Value) -> Option<Self> {
         Some(Self {
             id: value["id"].as_u64()?,
-            origin: value["origin"].as_str()?.to_owned(),
+            origin: normalize_origin(value["origin"].as_str()?),
             username: value["username"].as_str().unwrap_or_default().to_owned(),
             password: value["password"].as_str()?.to_owned(),
             created: value["created"].as_u64().unwrap_or(0),
@@ -102,6 +108,65 @@ pub(crate) enum PasswordAction {
     ForgetNever(String),
 }
 
+/// How a saved login relates to the page it might be offered on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Match {
+    /// Saved for exactly the page's origin.
+    Exact,
+    /// Saved for the same host with or without `www.`, or for `http:` while the page is the
+    /// `https:` version. Filled like an exact match.
+    SameHost,
+    /// Saved for another host of the same site (same registrable domain, e.g. github.com on
+    /// gist.github.com). Only listed, with its host, and filled when the user picks it.
+    OtherHost,
+}
+
+/// `origin` the way `origin_of` writes it (lowercase host, no default port, no trailing slash),
+/// or unchanged if it isn't a web origin. Imported logins come from other browsers.
+pub(crate) fn normalize_origin(origin: &str) -> String {
+    Url::parse(origin.trim())
+        .ok()
+        .as_ref()
+        .and_then(origin_of)
+        .unwrap_or_else(|| origin.to_owned())
+}
+
+/// Whether, and how, a login saved for `saved` may be offered on `page`.
+fn relation(saved: &str, page: &Url) -> Option<Match> {
+    let page_origin = origin_of(page)?;
+    if saved == page_origin {
+        return Some(Match::Exact);
+    }
+    let saved = Url::parse(saved).ok()?;
+    // A login saved for a secure page is never offered on an insecure one (a network attacker
+    // could add the form); one saved for `http:` may be used on `https:`.
+    let scheme_ok = saved.scheme() == page.scheme() ||
+        (saved.scheme() == "http" && page.scheme() == "https");
+    // `port()` is None for the scheme's usual port, so http:80 and https:443 count as the same.
+    if !scheme_ok || saved.port() != page.port() {
+        return None;
+    }
+    // Addresses and single-label names (localhost) only ever match exactly, or as the http:
+    // version of the same address.
+    let (Some(url::Host::Domain(saved_host)), Some(url::Host::Domain(page_host))) =
+        (saved.host(), page.host())
+    else {
+        return (saved.host() == page.host()).then_some(Match::SameHost);
+    };
+    let saved_host = saved_host.to_ascii_lowercase();
+    let page_host = page_host.to_ascii_lowercase();
+    let bare = |host: &str| host.strip_prefix("www.").unwrap_or(host).to_owned();
+    if bare(&saved_host) == bare(&page_host) {
+        return Some(Match::SameHost);
+    }
+    // The same registrable domain ("site"), from the public suffix list: never across sites,
+    // and never for hosts on a shared suffix (alice.github.io and bob.github.io are different
+    // sites).
+    let page_site = servo::reg_suffix(&page_host).to_ascii_lowercase();
+    let saved_site = servo::reg_suffix(&saved_host).to_ascii_lowercase();
+    (page_site == saved_site && servo::is_reg_domain(&page_site)).then_some(Match::OtherHost)
+}
+
 /// The list of saved logins shown under a focused sign-in field. It's drawn by Stillwater over
 /// the page, so the page never sees which logins are saved; only the one picked is filled in.
 pub(crate) struct Chooser {
@@ -110,8 +175,9 @@ pub(crate) struct Chooser {
     pub(crate) origin: String,
     /// The field, in CSS pixels from the top left of the page's viewport.
     pub(crate) field: [f32; 4],
-    /// Login ids and usernames, most recently used first.
-    pub(crate) entries: Vec<(u64, String)>,
+    /// Login ids, usernames and, for logins saved for another host of the site (or the `http:`
+    /// version), that host: the page's own logins first, then most recently used first.
+    pub(crate) entries: Vec<(u64, String, Option<String>)>,
     /// The entry highlighted with the arrow keys.
     pub(crate) selected: Option<usize>,
 }
@@ -130,6 +196,8 @@ pub(crate) struct Passwords {
     /// The login picked from the list in each tab, with its origin and when: when a
     /// username-first page then asks for the password, it's that login's.
     picked: HashMap<WebViewId, (String, u64, Instant)>,
+    /// The last diagnostics line written for each tab, so repeated reports don't flood the log.
+    last_note: HashMap<WebViewId, String>,
     _script: Rc<UserScript>,
 }
 
@@ -210,6 +278,7 @@ impl Passwords {
             offer: None,
             chooser: None,
             picked: HashMap::new(),
+            last_note: HashMap::new(),
             _script: script,
         };
         passwords.load();
@@ -282,16 +351,50 @@ impl Passwords {
         cfg!(windows)
     }
 
+    /// Logins saved for exactly `origin`.
     fn logins_for<'a>(&'a self, origin: &'a str) -> impl Iterator<Item = &'a Login> + 'a {
         self.logins
             .iter()
             .filter(move |login| login.origin == origin)
     }
 
+    /// The logins that may be offered on `page`, the page's own first, then the most recently
+    /// used first.
+    fn matches_for(&self, page: &Url) -> Vec<(&Login, Match)> {
+        let mut matches: Vec<(&Login, Match)> = self
+            .logins
+            .iter()
+            .filter_map(|login| Some((login, relation(&login.origin, page)?)))
+            .collect();
+        matches.sort_by(|(a, a_match), (b, b_match)| {
+            a_match
+                .cmp(b_match)
+                .then_with(|| b.last_used.cmp(&a.last_used))
+                .then_with(|| a.username.cmp(&b.username))
+        });
+        matches
+    }
+
+    /// Whether login `id` may be filled into `page`.
+    fn matching(&self, id: u64, page: &Url) -> Option<&Login> {
+        self.get(id)
+            .filter(|login| relation(&login.origin, page).is_some())
+    }
+
+    /// Write an autofill decision to the diagnostics log, unless it's the same as the last one
+    /// for this tab. Callers only ever pass hosts and counts.
+    fn note(&mut self, webview: WebViewId, line: String) {
+        if self.last_note.get(&webview) != Some(&line) {
+            crate::desktop::diagnostics::log(&line);
+            self.last_note.insert(webview, line);
+        }
+    }
+
     /// A message from the page script (`MESSAGE_PREFIX` already removed). Any page can send
     /// these (and a frame's console messages arrive here too), so they're only hints: the
     /// origin always comes from the tab's URL, the page never gets the list of saved logins,
-    /// and a password is only filled into the tab's top-level page on that exact origin.
+    /// and a password is only filled into the tab's top-level page on an origin it may be
+    /// offered on (`relation`).
     /// Returns true if the list under the focused field changed (the window must redraw).
     pub(crate) fn on_page_message(&mut self, webview: &WebView, payload: &str) -> bool {
         let Some(url) = webview.url() else {
@@ -311,44 +414,91 @@ impl Passwords {
         }
         let (kind, data) = payload.split_once('\t').unwrap_or((payload, ""));
         match kind {
-            // The page shows a sign-in form: fill it if there's exactly one saved login (on
-            // secure pages only, see `fills_on_load`), or the second step of a sign-in that
-            // started with a login picked from the list.
-            "form" if self.autofill => {
+            "form" if !self.autofill => {
+                let line = format!("passwords: sign-in form on {origin}: not filled (filling saved passwords is off)");
+                self.note(webview.id(), line);
+                false
+            },
+            // The page shows a sign-in form: fill it if there's exactly one login saved for the
+            // page's own host (on secure pages only, see `fills_on_load`), or the second step of
+            // a sign-in that started with a login picked from the list.
+            "form" => {
                 let picked = self
                     .picked
                     .get(&webview.id())
-                    .and_then(|(_, id, _)| self.get(*id))
-                    .filter(|login| login.origin == origin);
-                let mut logins = self.logins_for(&origin);
-                let only = match (logins.next(), logins.next()) {
-                    (Some(login), None) => Some(login),
-                    _ => None,
+                    .and_then(|(_, id, _)| self.matching(*id, &url));
+                let matches = self.matches_for(&url);
+                let own: Vec<&Login> = matches
+                    .iter()
+                    .filter(|(_, how)| *how <= Match::SameHost)
+                    .map(|(login, _)| *login)
+                    .collect();
+                let others = matches.len() - own.len();
+                let decision = match (own.as_slice(), picked) {
+                    ([login], _) if fills_on_load(&url) => {
+                        fill(webview, &origin, login, "load");
+                        "filled the saved login".to_owned()
+                    },
+                    (_, Some(login)) => {
+                        fill(webview, &origin, login, "continue");
+                        "continued with the login picked on the previous step".to_owned()
+                    },
+                    ([_], _) => "not filled: the page isn't secure (pick it from the list)".to_owned(),
+                    ([], _) if others > 0 => "not filled: only logins for other hosts of this site (listed on focus)".to_owned(),
+                    ([], _) => {
+                        let sites = self.logins.len();
+                        format!("nothing to fill: no saved login for this site ({sites} saved for other sites)")
+                    },
+                    _ => "not filled: several saved logins (listed on focus)".to_owned(),
                 };
-                match (only, picked) {
-                    (Some(login), _) if fills_on_load(&url) => fill(webview, login, "load"),
-                    (_, Some(login)) => fill(webview, login, "continue"),
-                    _ => {},
-                }
+                let line = format!(
+                    "passwords: sign-in form on {origin}: {} for this host, {others} for other hosts of the site; {decision}",
+                    own.len(),
+                );
+                self.note(webview.id(), line);
+                false
+            },
+            // What the page script found (counts only), for the diagnostics log.
+            "scan" => {
+                let value: Value = serde_json::from_str(data).unwrap_or_default();
+                let count = |key: &str| value[key].as_u64().unwrap_or(0);
+                let line = format!(
+                    "passwords: {origin}: {} password field(s) ({} in shadow DOM), {} sign-in form(s), {} username-only step(s){}",
+                    count("passwords"),
+                    count("shadow"),
+                    count("groups"),
+                    count("userOnly"),
+                    if count("passwords") > 0 && count("groups") == 0 {
+                        " - password field not recognised as a sign-in form"
+                    } else {
+                        ""
+                    },
+                );
+                self.note(webview.id(), line);
                 false
             },
             "focus" if self.autofill => {
                 let Some(field) = parse_rect(data) else {
                     return false;
                 };
-                let mut logins: Vec<&Login> = self.logins_for(&origin).collect();
-                if logins.is_empty() {
+                let matches = self.matches_for(&url);
+                if matches.is_empty() {
+                    let line = format!("passwords: sign-in field focused on {origin}: no saved login for this site");
+                    self.note(webview.id(), line);
                     return self.close_chooser(webview.id());
                 }
-                logins.sort_by(|a, b| {
-                    b.last_used
-                        .cmp(&a.last_used)
-                        .then_with(|| a.username.cmp(&b.username))
-                });
-                let entries = logins
+                let entries: Vec<_> = matches
                     .iter()
-                    .map(|login| (login.id, login.username.clone()))
+                    .map(|(login, how)| {
+                        let label = (*how != Match::Exact).then(|| offer_host_of(&login.origin));
+                        (login.id, login.username.clone(), label)
+                    })
                     .collect();
+                let line = format!(
+                    "passwords: sign-in field focused on {origin}: listing {} saved login(s)",
+                    entries.len()
+                );
+                self.note(webview.id(), line);
                 self.chooser = Some(Chooser {
                     webview: webview.id(),
                     origin,
@@ -367,7 +517,7 @@ impl Passwords {
             },
             "blur" => self.close_chooser(webview.id()),
             "submit" => {
-                self.on_submit(origin, data);
+                self.on_submit(origin, &url, data);
                 false
             },
             _ => false,
@@ -399,19 +549,20 @@ impl Passwords {
         let Some(chooser) = self.chooser.take() else {
             return;
         };
-        let Some(&(id, _)) = chooser.entries.get(index) else {
+        let Some(&(id, ..)) = chooser.entries.get(index) else {
             return;
         };
         // The page must still be on the origin the list was shown for.
-        if chooser.webview != webview.id() ||
-            webview.url().as_ref().and_then(origin_of).as_ref() != Some(&chooser.origin)
-        {
-            return;
-        }
-        let Some(login) = self.get(id).filter(|login| login.origin == chooser.origin) else {
+        let Some(url) = webview.url() else {
             return;
         };
-        fill(webview, login, "focused");
+        if chooser.webview != webview.id() || origin_of(&url).as_ref() != Some(&chooser.origin) {
+            return;
+        }
+        let Some(login) = self.matching(id, &url) else {
+            return;
+        };
+        fill(webview, &chooser.origin, login, "focused");
         self.picked
             .insert(webview.id(), (chooser.origin.clone(), id, Instant::now()));
     }
@@ -462,7 +613,7 @@ impl Passwords {
         }
     }
 
-    fn on_submit(&mut self, origin: String, data: &str) {
+    fn on_submit(&mut self, origin: String, url: &Url, data: &str) {
         if !self.available() || self.never.contains(&origin) {
             return;
         }
@@ -478,7 +629,16 @@ impl Passwords {
             .logins_for(&origin)
             .filter(|login| login.username == username || username.is_empty())
             .collect();
-        if let Some(login) = same_user.iter().find(|login| login.password == password) {
+        // Signed in with a login saved for this site (also one saved for another host of it,
+        // e.g. picked from the list): no need to save it again.
+        let used = self
+            .matches_for(url)
+            .into_iter()
+            .map(|(login, _)| login)
+            .find(|login| {
+                login.password == password && (login.username == username || username.is_empty())
+            });
+        if let Some(login) = used {
             // Signed in with a saved login: just note that it was used.
             let id = login.id;
             if let Some(login) = self.logins.iter_mut().find(|login| login.id == id) {
@@ -523,6 +683,8 @@ impl Passwords {
         last_used: u64,
         times_used: u64,
     ) -> bool {
+        // Other browsers' origins may differ in case, a trailing slash or a default port.
+        let origin = normalize_origin(&origin);
         if self
             .logins
             .iter()
@@ -588,10 +750,12 @@ impl Passwords {
             },
             PasswordAction::DismissOffer => self.offer = None,
             PasswordAction::Fill(id) => {
-                if let (Some(login), Some(page)) = (self.get(id), page) &&
-                    page.url().as_ref().and_then(origin_of).as_ref() == Some(&login.origin)
+                if let Some(page) = page &&
+                    let Some(url) = page.url() &&
+                    let Some(origin) = origin_of(&url) &&
+                    let Some(login) = self.matching(id, &url)
                 {
-                    fill(page, login, "page");
+                    fill(page, &origin, login, "page");
                 }
             },
             PasswordAction::ChooserKey(key) => {
@@ -634,7 +798,6 @@ impl Passwords {
     /// What the sidebar shows: the save offer, this site's logins and the full list. Never
     /// includes passwords (the sidebar asks for one with `Reveal`).
     pub(crate) fn to_json(&self, page: Option<&Url>) -> Value {
-        let origin = page.and_then(origin_of);
         let mut list: Vec<&Login> = self.logins.iter().collect();
         list.sort_by(|a, b| {
             host_of(&a.origin)
@@ -656,14 +819,16 @@ impl Passwords {
                 "username": offer.username,
                 "update": offer.replaces.is_some(),
             })),
-            "site": origin.as_ref().map(|origin| self.logins_for(origin).map(|login| json!({
+            "site": page.map(|page| self.matches_for(page).iter().map(|(login, how)| json!({
                 "id": login.id, "username": login.username,
+                "host": (*how != Match::Exact).then(|| offer_host_of(&login.origin)),
             })).collect::<Vec<_>>()).unwrap_or_default(),
             "list": list.iter().map(entry).collect::<Vec<_>>(),
             "never": self.never.iter().map(|origin| json!({ "origin": origin, "host": host_of(origin) })).collect::<Vec<_>>(),
             // For tests: whether the list under a focused field shows, and how long it is.
             "chooser": self.chooser.as_ref().map(|chooser| json!({
                 "count": chooser.entries.len(), "selected": chooser.selected,
+                "labels": chooser.entries.iter().map(|(.., label)| label.clone()).collect::<Vec<_>>(),
             })),
         })
     }
@@ -755,7 +920,7 @@ pub(crate) fn draw_chooser(
             egui::ScrollArea::vertical()
                 .max_height(list.height())
                 .show(&mut child, |ui| {
-                    for (index, (_, username)) in chooser.entries.iter().enumerate() {
+                    for (index, (_, username, label)) in chooser.entries.iter().enumerate() {
                         let (row, response) =
                             ui.allocate_exact_size(vec2(list.width(), ROW), Sense::click());
                         let selected = chooser.selected == Some(index);
@@ -788,10 +953,15 @@ pub(crate) fn draw_chooser(
                             egui::FontId::proportional(13.5),
                             foreground,
                         );
+                        // A login saved for another host of the site says which.
+                        let detail = match label {
+                            Some(label) => format!("••••••••  ·  saved for {label}"),
+                            None => "••••••••".to_owned(),
+                        };
                         painter.text(
                             pos2(row.min.x + 38.0, row.min.y + 29.0),
                             egui::Align2::LEFT_CENTER,
-                            "••••••••",
+                            detail,
                             egui::FontId::proportional(11.0),
                             muted,
                         );
@@ -819,14 +989,15 @@ fn parse_rect(data: &str) -> Option<[f32; 4]> {
     Some([number("x")?, number("y")?, number("w")?, number("h")?])
 }
 
-/// Fill a login into `webview`'s top-level page (the script checks the page is still on the
-/// login's origin). `mode` is "load", "focused" or "page" (see passwords-fill.js). The password
+/// Fill a login into `webview`'s top-level page (the script checks the page is still on
+/// `page_origin`). `mode` is "load", "focused" or "page" (see passwords-fill.js). The password
 /// goes straight into the script's arguments: it isn't put anywhere the page could read before
 /// the script runs, and the script only puts it in the sign-in form's password field.
-fn fill(webview: &WebView, login: &Login, mode: &str) {
+fn fill(webview: &WebView, page_origin: &str, login: &Login, mode: &str) {
     // The page's data goes in last and in one piece, so nothing in it is taken for a
-    // placeholder.
-    let arguments = json!([login.origin, login.username, login.password, mode]).to_string();
+    // placeholder. The script checks the page is still on `page_origin`, the origin the login
+    // was matched against (see `relation`).
+    let arguments = json!([page_origin, login.username, login.password, mode]).to_string();
     let script = include_str!("passwords-fill.js")
         .replace("__DETECT__", DETECT)
         .replace("__ARGUMENTS__", &arguments);

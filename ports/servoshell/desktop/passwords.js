@@ -13,8 +13,10 @@
 (function () {
   "use strict";
   if (window !== window.top) return;
-  // Keep our own references: pages sometimes replace these.
-  const log = console.log.bind(console);
+  // Keep our own references: pages sometimes replace these. The message goes through "%s" so a
+  // "%" in a username or password isn't taken for a format directive.
+  const consoleLog = console.log.bind(console);
+  const log = (message) => consoleLog("%s", message);
   const stringify = JSON.stringify;
   const PREFIX = "__PREFIX__";
 
@@ -26,7 +28,9 @@ __DETECT__
   // text-like field before it.
   function submittedUsername(password) {
     const scope = password.form || document;
-    const inputs = Array.from(scope.querySelectorAll("input"));
+    let inputs = Array.from(scope.querySelectorAll("input"));
+    // Fields inside shadow roots (web components): all of the page's, in document order.
+    if (!inputs.includes(password)) inputs = allInputs().filter((input) => input.form === password.form);
     const before = inputs.slice(0, inputs.indexOf(password)).reverse();
     const candidates = before.filter((input) =>
       USERNAME_TYPES.includes(input.type) && !input.disabled && input.value.trim());
@@ -36,8 +40,12 @@ __DETECT__
 
   let lastSent = "";
   function capture(scope) {
-    const fields = Array.from((scope || document).querySelectorAll("input[type=password]"))
+    let fields = Array.from((scope || document).querySelectorAll("input[type=password]"))
       .filter((input) => input.value);
+    // Password fields inside shadow roots (web components) aren't found from the form.
+    if (fields.length === 0) {
+      fields = allInputs().filter((input) => isPasswordField(input) && input.value && input.getRootNode() !== document);
+    }
     if (fields.length === 0) return;
     // Sign-up and change-password forms have two or three password fields: the new password
     // is the last distinct one (sign-up repeats it; change-password has current, new, new).
@@ -65,7 +73,8 @@ __DETECT__
     capture(form || document);
   }, true);
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && isPasswordField(event.target)) capture(event.target.form || document);
+    const field = event.composedPath ? event.composedPath()[0] : event.target;
+    if (event.key === "Enter" && isPasswordField(field)) capture(field.form || document);
   }, true);
 
   // ---- Telling Stillwater about sign-in forms ----
@@ -73,9 +82,12 @@ __DETECT__
   // Each sign-in field is reported once, so a username-first page is reported again when its
   // password field appears.
   const reported = new WeakSet();
+  // What was found, in counts only, for Stillwater's diagnostics log (sent when it changes).
+  let lastScan = "";
   function reportForms() {
     let fresh = false;
-    for (const group of loginGroups()) {
+    const groups = loginGroups();
+    for (const group of groups) {
       for (const field of [group.user, group.password]) {
         if (field && !reported.has(field)) {
           reported.add(field);
@@ -83,6 +95,19 @@ __DETECT__
         }
       }
     }
+    const scan = stringify({
+      passwords: lastInputs.filter((input) => isPasswordField(input) && visible(input)).length,
+      shadow: shadowInputs,
+      groups: groups.filter((group) => group.password).length,
+      userOnly: groups.filter((group) => !group.password).length,
+    });
+    // Pages without sign-in or password fields aren't mentioned.
+    const interesting = groups.length > 0 || lastInputs.some((input) => isPasswordField(input) && visible(input));
+    if (scan !== lastScan && (interesting || lastScan)) {
+      lastScan = scan;
+      log(PREFIX + "scan\t" + scan);
+    }
+    watchShadowRoots();
     if (fresh) log(PREFIX + "form");
   }
 
@@ -140,17 +165,28 @@ __DETECT__
 
   // ---- Watching for sign-in forms that appear later ----
 
+  // Single-page sites add and swap sign-in forms long after loading: keep watching, at most a
+  // few times a second. Changes inside shadow roots aren't seen from the document, so each
+  // open shadow root found is watched too.
+  let pending = false;
+  const observer = new MutationObserver(() => {
+    if (pending) return;
+    pending = true;
+    setTimeout(() => { pending = false; reportForms(); }, 250);
+  });
+  const OBSERVE = { childList: true, subtree: true, attributes: true, attributeFilter: ["type", "style", "class", "hidden", "disabled", "autocomplete"] };
+  const watched = new WeakSet();
+  function watchShadowRoots() {
+    for (const root of shadowRoots) {
+      if (watched.has(root)) continue;
+      watched.add(root);
+      observer.observe(root, OBSERVE);
+    }
+  }
+
   function start() {
+    observer.observe(document.documentElement, OBSERVE);
     reportForms();
-    // Single-page sites add and swap sign-in forms long after loading: keep watching, at most
-    // a few times a second.
-    let pending = false;
-    const observer = new MutationObserver(() => {
-      if (pending) return;
-      pending = true;
-      setTimeout(() => { pending = false; reportForms(); }, 250);
-    });
-    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["type", "style", "class", "hidden", "disabled", "autocomplete"] });
     // The field may have been focused (autofocus) before this ran.
     const field = focusedElement();
     if (field instanceof HTMLInputElement && groupOf(field)) offerList(field);
