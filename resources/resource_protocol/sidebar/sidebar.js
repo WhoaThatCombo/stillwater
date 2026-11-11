@@ -717,7 +717,7 @@ function renderKey() {
 
 function keyMenu() {
   const items = (passwords().site || []).map((login) => ({
-    label: `Fill ${login.username || "password (no username)"}`,
+    label: `Fill ${login.username || "password (no username)"}${login.host ? ` (saved for ${login.host})` : ""}`,
     run: () => send("pw-fill", login.id),
   }));
   items.push("-", { label: "Saved passwords", run: openPasswords });

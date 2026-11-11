@@ -269,8 +269,8 @@ function renderDownloads() {
 
 // ---- Import from Zen ----
 
-const zenKinds = ["pins", "tabs", "passwords", "bookmarks", "history"];
-const zenChoice = { profile: 0, pins: true, tabs: false, passwords: true, bookmarks: true, history: false };
+const zenKinds = ["pins", "tabs", "passwords", "bookmarks", "history", "cookies"];
+const zenChoice = { profile: 0, pins: true, tabs: false, passwords: true, bookmarks: true, history: false, cookies: true };
 let zenBusy = false;
 $("zen-scan").addEventListener("click", () => {
   zenBusy = true;
@@ -313,6 +313,7 @@ function renderZen() {
     passwords: zen.passwordProblem || count(zen.passwords, "password", "passwords"),
     bookmarks: zen.placesProblem || count(zen.bookmarks || 0, "bookmark", "bookmarks"),
     history: zen.placesProblem || `${count(zen.visits || 0, "visit", "visits")} in the last 90 days`,
+    cookies: zen.cookiesProblem || `${count(zen.cookies || 0, "cookie", "cookies")}; replaces Stillwater's cookies for the same sites`,
   };
   document.querySelectorAll("[data-zen-count]").forEach((span) => { span.textContent = counts[span.dataset.zenCount]; });
   document.querySelectorAll("[data-zen]").forEach((toggle) => pressed(toggle, zenChoice[toggle.dataset.zen]));

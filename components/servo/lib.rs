@@ -79,7 +79,7 @@ pub use net::request_interceptor::{RequestDecision, RequestFilter, set_request_f
 pub use net_traits::CookieSource;
 // This API should probably not be exposed in this way. Instead there should be a fully
 // fleshed out public domains API if we want to expose it.
-pub use net_traits::pub_domains::is_reg_domain;
+pub use net_traits::pub_domains::{is_reg_domain, reg_suffix};
 pub use paint::WebRenderDebugOption;
 pub use paint_api::rendering_context::{
     OffscreenRenderingContext, RenderingContext, SoftwareRenderingContext, WindowRenderingContext,

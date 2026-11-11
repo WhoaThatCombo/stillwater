@@ -158,7 +158,15 @@ impl Console {
             );
         }
 
-        let prefix = global.current_group_label().unwrap_or_default();
+        // Stillwater's own messages (password, ad-block and settings scripts) are never prefixed
+        // with the page's console group: a page that leaves a `console.group()` open would
+        // otherwise turn them into ordinary console output, which the browser then logs.
+        let embedder_msg = embedder_msg.to_string();
+        let prefix = if embedder_msg.starts_with("__stillwater_") {
+            Default::default()
+        } else {
+            global.current_group_label().unwrap_or_default()
+        };
         let formatted_message = format!("{prefix}{embedder_msg}");
 
         Self::send_to_embedder(global, level, formatted_message);

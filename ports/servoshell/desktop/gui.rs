@@ -633,6 +633,7 @@ impl Gui {
         passwords: bool,
         history: bool,
         bookmarks: bool,
+        cookies: bool,
     ) -> String {
         let profiles = zen_import::find_profiles();
         let Some(profile) = profiles.get(profile) else {
@@ -710,6 +711,25 @@ impl Gui {
                             Ok(added) => add(added, "visit", "visits"),
                             Err(_) => problems.push("Zen's history couldn't be saved.".to_owned()),
                         }
+                    }
+                },
+                Err(error) => problems.push(error.clone()),
+            }
+        }
+        if cookies {
+            match &data.cookies {
+                Ok(list) => {
+                    let count =
+                        zen_import::import_cookies(state.servo().site_data_manager(), list);
+                    crate::desktop::diagnostics::log(format!(
+                        "zen import: {count} cookies handed to the cookie store"
+                    ));
+                    add(count, "cookie", "cookies");
+                    if count > 0 {
+                        notes.push(
+                            "Some sites also tie a sign-in to things cookies don't carry, so they may still ask you to sign in."
+                                .to_owned(),
+                        );
                     }
                 },
                 Err(error) => problems.push(error.clone()),
@@ -817,9 +837,11 @@ impl Gui {
                     passwords,
                     history,
                     bookmarks,
+                    cookies,
                 } => {
-                    let result =
-                        self.zen_import(state, profile, pins, tabs, passwords, history, bookmarks);
+                    let result = self.zen_import(
+                        state, profile, pins, tabs, passwords, history, bookmarks, cookies,
+                    );
                     let mut zen = zen_scan(profile);
                     zen["result"] = serde_json::Value::String(result);
                     self.sidebar.set_zen(zen);
@@ -1420,6 +1442,8 @@ fn zen_scan(profile: usize) -> serde_json::Value {
         "bookmarks": data.places.as_ref().map_or(0, |places| places.bookmarks.len()),
         "visits": data.places.as_ref().map_or(0, |places| places.visits.len()),
         "placesProblem": data.places.as_ref().err(),
+        "cookies": data.cookies.as_ref().map_or(0, Vec::len),
+        "cookiesProblem": data.cookies.as_ref().err(),
     })
 }
 
