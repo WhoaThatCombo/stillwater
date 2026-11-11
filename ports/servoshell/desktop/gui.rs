@@ -15,7 +15,7 @@ use std::fs;
     target_os = "freebsd",
     target_os = "macos"
 ))]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -58,7 +58,7 @@ use crate::desktop::panes::{Pane, PaneKind};
 use crate::desktop::headed_window;
 use crate::desktop::sidebar::{CONTENT_RADIUS, Sidebar, WindowAction, png_data_url};
 use crate::desktop::report;
-use crate::desktop::zen_import;
+use crate::desktop::{browser_import, zen_import};
 
 /// A change to the split view / Glance panes, applied on the next update.
 pub(crate) enum PaneRequest {
@@ -128,6 +128,9 @@ pub struct Gui {
     splash_decided: bool,
     /// The page scrollbars drawn over each page view.
     pub(crate) scrollbars: RefCell<crate::desktop::scrollbar::Scrollbars>,
+    /// "Import passwords from a file": the open dialog's answer once it closes (`Some(None)`
+    /// when cancelled). The dialog runs on its own thread so the window keeps working.
+    password_file: Option<Arc<std::sync::Mutex<Option<Option<PathBuf>>>>>,
 }
 
 #[cfg(any(
@@ -323,6 +326,7 @@ impl Gui {
             splash: Some(crate::desktop::splash::Splash::new()),
             splash_decided: false,
             scrollbars: Default::default(),
+            password_file: None,
         }
     }
 
@@ -659,7 +663,172 @@ impl Gui {
         let Some(profile) = profiles.get(profile) else {
             return "Zen's profile wasn't found.".into();
         };
-        let data = zen_import::read_profile(&profile.path);
+        let data = browser_import::ImportData::from_firefox(
+            zen_import::read_profile(&profile.path),
+            "Zen",
+        );
+        self.apply_import(
+            state,
+            data,
+            browser_import::Choice {
+                pins,
+                tabs,
+                passwords,
+                history,
+                bookmarks,
+                cookies,
+            },
+        )
+    }
+
+    /// Import from another browser (`browser_import`): browser id, profile number, what.
+    fn browser_import(
+        &mut self,
+        state: &RunningAppState,
+        browser: &str,
+        profile: usize,
+        choice: browser_import::Choice,
+    ) -> String {
+        match browser_import::read(browser, profile) {
+            Some((_, _, data)) => self.apply_import(state, data, choice),
+            None => "That browser's profile wasn't found.".into(),
+        }
+    }
+
+    /// "Import passwords from a file": show an open dialog on its own thread. Tests name the
+    /// file in `STILLWATER_TEST_PASSWORD_CSV` instead, so no dialog is shown.
+    fn ask_for_password_file(&mut self, proxy: EventLoopProxy<AppEvent>) {
+        if self.password_file.is_some() {
+            return;
+        }
+        let answer = Arc::new(std::sync::Mutex::new(None));
+        if let Some(path) = std::env::var_os("STILLWATER_TEST_PASSWORD_CSV") {
+            *answer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some(Some(PathBuf::from(path)));
+            self.password_file = Some(answer);
+            let _ = proxy.send_event(AppEvent::Waker);
+            return;
+        }
+        let shared = answer.clone();
+        let spawned = std::thread::Builder::new()
+            .name("Open dialog".into())
+            .spawn(move || {
+                let chosen = rfd::FileDialog::new()
+                    .set_title("Import passwords from a file")
+                    .add_filter("Password export (CSV)", &["csv"])
+                    .add_filter("All files", &["*"])
+                    .pick_file();
+                if let Ok(mut answer) = shared.lock() {
+                    *answer = Some(chosen);
+                }
+                let _ = proxy.send_event(AppEvent::Waker);
+            });
+        if spawned.is_ok() {
+            self.password_file = Some(answer);
+            self.set_password_file_result("Choose the file…".to_owned());
+        }
+    }
+
+    fn set_password_file_result(&mut self, text: String) {
+        let value = self.sidebar.browser_import();
+        if !value.is_object() {
+            *value = serde_json::json!({});
+        }
+        value["fileResult"] = serde_json::Value::String(text);
+        let value = value.take();
+        self.sidebar.set_browser_import(value);
+    }
+
+    /// Import the password file once its dialog has closed.
+    fn poll_password_file(&mut self, state: &RunningAppState) {
+        let Some(answer) = &self.password_file else {
+            return;
+        };
+        let chosen = match answer.lock() {
+            Ok(mut answer) => answer.take(),
+            Err(_) => Some(None),
+        };
+        let Some(chosen) = chosen else {
+            return;
+        };
+        self.password_file = None;
+        let Some(path) = chosen else {
+            self.set_password_file_result(String::new());
+            return;
+        };
+        let file = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let result = browser_import::read_text_file(&path)
+            .and_then(|text| browser_import::read_password_csv(&text));
+        let text = match result {
+            Err(error) => error,
+            Ok((logins, skipped)) => {
+                let mut store = state.passwords.borrow_mut();
+                let total = logins.len();
+                let added = logins
+                    .into_iter()
+                    .filter(|login| {
+                        store.add(
+                            login.origin.clone(),
+                            login.username.clone(),
+                            login.password.clone(),
+                            login.created,
+                            login.last_used,
+                            login.times_used,
+                        )
+                    })
+                    .count();
+                store.commit();
+                let plural = |count: usize, one: &str, many: &str| {
+                    format!("{count} {}", if count == 1 { one } else { many })
+                };
+                let mut text = if added > 0 {
+                    format!("Imported {} from {file}.", plural(added, "password", "passwords"))
+                } else {
+                    format!("No new passwords in {file}.")
+                };
+                if added < total {
+                    text.push_str(&format!(
+                        " {} already saved.",
+                        plural(total - added, "login was", "logins were")
+                    ));
+                }
+                if skipped > 0 {
+                    text.push_str(&format!(
+                        " {} skipped (not a web site, HTTP authentication, or no password).",
+                        plural(skipped, "row", "rows")
+                    ));
+                }
+                if total > 0 {
+                    text.push_str(
+                        " The file holds your passwords unencrypted: delete it when you're done.",
+                    );
+                }
+                text
+            },
+        };
+        crate::desktop::diagnostics::log("passwords: imported a password file".to_owned());
+        self.set_password_file_result(text);
+    }
+
+    /// Add what was read from another browser's profile; returns what happened, for settings.
+    fn apply_import(
+        &mut self,
+        state: &RunningAppState,
+        data: browser_import::ImportData,
+        choice: browser_import::Choice,
+    ) -> String {
+        let browser_import::Choice {
+            pins,
+            tabs,
+            passwords,
+            history,
+            bookmarks,
+            cookies,
+        } = choice;
+        let browser = data.browser.clone();
         let mut done = Vec::new();
         let mut problems = Vec::new();
         // Things worth knowing that aren't errors.
@@ -673,8 +842,8 @@ impl Gui {
                 done.push(plural(count, one, many));
             }
         };
-        if pins || tabs {
-            match &data.session {
+        if (pins || tabs) && let Some(session) = &data.session {
+            match session {
                 Ok(session) => {
                     let counts = self.sidebar.import_zen_session(session, pins, tabs);
                     add(counts.spaces, "space", "spaces");
@@ -711,8 +880,9 @@ impl Gui {
                     }
                     if data.skipped_logins > 0 {
                         notes.push(format!(
-                            "{} skipped (sign-ins for HTTP authentication, or unreadable).",
-                            plural(data.skipped_logins, "login", "logins")
+                            "{} skipped ({}).",
+                            plural(data.skipped_logins, "login", "logins"),
+                            data.skipped_logins_why
                         ));
                     }
                 },
@@ -729,7 +899,7 @@ impl Gui {
                     if history {
                         match store.import(&places.visits) {
                             Ok(added) => add(added, "visit", "visits"),
-                            Err(_) => problems.push("Zen's history couldn't be saved.".to_owned()),
+                            Err(_) => problems.push(format!("{browser}'s history couldn't be saved.")),
                         }
                     }
                 },
@@ -742,7 +912,8 @@ impl Gui {
                     let count =
                         zen_import::import_cookies(state.servo().site_data_manager(), list);
                     crate::desktop::diagnostics::log(format!(
-                        "zen import: {count} cookies handed to the cookie store"
+                        "{} import: {count} cookies handed to the cookie store",
+                        browser.to_lowercase()
                     ));
                     add(count, "cookie", "cookies");
                     if count > 0 {
@@ -751,9 +922,29 @@ impl Gui {
                                 .to_owned(),
                         );
                     }
+                    if data.session_cookies > 0 {
+                        notes.push(format!(
+                            "{} skipped (they only last until {browser} closes).",
+                            plural(data.session_cookies, "session cookie", "session cookies")
+                        ));
+                    }
+                    if data.unreadable_cookies > 0 {
+                        notes.push(format!(
+                            "{} couldn't be decrypted.",
+                            plural(data.unreadable_cookies, "cookie", "cookies")
+                        ));
+                    }
                 },
                 Err(error) => problems.push(error.clone()),
             }
+        }
+        // Data the browser keeps from other programs on purpose: say so, and how to get it.
+        if let Some(note) = browser_import::protected_note(
+            &browser,
+            if passwords { data.protected_logins } else { 0 },
+            if cookies { data.protected_cookies } else { 0 },
+        ) {
+            notes.push(note);
         }
         let mut result = if !done.is_empty() {
             format!("Imported {}.", done.join(", "))
@@ -791,6 +982,7 @@ impl Gui {
         headed_window: &headed_window::HeadedWindow,
     ) {
         self.sidebar.handle_messages(window);
+        self.poll_password_file(state);
 
         // Window operations asked for by the sidebar page. Moving and maximising the window
         // are the top bar's alone (`HeadedWindow::handle_top_bar_event`).
@@ -851,6 +1043,22 @@ impl Gui {
                     let mut zen = zen_scan(profile);
                     zen["result"] = serde_json::Value::String(result);
                     self.sidebar.set_zen(zen);
+                },
+                WindowAction::BrowserScan(browser, profile) => {
+                    let file_result = self.sidebar.browser_import()["fileResult"].take();
+                    let mut scan = browser_import::scan(&browser, profile);
+                    scan["fileResult"] = file_result;
+                    self.sidebar.set_browser_import(scan);
+                },
+                WindowAction::BrowserImport(browser, profile, choice) => {
+                    let result = self.browser_import(state, &browser, profile, choice);
+                    crate::desktop::diagnostics::log(format!("browser import from {browser}: {choice:?}"));
+                    let mut scan = browser_import::scan(&browser, profile);
+                    scan["result"] = serde_json::Value::String(result);
+                    self.sidebar.set_browser_import(scan);
+                },
+                WindowAction::ImportPasswordFile => {
+                    self.ask_for_password_file(headed_window.event_loop_proxy());
                 },
                 // Tests: run JavaScript in the floating new-tab address bar.
                 WindowAction::History(command, argument) if command == "hist-bar-eval" => {

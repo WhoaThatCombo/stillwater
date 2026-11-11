@@ -28,7 +28,7 @@
     <button class="category" data-pane="translation"><span class="icon">&#xF2B7;</span>Translation</button>
     <button class="category" data-pane="passwords"><span class="icon">&#xE8D7;</span>Passwords</button>
     <button class="category" data-pane="downloads"><span class="icon">&#xE896;</span>Downloads</button>
-    <button class="category" data-pane="import"><span class="icon">&#xE8B5;</span>Import from Zen</button>
+    <button class="category" data-pane="import"><span class="icon">&#xE8B5;</span>Import</button>
     <button class="category" data-pane="shortcuts"><span class="icon">&#xE765;</span>Keyboard shortcuts</button>
     <span class="nav-spacer"></span>
     <button class="category" data-pane="about"><span class="icon">&#xE946;</span>About Stillwater</button>
@@ -189,21 +189,27 @@
     </section>
 
     <section class="pane" data-pane="import">
-      <h1>Import from Zen</h1>
-      <div class="group" data-words="import zen browser firefox spaces pinned tabs essentials passwords bookmarks history cookies signed in migrate">
-        <p class="hint">Copies your spaces, pinned tabs, Essentials, passwords, bookmarks, history and cookies from Zen Browser on this computer. Zen isn't changed.</p>
-        <div class="row"><button class="secondary" id="zen-scan">Find Zen's data</button></div>
-        <div id="zen-found" hidden>
-          <div class="options" id="zen-profiles" role="radiogroup" aria-label="Zen profile"></div>
-          <button class="toggle" data-zen="pins"><span>Spaces and pinned tabs<span data-zen-count="pins"></span></span><span class="switch" aria-hidden="true"></span></button>
-          <button class="toggle" data-zen="tabs"><span>Open tabs<span data-zen-count="tabs"></span></span><span class="switch" aria-hidden="true"></span></button>
-          <button class="toggle" data-zen="passwords"><span>Passwords<span data-zen-count="passwords"></span></span><span class="switch" aria-hidden="true"></span></button>
-          <button class="toggle" data-zen="bookmarks"><span>Bookmarks<span data-zen-count="bookmarks"></span></span><span class="switch" aria-hidden="true"></span></button>
-          <button class="toggle" data-zen="history"><span>History<span data-zen-count="history"></span></span><span class="switch" aria-hidden="true"></span></button>
-          <button class="toggle" data-zen="cookies"><span>Cookies (stay signed in)<span data-zen-count="cookies"></span></span><span class="switch" aria-hidden="true"></span></button>
-          <div class="row"><button class="primary" id="zen-import">Import</button></div>
+      <h1>Import from another browser</h1>
+      <div class="group" data-words="import zen firefox chrome edge opera gx brave vivaldi librewolf floorp waterfox browser spaces pinned tabs essentials passwords bookmarks history cookies signed in migrate">
+        <p class="hint">Copies bookmarks, history, passwords and cookies from another browser on this computer, and from Zen or Firefox also your tabs (with Zen's spaces and Essentials). The other browser isn't changed.</p>
+        <div class="row"><button class="secondary" id="import-scan">Find browsers</button></div>
+        <div id="import-found" hidden>
+          <div class="options" id="import-browsers" role="radiogroup" aria-label="Browser"></div>
+          <div class="options" id="import-profiles" role="radiogroup" aria-label="Profile"></div>
+          <button class="toggle" data-import="pins"><span><span data-import-label="pins">Spaces and pinned tabs</span><span data-import-count="pins"></span></span><span class="switch" aria-hidden="true"></span></button>
+          <button class="toggle" data-import="tabs"><span>Open tabs<span data-import-count="tabs"></span></span><span class="switch" aria-hidden="true"></span></button>
+          <button class="toggle" data-import="passwords"><span>Passwords<span data-import-count="passwords"></span></span><span class="switch" aria-hidden="true"></span></button>
+          <button class="toggle" data-import="bookmarks"><span>Bookmarks<span data-import-count="bookmarks"></span></span><span class="switch" aria-hidden="true"></span></button>
+          <button class="toggle" data-import="history"><span>History<span data-import-count="history"></span></span><span class="switch" aria-hidden="true"></span></button>
+          <button class="toggle" data-import="cookies"><span>Cookies (stay signed in)<span data-import-count="cookies"></span></span><span class="switch" aria-hidden="true"></span></button>
+          <div class="row"><button class="primary" id="import-run">Import</button></div>
         </div>
-        <p class="status" id="zen-status" aria-live="polite"></p>
+        <p class="status" id="import-status" aria-live="polite"></p>
+      </div>
+      <div class="group" data-words="import passwords file csv export chrome edge opera firefox brave password manager">
+        <p class="hint">Chrome, Edge, Opera, Brave and Firefox can save your passwords to a file (in their password settings: Export passwords). Choose that file to add the passwords here.</p>
+        <div class="row"><button class="secondary" id="import-csv">Import passwords from a file…</button></div>
+        <p class="status" id="import-csv-status" aria-live="polite"></p>
       </div>
     </section>
 
