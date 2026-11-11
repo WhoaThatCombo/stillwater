@@ -114,5 +114,14 @@ pub fn main() {
     }
     diagnostics::log("shutdown: event loop finished; exiting");
 
-    crate::platform::deinit(clean_shutdown)
+    crate::platform::deinit(clean_shutdown);
+    // Everything that needs saving has been: the App (and with it Servo, the session writer,
+    // the history writer and the other savers, which join their threads when dropped) was
+    // dropped above. Returning from main now only runs ExitProcess's DLL detach for ~100
+    // libraries (GStreamer, GLib, ANGLE, the GPU driver), which kept the process alive for
+    // another 120-150 ms after this line (measured), holding the single-instance pipe while a
+    // relaunch waits. `--clean-shutdown` keeps the old behaviour.
+    if !clean_shutdown {
+        crate::desktop::shutdown::exit_now();
+    }
 }

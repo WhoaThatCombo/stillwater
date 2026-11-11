@@ -62,6 +62,11 @@ pub(crate) fn begin(reason: &str) {
     }
 }
 
+/// End the process now, after a normal shutdown has finished saving (see `cli::main`).
+pub(crate) fn exit_now() -> ! {
+    force_exit()
+}
+
 /// End the process now. On Windows this is `TerminateProcess`, not `ExitProcess`
 /// (`std::process::exit`): `ExitProcess` runs DLL detach code and takes the loader lock,
 /// which a stuck thread may hold, so it can hang in exactly the situation this is for.
