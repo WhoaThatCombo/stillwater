@@ -193,7 +193,8 @@ impl WebGLRenderbuffer {
             self.upcast()
                 .send_command(WebGLCommand::GetInternalFormatIntVec(
                     constants::RENDERBUFFER,
-                    internal_format,
+                    // The translated format: GLES 3 rejects unsized DEPTH_STENCIL here.
+                    actual_format,
                     InternalFormatIntVec::Samples,
                     sender,
                 ));

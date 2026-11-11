@@ -2545,7 +2545,8 @@ impl WebGLImpl {
             WebGLCommand::GetActiveUniformBlockName(program_id, block_idx, ref sender) => {
                 let name =
                     unsafe { gl.get_active_uniform_block_name(program_id.glow(), block_idx) };
-                sender.send(name).unwrap();
+                // Remove ANGLE's `_u` prefix, as GetUniformBlockIndex adds it.
+                sender.send(from_name_in_compiled_shader(&name)).unwrap();
             },
             WebGLCommand::GetActiveUniformBlockParameter(
                 program_id,
@@ -2942,7 +2943,10 @@ impl WebGLImpl {
             unsafe { gl.get_program_parameter_i32(program.glow(), gl::ACTIVE_UNIFORM_BLOCKS) };
         let active_uniform_blocks = (0..num_active_uniform_blocks as u32)
             .map(|i| {
-                let name = unsafe { gl.get_active_uniform_block_name(program.glow(), i) };
+                // Block names, like uniform names, come back with ANGLE's `_u` prefix.
+                let name = from_name_in_compiled_shader(&unsafe {
+                    gl.get_active_uniform_block_name(program.glow(), i)
+                });
                 let size = unsafe {
                     gl.get_active_uniform_block_parameter_i32(
                         program.glow(),
