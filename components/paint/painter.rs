@@ -662,9 +662,27 @@ impl Painter {
         webrender_document: DocumentId,
         point: DevicePoint,
     ) -> Vec<PaintHitTestResult> {
+        // Stillwater: hit test on this thread with WebRender's shared hit tester instead of
+        // `RenderApi::hit_test`, which is a blocking round trip to the render backend thread
+        // for every mouse move and wheel tick: it waits behind any frame the backend is
+        // building, and after every scroll it first rebuilds the hit tester. The shared one is
+        // rebuilt by the backend with each new frame (Gecko's APZ works this way), so a result
+        // can be at most one frame old. Fetching it is one round trip per document, once.
+        thread_local! {
+            static HIT_TESTERS: std::cell::RefCell<
+                FxHashMap<DocumentId, Arc<dyn webrender_api::ApiHitTester>>,
+            > = Default::default();
+        }
         // DevicePoint and WorldPoint are the same for us.
         let world_point = WorldPoint::from_untyped(point.to_untyped());
-        let results = webrender_api.hit_test(webrender_document, world_point);
+        let hit_tester = HIT_TESTERS.with(|testers| {
+            testers
+                .borrow_mut()
+                .entry(webrender_document)
+                .or_insert_with(|| webrender_api.request_hit_tester(webrender_document).resolve())
+                .clone()
+        });
+        let results = hit_tester.hit_test(world_point);
 
         results
             .items
