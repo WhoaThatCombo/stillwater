@@ -18,13 +18,20 @@ use egui::{Align2, Color32, FontId, Id, LayerId, Order, Pos2, Rect, Shape, Strok
 /// The waves have come to rest by now (seconds on the animation's own clock).
 const SETTLED: f32 = 1.7;
 /// The fade to the browser starts here, if the sidebar is ready.
-const HOLD_UNTIL: f32 = 2.6;
+const HOLD_UNTIL: f32 = 2.4;
 const FADE: f32 = 0.4;
 /// The animation's clock never jumps further than this in one frame, so a stall while the
 /// disk is busy slows the animation instead of skipping it.
 const LONGEST_STEP: f32 = 0.05;
 /// However slow start-up is, the window is uncovered after this long (real seconds).
 const GIVE_UP: f32 = 8.0;
+/// The first second of start-up is when the window is busiest (the session's tabs and the
+/// sidebar are being created) and frames come in fits. The animation's fastest motion is its
+/// opening, so it waits on the plain background until this many frames in a row have arrived
+/// on time, or `LONGEST_WAIT` has passed, and only then starts to move.
+const STEADY_FRAMES: u8 = 4;
+const ON_TIME: f32 = 0.034;
+const LONGEST_WAIT: f32 = 1.2;
 
 /// The mark's upper wave, as drawn in the icon.
 const WAVE: Color32 = Color32::from_rgb(96, 108, 255);
@@ -36,6 +43,9 @@ pub(crate) struct Splash {
     fade_from: Option<f32>,
     started: Option<Instant>,
     last_frame: Option<Instant>,
+    /// Frames in a row that arrived on time, until the animation starts moving.
+    steady: u8,
+    moving: bool,
 }
 
 impl Splash {
@@ -45,6 +55,8 @@ impl Splash {
             fade_from: None,
             started: None,
             last_frame: None,
+            steady: 0,
+            moving: false,
         }
     }
 
@@ -70,7 +82,14 @@ impl Splash {
         let now = Instant::now();
         let started = *self.started.get_or_insert(now);
         if let Some(last) = self.last_frame {
-            self.clock += (now - last).as_secs_f32().min(LONGEST_STEP);
+            let step = (now - last).as_secs_f32();
+            if self.moving {
+                self.clock += step.min(LONGEST_STEP);
+            } else {
+                self.steady = if step <= ON_TIME { self.steady + 1 } else { 0 };
+                self.moving = self.steady >= STEADY_FRAMES ||
+                    (now - started).as_secs_f32() > LONGEST_WAIT;
+            }
         }
         self.last_frame = Some(now);
         let t = self.clock;
