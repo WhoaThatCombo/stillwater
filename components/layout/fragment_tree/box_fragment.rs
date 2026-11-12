@@ -222,14 +222,32 @@ impl BoxFragment {
         //
         // This applies even if there is no baseline set, so we unconditionally set the value here
         // and ignore anything that is set via [`Self::with_baselines`].
+        //
+        // A single-line text `<input>` clips its contents, but like in other engines it is
+        // aligned by the baseline of its text, so that it lines up with the text beside it.
+        let flags = self.base.flags;
+        let is_text_input = flags.contains(FragmentFlags::IS_INPUT_ELEMENT | FragmentFlags::IS_WIDGET) &&
+            !flags.contains(FragmentFlags::IS_BUTTON);
         if style.establishes_scroll_container(self.base.flags) {
             let content_rect_size = self.content_rect().size.to_logical(writing_mode);
             let padding = self.padding.to_logical(writing_mode);
             let border = self.border.to_logical(writing_mode);
             let margin = self.margin.to_logical(writing_mode);
-            baselines.last = Some(
-                content_rect_size.block + padding.block_end + border.block_end + margin.block_end,
-            )
+            if is_text_input {
+                // Not below the control's own border box (an input squeezed shorter than its
+                // text must not push the line down).
+                let border_box_end =
+                    content_rect_size.block + padding.block_end + border.block_end;
+                baselines.first = baselines.first.map(|first| first.min(border_box_end));
+                baselines.last = baselines.last.map(|last| last.min(border_box_end));
+            } else {
+                baselines.last = Some(
+                    content_rect_size.block +
+                        padding.block_end +
+                        border.block_end +
+                        margin.block_end,
+                )
+            }
         }
         baselines
     }
