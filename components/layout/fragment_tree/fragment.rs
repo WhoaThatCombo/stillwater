@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 use app_units::Au;
 use atomic_refcell::AtomicRef;
 use euclid::{Point2D, Rect, Size2D};
-use fonts::{FontMetrics, ShapedTextSlice};
+use fonts::{ColorGlyphLayers, FontMetrics, ShapedTextSlice};
 use layout_api::BoxAreaType;
 use malloc_size_of_derive::MallocSizeOf;
 use servo_arc::Arc as ServoArc;
@@ -115,6 +115,9 @@ pub(crate) struct TextFragment {
     /// [`TextFragment::NO_CLAMP_ELLIPSIS`] otherwise.
     #[ignore_malloc_size_of = "plain value"]
     pub clamp_ellipsis: std::sync::atomic::AtomicI32,
+    /// The colour layers of this fragment's font, if it is a colour font (emoji).
+    #[ignore_malloc_size_of = "shared with the font"]
+    pub color_glyph_layers: Option<Arc<ColorGlyphLayers>>,
 }
 
 #[derive(MallocSizeOf)]

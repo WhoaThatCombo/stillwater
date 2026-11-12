@@ -1305,7 +1305,43 @@ impl Fragment {
         let text_color = state
             .text_clip_color
             .unwrap_or_else(|| rgba(*parent_style.get_color()));
-        match Self::selected_text_color_and_range(fragment, builder, &parent_style) {
+        let selection = Self::selected_text_color_and_range(fragment, builder, &parent_style);
+
+        // Colour glyphs (emoji) are stacks of ordinary glyphs in palette colours, which
+        // WebRender doesn't draw: without this an emoji shows as its base glyph, an outline.
+        // The base glyphs are left out (unless a selection needs the buffer as it is) and
+        // each layer is drawn in its own colour over the rest of the text.
+        let mut color_layers: Vec<(GlyphInstance, wr::ColorF)> = Vec::new();
+        if let Some(layers) = fragment.color_glyph_layers.as_ref() {
+            let keep_base_glyphs = selection.is_some();
+            builder.glyph_buffer.retain(|glyph| {
+                let Some(glyph_layers) = layers.layers_for(glyph.index) else {
+                    return true;
+                };
+                for (layer_glyph, color) in glyph_layers {
+                    let color = match color {
+                        Some([red, green, blue, alpha]) => wr::ColorF::new(
+                            *red as f32 / 255.0,
+                            *green as f32 / 255.0,
+                            *blue as f32 / 255.0,
+                            *alpha as f32 / 255.0 * text_color.a,
+                        ),
+                        None => text_color,
+                    };
+                    color_layers.push((
+                        GlyphInstance {
+                            index: *layer_glyph,
+                            point: glyph.point,
+                        },
+                        color,
+                    ));
+                }
+                keep_base_glyphs
+            });
+        }
+
+        match selection {
+            None if builder.glyph_buffer.is_empty() => {},
             None => builder.webrender_display_list_builder.push_text(
                 &common,
                 glyph_bounds,
@@ -1332,6 +1368,16 @@ impl Fragment {
                 }
                 builder.glyph_buffer = glyphs;
             },
+        }
+        for (glyph, color) in color_layers {
+            builder.webrender_display_list_builder.push_text(
+                &common,
+                glyph_bounds,
+                &[glyph],
+                fragment.font_key,
+                color,
+                None,
+            );
         }
 
         if builder

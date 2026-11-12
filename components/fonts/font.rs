@@ -66,6 +66,87 @@ pub(crate) const CALT: Tag = Tag::new(b"calt");
 pub(crate) const CBDT: Tag = Tag::new(b"CBDT");
 pub(crate) const CLIG: Tag = Tag::new(b"clig");
 pub(crate) const COLR: Tag = Tag::new(b"COLR");
+pub(crate) const CPAL: Tag = Tag::new(b"CPAL");
+
+/// One layer of a colour glyph: the glyph to draw and its colour as RGBA, or `None` for the
+/// text's own colour.
+pub type ColorGlyphLayer = (GlyphId, Option<[u8; 4]>);
+
+/// The layers of the colour glyphs of a font with a version 0 `COLR` table (Segoe UI Emoji):
+/// each is drawn as a stack of ordinary glyphs of the same font, each in a colour from the
+/// font's first `CPAL` palette. WebRender only draws the base glyph, which for an emoji is
+/// its outline, so the layers have to be sent to it as separate glyphs.
+/// <https://learn.microsoft.com/en-us/typography/opentype/spec/colr>
+#[derive(Debug, Default)]
+pub struct ColorGlyphLayers {
+    layers: FxHashMap<GlyphId, Vec<ColorGlyphLayer>>,
+}
+
+impl ColorGlyphLayers {
+    /// The layers of `glyph`, bottom first, if it is a colour glyph.
+    pub fn layers_for(&self, glyph: GlyphId) -> Option<&[ColorGlyphLayer]> {
+        self.layers.get(&glyph).map(Vec::as_slice)
+    }
+
+    fn parse(colr: &[u8], cpal: &[u8]) -> Option<Self> {
+        let u16_at = |data: &[u8], offset: usize| {
+            data.get(offset..offset + 2)
+                .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]) as usize)
+        };
+        let u32_at = |data: &[u8], offset: usize| {
+            data.get(offset..offset + 4)
+                .map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize)
+        };
+
+        // CPAL: the colour records of the first palette, stored as BGRA.
+        let palette_entry_count = u16_at(cpal, 2)?;
+        let palette_count = u16_at(cpal, 4)?;
+        let color_records_offset = u32_at(cpal, 8)?;
+        if palette_count == 0 {
+            return None;
+        }
+        let first_color_index = u16_at(cpal, 12)?;
+        let palette: Vec<[u8; 4]> = (0..palette_entry_count)
+            .map_while(|entry| {
+                let offset = color_records_offset + (first_color_index + entry) * 4;
+                cpal.get(offset..offset + 4)
+                    .map(|bgra| [bgra[2], bgra[1], bgra[0], bgra[3]])
+            })
+            .collect();
+
+        // COLR: base glyph records, each naming a run of layer records.
+        let base_glyph_count = u16_at(colr, 2)?;
+        let base_glyphs_offset = u32_at(colr, 4)?;
+        let layers_offset = u32_at(colr, 8)?;
+        let layer_count = u16_at(colr, 12)?;
+        let mut layers = FxHashMap::default();
+        for index in 0..base_glyph_count {
+            let record = base_glyphs_offset + index * 6;
+            let glyph = u16_at(colr, record)?;
+            let first_layer = u16_at(colr, record + 2)?;
+            let count = u16_at(colr, record + 4)?;
+            if first_layer + count > layer_count {
+                continue;
+            }
+            let glyph_layers: Option<Vec<ColorGlyphLayer>> = (first_layer..first_layer + count)
+                .map(|layer| {
+                    let record = layers_offset + layer * 4;
+                    let layer_glyph = u16_at(colr, record)? as GlyphId;
+                    let color = match u16_at(colr, record + 2)? {
+                        // The text's foreground colour.
+                        0xFFFF => None,
+                        palette_index => Some(*palette.get(palette_index)?),
+                    };
+                    Some((layer_glyph, color))
+                })
+                .collect();
+            if let Some(glyph_layers) = glyph_layers {
+                layers.insert(glyph as GlyphId, glyph_layers);
+            }
+        }
+        (!layers.is_empty()).then_some(Self { layers })
+    }
+}
 pub(crate) const CWSH: Tag = Tag::new(b"cwsh");
 pub(crate) const FRAC: Tag = Tag::new(b"frac");
 pub(crate) const DLIG: Tag = Tag::new(b"dlig");
@@ -300,6 +381,9 @@ pub struct Font {
     /// This is cached, because getting table data is expensive.
     has_color_bitmap_or_colr_table: OnceLock<bool>,
 
+    /// The layers of this font's colour glyphs, if it has a version 0 `COLR` table.
+    color_glyph_layers: OnceLock<Option<Arc<ColorGlyphLayers>>>,
+
     /// Whether or not this font can do fast shaping, ie whether or not it has
     /// a kern table, but no GSUB and GPOS tables. When this is true, Servo will
     /// shape Latin horizontal left-to-right text without using Harfbuzz.
@@ -392,6 +476,7 @@ impl Font {
             font_instance_key: Default::default(),
             synthesized_small_caps,
             has_color_bitmap_or_colr_table: OnceLock::new(),
+            color_glyph_layers: OnceLock::new(),
             can_do_fast_shaping: OnceLock::new(),
             family_name: Default::default(),
         })
@@ -412,6 +497,17 @@ impl Font {
 
     pub(crate) fn webrender_font_instance_platform_options(&self) -> FontInstancePlatformOptions {
         self.handle.webrender_font_instance_platform_options()
+    }
+
+    /// The layers of this font's colour glyphs, if it has any (see [`ColorGlyphLayers`]).
+    pub fn color_glyph_layers(&self) -> Option<Arc<ColorGlyphLayers>> {
+        self.color_glyph_layers
+            .get_or_init(|| {
+                let colr = self.table_for_tag(COLR)?;
+                let cpal = self.table_for_tag(CPAL)?;
+                ColorGlyphLayers::parse(colr.buffer(), cpal.buffer()).map(Arc::new)
+            })
+            .clone()
     }
 
     pub(crate) fn has_color_bitmap_or_colr_table(&self) -> bool {

@@ -736,6 +736,7 @@ impl LineItemLayout<'_, '_> {
                     clamp_ellipsis: std::sync::atomic::AtomicI32::new(
                         TextFragment::NO_CLAMP_ELLIPSIS,
                     ),
+                    color_glyph_layers: text_item.info.font_info.font.color_glyph_layers(),
                 })),
                 content_rect,
             ));
