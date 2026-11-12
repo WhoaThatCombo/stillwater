@@ -234,6 +234,14 @@ impl BoxFragment {
             let border = self.border.to_logical(writing_mode);
             let margin = self.margin.to_logical(writing_mode);
             if is_text_input {
+                // The text is in an absolutely positioned inner box that is centred in the
+                // control, so it is not part of the control's own baseline set: use it.
+                if writing_mode.is_horizontal() &&
+                    let Some(baseline) = self.text_input_editor_baseline()
+                {
+                    baselines.first = Some(baseline);
+                    baselines.last = Some(baseline);
+                }
                 // Not below the control's own border box (an input squeezed shorter than its
                 // text must not push the line down).
                 let border_box_end =
@@ -250,6 +258,23 @@ impl BoxFragment {
             }
         }
         baselines
+    }
+
+    /// The baseline of the text in a text `<input>`, as an offset from this fragment's
+    /// content box. The control holds one container box, in which the editor (or the
+    /// placeholder) is centred with automatic margins. The container reports that box's
+    /// baseline as if it were at the container's start, so its offset is added here.
+    fn text_input_editor_baseline(&self) -> Option<Au> {
+        fn first_box(fragment: &BoxFragment) -> Option<&Arc<BoxFragment>> {
+            fragment.children.iter().find_map(|child| match child {
+                Fragment::Box(child) | Fragment::Float(child) => Some(child),
+                _ => None,
+            })
+        }
+        let container = first_box(self)?;
+        let editor = first_box(container)?;
+        let baseline = editor.baselines.first.or(container.baselines.first)?;
+        Some(container.content_rect().origin.y + editor.content_rect().origin.y + baseline)
     }
 
     pub(crate) fn add_extra_background(&mut self, extra_background: ExtraBackground) {

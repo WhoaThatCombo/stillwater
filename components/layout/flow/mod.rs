@@ -508,10 +508,14 @@ impl BlockFormattingContext {
         {
             flow_layout.depends_on_block_constraints = true;
             let final_block_size = lazy_block_size.resolve(|| content_block_size);
+            let block_offset = Au::zero().max((final_block_size - content_block_size) / 2);
+            // The baselines move with the contents, so that a button taller than its label
+            // still lines up with the text beside it.
+            flow_layout.baselines = flow_layout.baselines.offset(block_offset);
             let align_fragment_rect = LogicalRect {
                 start_corner: LogicalVec2 {
                     inline: Au::zero(),
-                    block: Au::zero().max((final_block_size - content_block_size) / 2),
+                    block: block_offset,
                 },
                 size: LogicalVec2 {
                     inline: containing_block.size.inline,
