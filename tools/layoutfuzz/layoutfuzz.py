@@ -129,7 +129,10 @@ MASKS = {
     "svg-ratio": "no <img> whose SVG has only a viewBox (ratio, no size)",
     "textarea-height": "textareas always get a px height",
     "control-baseline": "inputs, textareas and buttons get vertical-align:top",
+    "intrinsic-minmax": "no min-content/max-content/fit-content in min-* and max-* properties",
+    "empty-table": "the reducer keeps at least one cell in every table",
 }
+INTRINSIC_KEYWORDS = ("min-content", "max-content", "fit-content")
 ACTIVE_MASKS: set[str] = set()
 
 PX = [0, 5, 10, 15, 20, 25, 30, 40, 50, 60, 75, 80, 100, 120, 150, 200, 250, 300, 400]
@@ -159,10 +162,14 @@ def gen_size_props(rng, s, axis_weights=1.0):
         if rng.random() < .1:
             s[prop] = wchoice(rng, [(length(rng, kw=False), 4), ("min-content", 1), ("max-content", .5),
                                     ("0", 1), ("auto", .5)])
+            if "intrinsic-minmax" in ACTIVE_MASKS and s[prop] in INTRINSIC_KEYWORDS:
+                s[prop] = "0"
     for prop in ("max-width", "max-height"):
         if rng.random() < .1:
             s[prop] = wchoice(rng, [(length(rng, kw=False), 4), ("min-content", .7), ("max-content", .5),
                                     ("fit-content", .5), ("none", .3)])
+            if "intrinsic-minmax" in ACTIVE_MASKS and s[prop] in INTRINSIC_KEYWORDS:
+                s[prop] = "none"
     if rng.random() < .08 and "aspect-ratio" not in ACTIVE_MASKS:
         s["aspect-ratio"] = rng.choice(["1", "16 / 9", "2 / 1", "1 / 2", "4 / 3", "auto 1"])
 
@@ -460,6 +467,8 @@ def font_independent(root: Node) -> bool:
 def respects_masks(root: Node) -> bool:
     """The reducer must not undo what a mask put in, or it slides back into the masked bug."""
     for node in root.walk():
+        if node.tag == "table" and "empty-table" in ACTIVE_MASKS and                 not any(n.tag == "td" for n in node.walk()):
+            return False
         if node.tag == "textarea" and "textarea-height" in ACTIVE_MASKS and \
                 not node.style.get("height", "").endswith("px"):
             return False
@@ -973,8 +982,11 @@ def cmd_one(args):
 
 def cmd_case(args):
     h = Harness(Path(args.exe), edge=not args.no_edge)
+    pages = []
+    for path in map(Path, args.pages):  # a folder stands for the .html files in it
+        pages += sorted(path.glob("*.html")) if path.is_dir() else [path]
     try:
-        for path in args.pages:
+        for path in pages:
             html = Path(path).read_text(encoding="utf-8")
             sw = h.run_sw(html)
             if args.no_edge:
@@ -1132,7 +1144,7 @@ def main():
 
     p = sub.add_parser("case", help="compare hand-written HTML files")
     common(p, out=False)
-    p.add_argument("pages", nargs="+")
+    p.add_argument("pages", nargs="+", help="HTML files, or folders of them")
     p.add_argument("--no-edge", action="store_true", help="only measure in Stillwater")
     p.set_defaults(func=cmd_case)
 
