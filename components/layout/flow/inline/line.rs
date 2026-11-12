@@ -16,6 +16,7 @@ use style::computed_values::position::T as Position;
 use style::values::computed::BaselineShift;
 use style::values::generics::box_::BaselineShiftKeyword;
 use style::values::specified::align::AlignFlags;
+use style::values::specified::text::TextOverflowSide;
 use style::values::specified::box_::DisplayOutside;
 use unicode_bidi::{BidiInfo, Level};
 
@@ -701,6 +702,21 @@ impl LineItemLayout<'_, '_> {
             self.layout.layout_context.painter_id,
             &self.layout.layout_context.font_context,
         );
+        let ellipsis = matches!(
+            self.layout
+                .containing_block()
+                .style
+                .get_text()
+                .text_overflow
+                .second,
+            TextOverflowSide::Ellipsis
+        )
+        .then(|| {
+            let font = &text_item.info.font_info.font;
+            let glyph = font.glyph_index('…')?;
+            Some((glyph, Au::from_f64_px(font.glyph_h_advance(glyph))))
+        })
+        .flatten();
 
         self.current_state.inline_advance += inline_advance;
         self.current_state
@@ -715,6 +731,7 @@ impl LineItemLayout<'_, '_> {
                     justification_adjustment: self.justification_adjustment,
                     character_range_in_dom_node: text_item.character_range_in_dom_node,
                     is_empty_for_text_cursor: text_item.is_empty_for_text_cursor,
+                    ellipsis,
                 })),
                 content_rect,
             ));

@@ -107,6 +107,9 @@ pub(crate) struct TextFragment {
     /// Whether or not this [`TextFragment`] is an empty fragment added for the
     /// benefit of placing a text cursor on an otherwise empty editable line.
     pub is_empty_for_text_cursor: bool,
+    /// The glyph and advance of the ellipsis character in this fragment's font, when the
+    /// block container of its line has `text-overflow: ellipsis`.
+    pub ellipsis: Option<(u32, Au)>,
 }
 
 #[derive(MallocSizeOf)]

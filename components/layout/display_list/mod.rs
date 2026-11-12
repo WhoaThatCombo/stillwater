@@ -1206,6 +1206,38 @@ impl Fragment {
             fragment.justification_adjustment,
         );
 
+        // `text-overflow: ellipsis`: text past the end of its clipping block is not drawn,
+        // and the fragment that crosses the edge is cut where the ellipsis still fits.
+        if let (Some(edge), Some((ellipsis_glyph, ellipsis_advance))) =
+            (state.text_overflow_edge, fragment.ellipsis)
+        {
+            if rect.origin.x >= edge {
+                return;
+            }
+            if rect.max_x() > edge + Au::from_px(1) {
+                let limit = (edge - ellipsis_advance).to_f32_px();
+                let end_of_text = rect.max_x().to_f32_px();
+                let glyphs = &mut builder.glyph_buffer;
+                let keep = (0..glyphs.len())
+                    .find(|&index| {
+                        let end = glyphs
+                            .get(index + 1)
+                            .map_or(end_of_text, |next| next.point.x);
+                        end > limit
+                    })
+                    .unwrap_or(glyphs.len());
+                let x = glyphs
+                    .get(keep)
+                    .map_or(end_of_text, |glyph| glyph.point.x)
+                    .max(rect.origin.x.to_f32_px());
+                glyphs.truncate(keep);
+                glyphs.push(GlyphInstance {
+                    index: ellipsis_glyph,
+                    point: LayoutPoint::new(x, baseline_origin.y.to_f32_px()),
+                });
+            }
+        }
+
         if builder.glyph_buffer.is_empty() && !fragment.is_empty_for_text_cursor {
             return;
         }

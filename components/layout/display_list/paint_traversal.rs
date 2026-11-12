@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use app_units::Au;
 use servo_base::id::ScrollTreeNodeId;
-use style::values::computed::TextDecorationLine;
+use style::values::computed::{Overflow, TextDecorationLine};
+use style::values::specified::text::TextOverflowSide;
 
 use crate::display_list::{
     ClipId, ContainerTimingRootChain, ContainerTimingRoots, FragmentTextDecoration,
@@ -590,6 +591,10 @@ pub(crate) struct TraversalState {
     /// The colour text is drawn in under an ancestor with `background-clip: text`
     /// (see `background::text_clip_fallback_color`).
     pub text_clip_color: Option<webrender_api::ColorF>,
+    /// The inline-end edge (in the coordinates text is painted in) of the nearest block
+    /// container with `text-overflow: ellipsis` that clips its overflow: text that crosses
+    /// it is cut there and ends in an ellipsis.
+    pub text_overflow_edge: Option<Au>,
 }
 
 impl Default for TraversalState {
@@ -603,6 +608,7 @@ impl Default for TraversalState {
             containing_element_tag: Default::default(),
             container_timing_roots: Default::default(),
             text_clip_color: None,
+            text_overflow_edge: None,
         }
     }
 }
@@ -654,6 +660,21 @@ impl TraversalState {
             container_timing_roots: self.container_timing_roots_including(box_fragment),
             text_clip_color: super::background::text_clip_fallback_color(&style)
                 .or(self.text_clip_color),
+            text_overflow_edge: if box_fragment.is_inline_box() {
+                self.text_overflow_edge
+            } else {
+                let clips = style.get_box().overflow_x != Overflow::Visible;
+                let ellipsis = matches!(
+                    style.get_text().text_overflow.second,
+                    TextOverflowSide::Ellipsis
+                );
+                let horizontal_ltr =
+                    style.writing_mode.is_horizontal() && style.writing_mode.is_bidi_ltr();
+                (clips && ellipsis && horizontal_ltr).then(|| {
+                    let content_rect = box_fragment.content_rect();
+                    self.origin.x + content_rect.origin.x + content_rect.size.width
+                })
+            },
             // From <https://www.w3.org/TR/paint-timing/#sec-modifications-dom>:
             // > Let element be the Element which determines the containing block of text.
             // > Append text to element’s set of owned text nodes.
@@ -704,6 +725,7 @@ impl TraversalState {
             containing_element_tag: self.containing_element_tag,
             container_timing_roots: self.container_timing_roots.clone(),
             text_clip_color: self.text_clip_color,
+            text_overflow_edge: self.text_overflow_edge,
         }
     }
 
@@ -720,6 +742,7 @@ impl TraversalState {
             containing_element_tag: self.containing_element_tag,
             container_timing_roots: stacking_context.container_timing_roots.clone(),
             text_clip_color: self.text_clip_color,
+            text_overflow_edge: self.text_overflow_edge,
         }
     }
 }

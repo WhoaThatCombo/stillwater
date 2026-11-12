@@ -44,6 +44,9 @@ pub fn set(preferences: Preferences) {
     // background's colour instead of leaving a filled box with invisible text on it (see
     // `text_clip_fallback_color` in the display list builder).
     stylo_static_prefs::set_pref!("layout.css.background-clip.text.enabled", true);
+    // Stillwater: `text-overflow: ellipsis` is drawn by the display list builder (the end of
+    // a line cut off by its block's overflow gets an ellipsis).
+    stylo_static_prefs::set_pref!("layout.css.text-overflow.enabled", true);
 
     // Get list of changes, returning early if the preferences haven't changed.
     let changed = preferences.diff(&PREFERENCES.read().unwrap());
