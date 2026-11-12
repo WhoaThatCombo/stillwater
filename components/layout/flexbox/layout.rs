@@ -2483,7 +2483,17 @@ impl FlexItemBox {
 
         let get_automatic_minimum_size = || {
             // This is an implementation of <https://drafts.csswg.org/css-flexbox/#min-size-auto>.
-            if style.establishes_scroll_container(self.base_fragment_info().flags) {
+            //
+            // A single-line text `<input>` is a scroll container only because Servo's own
+            // stylesheet gives it `overflow: hidden` (so its inner editor can scroll). The HTML
+            // rendering rules give it `overflow: clip`, which isn't a scroll container, so in
+            // other engines it gets the automatic minimum: no narrower than its specified
+            // width or its natural width, whichever is smaller.
+            let flags = self.base_fragment_info().flags;
+            let is_text_input = flags
+                .contains(FragmentFlags::IS_INPUT_ELEMENT | FragmentFlags::IS_WIDGET) &&
+                !flags.contains(FragmentFlags::IS_BUTTON);
+            if style.establishes_scroll_container(flags) && !is_text_input {
                 return Au::zero();
             }
 
