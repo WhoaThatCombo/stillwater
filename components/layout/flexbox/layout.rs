@@ -224,16 +224,40 @@ impl FlexLineItem<'_> {
             },
         );
 
-        let adjust_baseline = |baseline: Au| {
-            baseline + item_content_cross_start_position -
-                self.item.border.cross_start -
-                self.item.padding.cross_start -
-                item_margin.cross_start
-        };
+        // Item baselines are block-axis offsets from the item's margin box. Move them into
+        // the line's coordinates with the item's flow-relative position, which works whether
+        // the block axis is the cross axis (rows) or the main axis (columns), and with
+        // `wrap-reverse`.
+        let item_border = flex_context.sides_to_flow_relative(self.item.border);
+        let item_padding = flex_context.sides_to_flow_relative(self.item.padding);
+        let item_flow_margin = flex_context.sides_to_flow_relative(item_margin);
+        let margin_box_block_start = content_rect.start_corner.block -
+            item_padding.block_start -
+            item_border.block_start -
+            item_flow_margin.block_start;
+        let adjust_baseline = |baseline: Au| baseline + margin_box_block_start;
 
-        let baselines = self
+        let mut baselines = self
             .layout_result
             .content_baselines_for_parent_relative_to_margin_box;
+        // <https://drafts.csswg.org/css-flexbox/#flex-baselines>
+        // > [The flex container's] first main-axis baseline set is generated from the alignment
+        // > baseline of the startmost flex item. (If that item has no alignment baseline parallel
+        // > to the flex container's main axis, then one is first synthesized from its border
+        // > edges.)
+        // (The cross-axis baseline set, used by column containers, is defined the same way.)
+        // So an item without a baseline still provides one, at the line-under (block-end)
+        // edge of its border box.
+        if baselines.first.is_none() && baselines.last.is_none() {
+            let border_box_block_end = item_flow_margin.block_start +
+                item_border.block_start +
+                item_padding.block_start +
+                content_rect.size.block +
+                item_padding.block_end +
+                item_border.block_end;
+            baselines.first = Some(border_box_block_end);
+            baselines.last = Some(border_box_block_end);
+        }
         if flex_context.config.flex_direction_is_reversed {
             if let Some(last_baseline) = baselines.last {
                 all_baselines
@@ -1975,15 +1999,25 @@ impl FlexItem<'_> {
         let item_inline_axis_parallel_to_container_main_axis =
             item_inline_axis_is_horizontal == container_main_axis_is_horizontal;
 
+        // For baseline alignment within the line, measured from the cross-start margin edge.
         let content_baselines_relative_to_margin_box = content_box_baselines.offset(
             self.margin.cross_start.auto_is(Au::zero) +
                 self.padding.cross_start +
                 self.border.cross_start,
         );
 
+        // For the baselines propagated to the container, which are block-axis offsets from
+        // the block-start margin edge: the block-start sides are the cross-start sides in a
+        // row container, but the main-start sides in a column one.
+        let margin = flex_context.sides_to_flow_relative(self.margin);
+        let padding = flex_context.sides_to_flow_relative(self.padding);
+        let border = flex_context.sides_to_flow_relative(self.border);
+        let block_start_pbm =
+            margin.block_start.auto_is(Au::zero) + padding.block_start + border.block_start;
+
         let content_baselines_for_parent_relative_to_margin_box =
             if item_inline_axis_parallel_to_container_inline_axis {
-                content_baselines_relative_to_margin_box
+                content_box_baselines.offset(block_start_pbm)
             } else {
                 Baselines::default()
             };
