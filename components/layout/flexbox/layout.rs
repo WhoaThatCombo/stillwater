@@ -224,16 +224,40 @@ impl FlexLineItem<'_> {
             },
         );
 
-        let adjust_baseline = |baseline: Au| {
-            baseline + item_content_cross_start_position -
-                self.item.border.cross_start -
-                self.item.padding.cross_start -
-                item_margin.cross_start
-        };
+        // Item baselines are block-axis offsets from the item's margin box. Move them into
+        // the line's coordinates with the item's flow-relative position, which works whether
+        // the block axis is the cross axis (rows) or the main axis (columns), and with
+        // `wrap-reverse`.
+        let item_border = flex_context.sides_to_flow_relative(self.item.border);
+        let item_padding = flex_context.sides_to_flow_relative(self.item.padding);
+        let item_flow_margin = flex_context.sides_to_flow_relative(item_margin);
+        let margin_box_block_start = content_rect.start_corner.block -
+            item_padding.block_start -
+            item_border.block_start -
+            item_flow_margin.block_start;
+        let adjust_baseline = |baseline: Au| baseline + margin_box_block_start;
 
-        let baselines = self
+        let mut baselines = self
             .layout_result
             .content_baselines_for_parent_relative_to_margin_box;
+        // <https://drafts.csswg.org/css-flexbox/#flex-baselines>
+        // > [The flex container's] first main-axis baseline set is generated from the alignment
+        // > baseline of the startmost flex item. (If that item has no alignment baseline parallel
+        // > to the flex container's main axis, then one is first synthesized from its border
+        // > edges.)
+        // (The cross-axis baseline set, used by column containers, is defined the same way.)
+        // So an item without a baseline still provides one, at the line-under (block-end)
+        // edge of its border box.
+        if baselines.first.is_none() && baselines.last.is_none() {
+            let border_box_block_end = item_flow_margin.block_start +
+                item_border.block_start +
+                item_padding.block_start +
+                content_rect.size.block +
+                item_padding.block_end +
+                item_border.block_end;
+            baselines.first = Some(border_box_block_end);
+            baselines.last = Some(border_box_block_end);
+        }
         if flex_context.config.flex_direction_is_reversed {
             if let Some(last_baseline) = baselines.last {
                 all_baselines
@@ -568,6 +592,23 @@ impl FlexContainer {
             depends_on_block_constraints,
         } in item_infos.iter()
         {
+            container_depends_on_block_constraints |= depends_on_block_constraints;
+
+            // The algorithm below follows the spec, but for the block size of a column
+            // container it isn't web compatible: Gecko, Blink and WebKit size the container
+            // to the sum of the items' hypothetical main sizes (their flex base sizes clamped
+            // by their min and max main sizes), so `flex: 1` (a zero basis) contributes
+            // nothing beyond its minimum and `flex-basis: 50px` contributes 50px whatever the
+            // item's `height`. See the notes in WPT's
+            // css/css-flexbox/flex-one-sets-flex-basis-to-zero-px.html.
+            if self.config.flex_axis == FlexAxis::Column {
+                let hypothetical_main_size = outer_flex_base_size
+                    .clamp_between_extremums(*outer_min_main_size, *outer_max_main_size);
+                container_max_content_size += hypothetical_main_size;
+                container_min_content_size += hypothetical_main_size;
+                continue;
+            }
+
             // > 4. Add each item’s flex base size to the product of its flex grow factor (scaled flex shrink
             // > factor, if shrinking) and the chosen flex fraction, then clamp that result by the max main size
             // > floored by the min main size.
@@ -599,8 +640,6 @@ impl FlexContainer {
                 container_min_content_size
                     .max_assign(*min_content_main_size_for_multiline_container);
             }
-
-            container_depends_on_block_constraints |= depends_on_block_constraints;
         }
 
         InlineContentSizesResult {
@@ -1652,24 +1691,26 @@ impl InitialFlexLineLayout<'_> {
             let mut resolved_justify_content = match justify_content_style.value() {
                 // On the inline axis `left`/`right` are line-left/line-right.
                 // https://drafts.csswg.org/css-align/#valdef-justify-content-left
+                // They don't depend on `flex-direction`, so they map to the
+                // writing-mode-relative `start`/`end`, not to `flex-start`/`flex-end`.
                 AlignFlags::LEFT if inline_axis_is_main_axis => {
                     if line_left_is_inline_start {
-                        AlignFlags::FLEX_START
+                        AlignFlags::START
                     } else {
-                        AlignFlags::FLEX_END
+                        AlignFlags::END
                     }
                 },
                 // https://drafts.csswg.org/css-align/#valdef-justify-content-right
                 AlignFlags::RIGHT if inline_axis_is_main_axis => {
                     if line_left_is_inline_start {
-                        AlignFlags::FLEX_END
+                        AlignFlags::END
                     } else {
-                        AlignFlags::FLEX_START
+                        AlignFlags::START
                     }
                 },
                 // On the block axis these keywords are not parallel with the
                 // left-right axis, so they behave as `start`.
-                AlignFlags::LEFT | AlignFlags::RIGHT => AlignFlags::FLEX_START,
+                AlignFlags::LEFT | AlignFlags::RIGHT => AlignFlags::START,
                 justify_content => justify_content,
             };
             let mut is_safe = justify_content_style.flags() == AlignFlags::SAFE;
@@ -1679,9 +1720,12 @@ impl InitialFlexLineLayout<'_> {
             // 1. If there is only a single item being aligned and alignment is a distributed alignment keyword
             //    https://www.w3.org/TR/css-align-3/#distribution-values
             if item_count <= 1 || free_space_in_main_axis <= Au::zero() {
+                // `stretch` and `space-between` fall back to `safe flex-start` per the issue
+                // above, but Blink overflows them from main-start (an unsafe `flex-start`),
+                // which differs from `start` in reversed containers. Match Blink.
                 (resolved_justify_content, is_safe) = match resolved_justify_content {
-                    AlignFlags::STRETCH => (AlignFlags::FLEX_START, true),
-                    AlignFlags::SPACE_BETWEEN => (AlignFlags::FLEX_START, true),
+                    AlignFlags::STRETCH => (AlignFlags::FLEX_START, false),
+                    AlignFlags::SPACE_BETWEEN => (AlignFlags::FLEX_START, false),
                     AlignFlags::SPACE_AROUND => (AlignFlags::CENTER, true),
                     AlignFlags::SPACE_EVENLY => (AlignFlags::CENTER, true),
                     _ => (resolved_justify_content, is_safe),
@@ -1697,17 +1741,22 @@ impl InitialFlexLineLayout<'_> {
         };
 
         // Implement "unsafe" alignment. "safe" alignment is handled by the fallback process above.
+        //
+        // Positions here are flex-relative: zero is the main-start edge, which for
+        // `row-reverse`/`column-reverse` is the writing mode's end edge. So `flex-start`/
+        // `flex-end` need no adjustment, while `start`/`end` (relative to the writing mode)
+        // swap when the direction is reversed.
         let main_start_position = match resolved_justify_content {
-            AlignFlags::START => Au::zero(),
-            AlignFlags::FLEX_START => {
+            AlignFlags::FLEX_START => Au::zero(),
+            AlignFlags::START => {
                 if flex_context.config.flex_direction_is_reversed {
                     free_space_in_main_axis
                 } else {
                     Au::zero()
                 }
             },
-            AlignFlags::END => free_space_in_main_axis,
-            AlignFlags::FLEX_END => {
+            AlignFlags::FLEX_END => free_space_in_main_axis,
+            AlignFlags::END => {
                 if flex_context.config.flex_direction_is_reversed {
                     Au::zero()
                 } else {
@@ -1950,15 +1999,25 @@ impl FlexItem<'_> {
         let item_inline_axis_parallel_to_container_main_axis =
             item_inline_axis_is_horizontal == container_main_axis_is_horizontal;
 
+        // For baseline alignment within the line, measured from the cross-start margin edge.
         let content_baselines_relative_to_margin_box = content_box_baselines.offset(
             self.margin.cross_start.auto_is(Au::zero) +
                 self.padding.cross_start +
                 self.border.cross_start,
         );
 
+        // For the baselines propagated to the container, which are block-axis offsets from
+        // the block-start margin edge: the block-start sides are the cross-start sides in a
+        // row container, but the main-start sides in a column one.
+        let margin = flex_context.sides_to_flow_relative(self.margin);
+        let padding = flex_context.sides_to_flow_relative(self.padding);
+        let border = flex_context.sides_to_flow_relative(self.border);
+        let block_start_pbm =
+            margin.block_start.auto_is(Au::zero) + padding.block_start + border.block_start;
+
         let content_baselines_for_parent_relative_to_margin_box =
             if item_inline_axis_parallel_to_container_inline_axis {
-                content_baselines_relative_to_margin_box
+                content_box_baselines.offset(block_start_pbm)
             } else {
                 Baselines::default()
             };
