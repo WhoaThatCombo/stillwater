@@ -350,12 +350,15 @@ impl<'dom> LayoutNode<'dom> for ServoLayoutNode<'dom> {
         self.pseudo_element_chain.is_empty() && self.node.is_text_container_of_single_line_input()
     }
 
-    fn textarea_cols_and_rows(&self) -> Option<(u32, u32)> {
+    fn text_control_cols_and_rows(&self) -> Option<(u32, Option<u32>)> {
         if !self.pseudo_element_chain.is_empty() {
             return None;
         }
-        let textarea = self.node.downcast::<HTMLTextAreaElement>()?;
-        Some((textarea.get_cols(), textarea.get_rows()))
+        if let Some(textarea) = self.node.downcast::<HTMLTextAreaElement>() {
+            return Some((textarea.get_cols(), Some(textarea.get_rows())));
+        }
+        let size = self.node.downcast::<Element>()?.text_input_size_for_layout()?;
+        Some((size, None))
     }
 
     fn is_root_of_user_agent_widget(&self) -> bool {

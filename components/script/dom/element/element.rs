@@ -1385,35 +1385,9 @@ impl<'dom> LayoutDom<'dom, Element> {
             ));
         }
 
-        // Textual input, specifically text entry and domain specific input has
-        // a default preferred size.
-        //
-        // <https://html.spec.whatwg.org/multipage/#the-input-element-as-a-text-entry-widget>
-        // <https://html.spec.whatwg.org/multipage/#the-input-element-as-domain-specific-widgets>
-        let size = self
-            .downcast::<HTMLInputElement>()
-            .and_then(|input_element| {
-                // FIXME(pcwalton): More use of atoms, please!
-                match self.get_attr_val_for_layout(&ns!(), &local_name!("type")) {
-                    Some("hidden") | Some("range") | Some("color") | Some("checkbox") |
-                    Some("radio") | Some("file") | Some("submit") | Some("image") |
-                    Some("reset") | Some("button") => None,
-                    // Others
-                    _ => match input_element.size_for_layout() {
-                        0 => None,
-                        s => Some(s as i32),
-                    },
-                }
-            });
-
-        if let Some(size) = size {
-            let value = specified::NoCalcLength::from_servo_character_width(size);
-            push(PropertyDeclaration::Width(
-                specified::Size::LengthPercentage(NonNegative(
-                    specified::LengthPercentage::Length(value),
-                )),
-            ));
-        }
+        // Stillwater: the `size` of a text `<input>` is not a width hint: it gives the control
+        // its natural width (layout reads it through `text_input_size_for_layout`), so that
+        // it can stretch as a grid item.
 
         let width = if let Some(this) = self.downcast::<HTMLEmbedElement>() {
             this.width()
@@ -1625,6 +1599,21 @@ impl<'dom> LayoutDom<'dom, Element> {
         // Don't panic since `display` can cause this to be called on arbitrary elements.
         self.downcast::<HTMLTableColElement>()
             .and_then(|element| element.get_span())
+    }
+
+    /// The `size` of an `<input>` that is drawn as a text entry or domain-specific widget.
+    /// <https://html.spec.whatwg.org/multipage/#the-input-element-as-a-text-entry-widget>
+    /// <https://html.spec.whatwg.org/multipage/#the-input-element-as-domain-specific-widgets>
+    pub(crate) fn text_input_size_for_layout(self) -> Option<u32> {
+        let input_element = self.downcast::<HTMLInputElement>()?;
+        match self.get_attr_val_for_layout(&ns!(), &local_name!("type")) {
+            Some("hidden") | Some("range") | Some("color") | Some("checkbox") | Some("radio") |
+            Some("file") | Some("submit") | Some("image") | Some("reset") | Some("button") => None,
+            _ => match input_element.size_for_layout() {
+                0 => None,
+                size => Some(size),
+            },
+        }
     }
 
     pub(crate) fn get_colspan(self) -> Option<u32> {

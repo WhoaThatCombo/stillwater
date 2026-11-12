@@ -44,8 +44,9 @@ pub(crate) struct IndependentFormattingContext {
     // Private so that code outside of this module cannot match variants.
     // It should go through methods instead.
     contents: IndependentFormattingContextContents,
-    /// The `cols` and `rows` of a `<textarea>`, which give its natural size.
-    textarea_cols_and_rows: Option<(u32, u32)>,
+    /// The natural size of a text control in characters and lines (`<textarea>` `cols` and
+    /// `rows`, `<input>` `size`), if this is one.
+    text_control_cols_and_rows: Option<(u32, Option<u32>)>,
     /// Data that was originally propagated down to this [`IndependentFormattingContext`]
     /// during creation. This is used during incremental layout.
     pub propagated_data: PropagatedBoxTreeData,
@@ -115,7 +116,7 @@ impl IndependentFormattingContext {
         Self {
             base,
             contents,
-            textarea_cols_and_rows: None,
+            text_control_cols_and_rows: None,
             propagated_data,
             layout_root_layout_inputs: None.into(),
         }
@@ -139,7 +140,7 @@ impl IndependentFormattingContext {
         // This ensures that the `FragmentFlags` of this `BaseFragmentInfo` reflect the
         // current layout and not the set that was calculated during previous layouts.
         self.base.base_fragment_info = node_and_style_info.into();
-        self.textarea_cols_and_rows = node_and_style_info.node.textarea_cols_and_rows();
+        self.text_control_cols_and_rows = node_and_style_info.node.text_control_cols_and_rows();
 
         self.contents = Self::construct_contents(
             layout_context,
@@ -178,7 +179,7 @@ impl IndependentFormattingContext {
         Self {
             base,
             contents,
-            textarea_cols_and_rows: node_and_style_info.node.textarea_cols_and_rows(),
+            text_control_cols_and_rows: node_and_style_info.node.text_control_cols_and_rows(),
             propagated_data,
             layout_root_layout_inputs: None.into(),
         }
@@ -297,18 +298,18 @@ impl IndependentFormattingContext {
         self.base.base_fragment_info
     }
 
-    /// The natural content size of a `<textarea>`: `cols` characters by `rows` lines.
+    /// The natural content size of a text control: `cols` characters wide and, for a
+    /// `<textarea>`, `rows` lines tall.
     /// <https://html.spec.whatwg.org/multipage/#textarea-effective-width>
-    fn textarea_natural_size(&self) -> Option<LogicalVec2<Au>> {
-        let (cols, rows) = self.textarea_cols_and_rows?;
+    fn text_control_natural_size(&self) -> Option<LogicalVec2<Option<Au>>> {
+        let (cols, rows) = self.text_control_cols_and_rows?;
         let font_size = self.style().get_font().font_size.computed_size().px();
         // "Converting a character width to pixels", with half the font size as the average
         // advance and the whole of it as the maximum.
         let inline = font_size * 0.5 * (cols.max(1) - 1) as f32 + font_size;
-        let block = font_size * rows.max(1) as f32;
         Some(LogicalVec2 {
-            inline: Au::from_f32_px(inline),
-            block: Au::from_f32_px(block),
+            inline: Some(Au::from_f32_px(inline)),
+            block: rows.map(|rows| Au::from_f32_px(font_size * rows.max(1) as f32)),
         })
     }
 
@@ -317,9 +318,12 @@ impl IndependentFormattingContext {
         layout_context: &LayoutContext,
         constraint_space: &ConstraintSpace,
     ) -> InlineContentSizesResult {
-        if let Some(size) = self.textarea_natural_size() {
+        if let Some(inline) = self
+            .text_control_natural_size()
+            .and_then(|size| size.inline)
+        {
             return InlineContentSizesResult {
-                sizes: size.inline.into(),
+                sizes: inline.into(),
                 depends_on_block_constraints: false,
             };
         }
@@ -517,9 +521,11 @@ impl IndependentFormattingContext {
             IndependentFormattingContextContents::Flow(bfc) => {
                 // A `<textarea>` is as tall as its rows, whatever it holds. Settle that before
                 // the contents are laid out, since that resolves the block size too.
-                let natural_size = self.textarea_natural_size();
-                if let Some(size) = natural_size {
-                    lazy_block_size.resolve(|| size.block);
+                let natural_block_size = self
+                    .text_control_natural_size()
+                    .and_then(|size| size.block);
+                if let Some(block_size) = natural_block_size {
+                    lazy_block_size.resolve(|| block_size);
                 }
                 let mut layout = bfc.layout(
                     layout_context,
@@ -528,8 +534,8 @@ impl IndependentFormattingContext {
                     lazy_block_size,
                     Some(&self.base),
                 );
-                if let Some(size) = natural_size {
-                    layout.content_block_size = size.block;
+                if let Some(block_size) = natural_block_size {
+                    layout.content_block_size = block_size;
                 }
                 layout
             },

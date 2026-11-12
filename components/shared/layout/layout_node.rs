@@ -249,9 +249,11 @@ pub trait LayoutNode<'dom>: Copy + Debug + NodeInfo + Send + Sync {
     /// <https://html.spec.whatwg.org/multipage/#the-input-element-as-a-text-entry-widget>
     fn is_single_line_text_input(&self) -> bool;
 
-    /// The `cols` and `rows` of a `<textarea>`, which give it its natural size.
+    /// The natural size of a text control, in characters and lines: the `cols` and `rows` of
+    /// a `<textarea>`, or the `size` of a text `<input>` (which has no fixed number of lines).
     /// <https://html.spec.whatwg.org/multipage/#the-textarea-element-2>
-    fn textarea_cols_and_rows(&self) -> Option<(u32, u32)>;
+    /// <https://html.spec.whatwg.org/multipage/#the-input-element-as-a-text-entry-widget>
+    fn text_control_cols_and_rows(&self) -> Option<(u32, Option<u32>)>;
 
     /// Whether or not this [`LayoutNode`] is in a user agent widget shadow DOM.
     fn is_root_of_user_agent_widget(&self) -> bool;
