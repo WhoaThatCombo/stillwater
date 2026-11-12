@@ -1696,9 +1696,12 @@ impl InitialFlexLineLayout<'_> {
             // 1. If there is only a single item being aligned and alignment is a distributed alignment keyword
             //    https://www.w3.org/TR/css-align-3/#distribution-values
             if item_count <= 1 || free_space_in_main_axis <= Au::zero() {
+                // `stretch` and `space-between` fall back to `safe flex-start` per the issue
+                // above, but Blink overflows them from main-start (an unsafe `flex-start`),
+                // which differs from `start` in reversed containers. Match Blink.
                 (resolved_justify_content, is_safe) = match resolved_justify_content {
-                    AlignFlags::STRETCH => (AlignFlags::FLEX_START, true),
-                    AlignFlags::SPACE_BETWEEN => (AlignFlags::FLEX_START, true),
+                    AlignFlags::STRETCH => (AlignFlags::FLEX_START, false),
+                    AlignFlags::SPACE_BETWEEN => (AlignFlags::FLEX_START, false),
                     AlignFlags::SPACE_AROUND => (AlignFlags::CENTER, true),
                     AlignFlags::SPACE_EVENLY => (AlignFlags::CENTER, true),
                     _ => (resolved_justify_content, is_safe),
