@@ -47,7 +47,9 @@ A common bug swallows reduction: every page that contains it reduces to it. `run
 (or `--mask all`) makes the generator avoid known bugs, and the reducer is forbidden to undo a
 mask. Masks: `writing-mode`, `aspect-ratio`, `svg-ratio` (viewBox-only SVG images),
 `textarea-height` (textareas get a px height), `control-baseline` (controls get
-`vertical-align:top`). They are saved in the run folder's `config.json`, and `reduce`/`one --out`
+`vertical-align:top`), `intrinsic-minmax` (no `min-content`/`max-content`/`fit-content` in
+`min-*`/`max-*`), `empty-table` (the reducer keeps a cell in every table). Choose the masks for
+the bugs that are known and not being fixed; `all` is every one of them. They are saved in the run folder's `config.json`, and `reduce`/`one --out`
 reuse them, so seeds stay reproducible. `reduce --seeds FILE` re-reduces specific seeds.
 
 ## Re-run one seed
@@ -57,7 +59,8 @@ python layoutfuzz.py one --exe $sw --seed 1234 --save seed1234.html   # prints t
 python layoutfuzz.py case --exe $sw seed1234.html other.html           # any hand-written pages
 ```
 
-Hand-written pages should give each element to measure a `data-id` attribute.
+Hand-written pages should give each element to measure a `data-id` attribute. `case` also takes
+folders, standing for the `.html` files in them.
 
 ## Regression suite
 
