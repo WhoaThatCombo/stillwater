@@ -568,6 +568,23 @@ impl FlexContainer {
             depends_on_block_constraints,
         } in item_infos.iter()
         {
+            container_depends_on_block_constraints |= depends_on_block_constraints;
+
+            // The algorithm below follows the spec, but for the block size of a column
+            // container it isn't web compatible: Gecko, Blink and WebKit size the container
+            // to the sum of the items' hypothetical main sizes (their flex base sizes clamped
+            // by their min and max main sizes), so `flex: 1` (a zero basis) contributes
+            // nothing beyond its minimum and `flex-basis: 50px` contributes 50px whatever the
+            // item's `height`. See the notes in WPT's
+            // css/css-flexbox/flex-one-sets-flex-basis-to-zero-px.html.
+            if self.config.flex_axis == FlexAxis::Column {
+                let hypothetical_main_size = outer_flex_base_size
+                    .clamp_between_extremums(*outer_min_main_size, *outer_max_main_size);
+                container_max_content_size += hypothetical_main_size;
+                container_min_content_size += hypothetical_main_size;
+                continue;
+            }
+
             // > 4. Add each item’s flex base size to the product of its flex grow factor (scaled flex shrink
             // > factor, if shrinking) and the chosen flex fraction, then clamp that result by the max main size
             // > floored by the min main size.
@@ -599,8 +616,6 @@ impl FlexContainer {
                 container_min_content_size
                     .max_assign(*min_content_main_size_for_multiline_container);
             }
-
-            container_depends_on_block_constraints |= depends_on_block_constraints;
         }
 
         InlineContentSizesResult {
