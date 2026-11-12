@@ -702,15 +702,16 @@ impl LineItemLayout<'_, '_> {
             self.layout.layout_context.painter_id,
             &self.layout.layout_context.font_context,
         );
-        let ellipsis = matches!(
-            self.layout
-                .containing_block()
-                .style
-                .get_text()
-                .text_overflow
-                .second,
-            TextOverflowSide::Ellipsis
-        )
+        let ellipsis = (self.layout.max_lines.is_some() ||
+            matches!(
+                self.layout
+                    .containing_block()
+                    .style
+                    .get_text()
+                    .text_overflow
+                    .second,
+                TextOverflowSide::Ellipsis
+            ))
         .then(|| {
             let font = &text_item.info.font_info.font;
             let glyph = font.glyph_index('…')?;
@@ -732,6 +733,9 @@ impl LineItemLayout<'_, '_> {
                     character_range_in_dom_node: text_item.character_range_in_dom_node,
                     is_empty_for_text_cursor: text_item.is_empty_for_text_cursor,
                     ellipsis,
+                    clamp_ellipsis: std::sync::atomic::AtomicI32::new(
+                        TextFragment::NO_CLAMP_ELLIPSIS,
+                    ),
                 })),
                 content_rect,
             ));

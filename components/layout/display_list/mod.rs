@@ -1208,13 +1208,18 @@ impl Fragment {
 
         // `text-overflow: ellipsis`: text past the end of its clipping block is not drawn,
         // and the fragment that crosses the edge is cut where the ellipsis still fits.
+        // `line-clamp`: the last text of the line the block was cut at always ends in one,
+        // within the free space that was left on its line.
+        let clamp_edge = fragment
+            .clamp_ellipsis_free_space()
+            .map(|free_space| rect.max_x() + free_space);
         if let (Some(edge), Some((ellipsis_glyph, ellipsis_advance))) =
-            (state.text_overflow_edge, fragment.ellipsis)
+            (clamp_edge.or(state.text_overflow_edge), fragment.ellipsis)
         {
             if rect.origin.x >= edge {
                 return;
             }
-            if rect.max_x() > edge + Au::from_px(1) {
+            if clamp_edge.is_some() || rect.max_x() > edge + Au::from_px(1) {
                 let limit = (edge - ellipsis_advance).to_f32_px();
                 let end_of_text = rect.max_x().to_f32_px();
                 let glyphs = &mut builder.glyph_buffer;

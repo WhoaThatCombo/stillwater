@@ -507,11 +507,11 @@ codegen-units = 1
 # Branch `stillwater` of https://github.com/WhoaThatCombo/stylo, based on the rev pinned above.
 # To work on it locally, point these at a checkout instead: `{ path = "../stylo/style" }` etc.
 [patch."https://github.com/servo/stylo"]
-selectors = { git = "https://github.com/WhoaThatCombo/stylo", rev = "8d18419714dd5cf89842824bc54e785777560ca4" }
-servo_arc = { git = "https://github.com/WhoaThatCombo/stylo", rev = "8d18419714dd5cf89842824bc54e785777560ca4" }
-stylo = { git = "https://github.com/WhoaThatCombo/stylo", rev = "8d18419714dd5cf89842824bc54e785777560ca4" }
-stylo_atoms = { git = "https://github.com/WhoaThatCombo/stylo", rev = "8d18419714dd5cf89842824bc54e785777560ca4" }
-stylo_dom = { git = "https://github.com/WhoaThatCombo/stylo", rev = "8d18419714dd5cf89842824bc54e785777560ca4" }
-stylo_malloc_size_of = { git = "https://github.com/WhoaThatCombo/stylo", rev = "8d18419714dd5cf89842824bc54e785777560ca4" }
-stylo_static_prefs = { git = "https://github.com/WhoaThatCombo/stylo", rev = "8d18419714dd5cf89842824bc54e785777560ca4" }
-stylo_traits = { git = "https://github.com/WhoaThatCombo/stylo", rev = "8d18419714dd5cf89842824bc54e785777560ca4" }
+selectors = { git = "https://github.com/WhoaThatCombo/stylo", rev = "979778360ff7dc086ee70cc99118e2d64f61df52" }
+servo_arc = { git = "https://github.com/WhoaThatCombo/stylo", rev = "979778360ff7dc086ee70cc99118e2d64f61df52" }
+stylo = { git = "https://github.com/WhoaThatCombo/stylo", rev = "979778360ff7dc086ee70cc99118e2d64f61df52" }
+stylo_atoms = { git = "https://github.com/WhoaThatCombo/stylo", rev = "979778360ff7dc086ee70cc99118e2d64f61df52" }
+stylo_dom = { git = "https://github.com/WhoaThatCombo/stylo", rev = "979778360ff7dc086ee70cc99118e2d64f61df52" }
+stylo_malloc_size_of = { git = "https://github.com/WhoaThatCombo/stylo", rev = "979778360ff7dc086ee70cc99118e2d64f61df52" }
+stylo_static_prefs = { git = "https://github.com/WhoaThatCombo/stylo", rev = "979778360ff7dc086ee70cc99118e2d64f61df52" }
+stylo_traits = { git = "https://github.com/WhoaThatCombo/stylo", rev = "979778360ff7dc086ee70cc99118e2d64f61df52" }

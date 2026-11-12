@@ -108,8 +108,13 @@ pub(crate) struct TextFragment {
     /// benefit of placing a text cursor on an otherwise empty editable line.
     pub is_empty_for_text_cursor: bool,
     /// The glyph and advance of the ellipsis character in this fragment's font, when the
-    /// block container of its line has `text-overflow: ellipsis`.
+    /// block container of its line has `text-overflow: ellipsis` or `line-clamp`.
     pub ellipsis: Option<(u32, Au)>,
+    /// Set (to the free space left on the line after this fragment, in app units) on the
+    /// last text of the line a `line-clamp` cut the block at: it always ends in an ellipsis.
+    /// [`TextFragment::NO_CLAMP_ELLIPSIS`] otherwise.
+    #[ignore_malloc_size_of = "plain value"]
+    pub clamp_ellipsis: std::sync::atomic::AtomicI32,
 }
 
 #[derive(MallocSizeOf)]
@@ -442,6 +447,20 @@ impl Fragment {
 }
 
 impl TextFragment {
+    pub(crate) const NO_CLAMP_ELLIPSIS: i32 = i32::MIN;
+
+    /// The free space left on the line after this fragment, if it is the last text of a
+    /// line that `line-clamp` cut the block at.
+    pub(crate) fn clamp_ellipsis_free_space(&self) -> Option<Au> {
+        match self
+            .clamp_ellipsis
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            Self::NO_CLAMP_ELLIPSIS => None,
+            free_space => Some(Au(free_space)),
+        }
+    }
+
     pub(crate) fn style<'a>(&'a self) -> AtomicRef<'a, ServoArc<ComputedValues>> {
         self.run_data.inline_styles.style.borrow()
     }

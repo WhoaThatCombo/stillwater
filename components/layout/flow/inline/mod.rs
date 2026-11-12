@@ -971,6 +971,11 @@ struct InlineContainerState {
 }
 
 struct InlineFormattingContextLayout<'layout_data> {
+    /// `line-clamp` on the block container: the number of lines after which no more are laid
+    /// out.
+    max_lines: Option<u32>,
+    /// The lines (not phantom, not for a block-level box) finished so far.
+    lines_finished: u32,
     positioning_context: &'layout_data mut PositioningContext,
     placement_state: PlacementState<'layout_data>,
     sequential_layout_state: Option<&'layout_data mut SequentialLayoutState>,
@@ -1245,6 +1250,26 @@ impl InlineFormattingContextLayout<'_> {
         last_line_or_forced_line_break: bool,
         for_block_level: bool,
     ) {
+        // `line-clamp`: once the last allowed line is finished, the rest is not laid out.
+        if self
+            .max_lines
+            .is_some_and(|max_lines| self.lines_finished >= max_lines)
+        {
+            let block = self.current_line.start_position.block;
+            let dropped = std::mem::replace(
+                &mut self.current_line,
+                LineUnderConstruction::new(LogicalVec2 {
+                    inline: Au::zero(),
+                    block,
+                }),
+            );
+            self.current_line.for_block_level = for_block_level;
+            self.current_line.cloneable_inline_box_pbm_size = dropped.cloneable_inline_box_pbm_size;
+            return;
+        }
+        // The free space left on this line, for the ellipsis if `line-clamp` cuts here.
+        let free_space_before_trimming = self.available_line_space();
+
         let hanging_white_space = self
             .current_line
             .trim_trailing_white_space_and_calculate_hanging(
@@ -1353,6 +1378,8 @@ impl InlineFormattingContextLayout<'_> {
 
         let baseline_offset = effective_block_advance.find_baseline_offset();
         let start_positioning_context_length = self.positioning_context.len();
+        let line_inline_size = line_to_layout.inline_position;
+        let counts_as_line = !is_phantom_line && !line_to_layout.for_block_level;
         let fragments = LineItemLayout::layout_line_items(
             self,
             line_to_layout.line_items,
@@ -1362,6 +1389,15 @@ impl InlineFormattingContextLayout<'_> {
             is_phantom_line,
             line_to_layout.for_block_level,
         );
+
+        if counts_as_line {
+            self.lines_finished += 1;
+            // More text follows a line that ended in a soft wrap: mark where it was cut.
+            if self.max_lines == Some(self.lines_finished) && !last_line_or_forced_line_break {
+                let free_space = (free_space_before_trimming - line_inline_size).max(Au::zero());
+                mark_clamp_ellipsis(&fragments, free_space);
+            }
+        }
 
         if !is_phantom_line {
             let baseline = baseline_offset + block_start_position;
@@ -2307,6 +2343,14 @@ impl InlineFormattingContext {
             PlacementState::new(collapsible_with_parent_start_margin, containing_block);
 
         let mut layout = InlineFormattingContextLayout {
+            max_lines: containing_block
+                .style
+                .get_box()
+                .line_clamp
+                .max_lines
+                .lines_value()
+                .map(|lines| lines.0.max(1) as u32),
+            lines_finished: 0,
             positioning_context,
             placement_state,
             sequential_layout_state,
@@ -2954,6 +2998,23 @@ impl FloatBox {
             },
         ));
     }
+}
+
+/// Mark the last text fragment of a line as ending in the ellipsis of `line-clamp`. Returns
+/// whether one was found.
+fn mark_clamp_ellipsis(fragments: &[Fragment], free_space: Au) -> bool {
+    fragments.iter().rev().any(|fragment| match fragment {
+        Fragment::Text(text) if !text.glyphs.is_empty() => {
+            text.clamp_ellipsis
+                .store(free_space.0, std::sync::atomic::Ordering::Relaxed);
+            true
+        },
+        Fragment::Box(box_fragment) => mark_clamp_ellipsis(&box_fragment.children, free_space),
+        Fragment::Positioning(positioning) => {
+            mark_clamp_ellipsis(&positioning.children, free_space)
+        },
+        _ => false,
+    })
 }
 
 fn place_pending_floats(ifc: &mut InlineFormattingContextLayout, line_items: &[LineItem]) {

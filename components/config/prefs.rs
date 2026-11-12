@@ -47,6 +47,9 @@ pub fn set(preferences: Preferences) {
     // Stillwater: `text-overflow: ellipsis` is drawn by the display list builder (the end of
     // a line cut off by its block's overflow gets an ellipsis).
     stylo_static_prefs::set_pref!("layout.css.text-overflow.enabled", true);
+    // Stillwater: `line-clamp` / `-webkit-line-clamp` cut a block of text after a number of
+    // lines (inline layout stops there and the last line ends in an ellipsis).
+    stylo_static_prefs::set_pref!("layout.css.line-clamp.enabled", true);
 
     // Get list of changes, returning early if the preferences haven't changed.
     let changed = preferences.diff(&PREFERENCES.read().unwrap());
