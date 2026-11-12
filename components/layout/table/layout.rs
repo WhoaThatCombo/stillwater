@@ -2002,6 +2002,18 @@ impl<'a> TableLayout<'a> {
     ) {
         // The PositioningContext for cells is, in order or preference, the PositioningContext of the row,
         // the PositioningContext of the row group, or the PositioningContext of the table.
+        // The static positions of a cell's absolutely positioned descendants are relative to the
+        // row, so when they go to the row group or the table, they need the row's offset from
+        // that box. (Rows and row groups are positioned relative to the table grid here.)
+        let static_position_offset = if row_fragment_layout.positioning_context.is_some() {
+            LogicalVec2::zero()
+        } else {
+            let row_group_start_corner = row_group_fragment_layout
+                .as_ref()
+                .filter(|layout| layout.positioning_context.is_some())
+                .map_or_else(LogicalVec2::zero, |layout| layout.rect.start_corner);
+            row_fragment_layout.rect.start_corner - row_group_start_corner
+        };
         let row_group_positioning_context =
             row_group_fragment_layout.and_then(|layout| layout.positioning_context.as_mut());
         let positioning_context = row_fragment_layout
@@ -2041,6 +2053,7 @@ impl<'a> TableLayout<'a> {
             cell.colspan,
         );
         row_relative_cell_rect.start_corner -= row_fragment_layout.rect.start_corner;
+        let positioning_context_length = positioning_context.len();
         let mut fragment = cell.create_fragment(
             layout,
             row_relative_cell_rect,
@@ -2050,6 +2063,18 @@ impl<'a> TableLayout<'a> {
             &row_fragment_layout.containing_block,
             is_collapsed,
         );
+        if static_position_offset != LogicalVec2::zero() {
+            // Like `make_relative_to_row_start` below, only the axes are flipped.
+            let offset = if self.table.style.writing_mode.is_horizontal() {
+                PhysicalVec::new(static_position_offset.inline, static_position_offset.block)
+            } else {
+                PhysicalVec::new(static_position_offset.block, static_position_offset.inline)
+            };
+            positioning_context.adjust_static_position_of_hoisted_fragments_with_offset(
+                &offset,
+                positioning_context_length,
+            );
+        }
 
         // Make a table part rectangle relative to the row fragment for the purposes of
         // drawing extra backgrounds.
@@ -2934,8 +2959,7 @@ impl TableSlotCell {
             inline: Au::zero(),
             block: vertical_align_offset,
         };
-        let vertical_align_fragment = PositioningFragment::new_anonymous(
-            cell_style.clone(),
+        let physical_vertical_align_fragment_rect =
             vertical_align_fragment_rect.as_physical(&ContainingBlock {
                 size: ContainingBlockSize {
                     inline: cell_content_rect.size.inline,
@@ -2943,14 +2967,17 @@ impl TableSlotCell {
                     has_quirky_block_size: HasQuirkyBlockSize(false),
                 },
                 style: cell_style,
-            }),
+            });
+        let vertical_align_fragment = PositioningFragment::new_anonymous(
+            cell_style.clone(),
+            physical_vertical_align_fragment_rect,
             layout.layout.fragments,
             false, /* is_line_box */
         );
 
-        // Adjust the static position of all absolute children based on the
-        // final content rect of this fragment. Note that we are not shifting by the position of the
-        // Anonymous fragment we use to shift content to the baseline.
+        // Adjust the static position of all absolute children based on the final content rect
+        // of this fragment, including the shift of the anonymous fragment that aligns the
+        // content vertically: the static position moves with the content (as in Blink).
         //
         // TODO(mrobinson): This is correct for absolutes that are direct children of the table
         // cell, but wrong for absolute fragments that are more deeply nested in the hierarchy of
@@ -2959,7 +2986,8 @@ impl TableSlotCell {
         layout
             .positioning_context
             .adjust_static_position_of_hoisted_fragments_with_offset(
-                &physical_cell_rect.origin.to_vector(),
+                &(physical_cell_rect.origin.to_vector() +
+                    physical_vertical_align_fragment_rect.origin.to_vector()),
                 PositioningContextLength::zero(),
             );
         positioning_context.append(layout.positioning_context);
