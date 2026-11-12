@@ -811,14 +811,22 @@ impl Animation {
         else {
             return;
         };
-        let index = if self.play_state() == AnimationPlayState::Idle {
-            None
-        } else {
-            effect.effect_keyframe_index()
-        };
-        if effect.set_applied_keyframe(index) &&
-            let Some(target) = effect.target()
-        {
+        let play_state = self.play_state();
+        // A paused animation shows the values interpolated at the time it is held at (pages
+        // seek a paused animation and read the computed style back). A running one still
+        // snaps from keyframe to keyframe.
+        let changed = (play_state == AnimationPlayState::Paused)
+            .then(|| effect.set_applied_interpolation())
+            .flatten()
+            .unwrap_or_else(|| {
+                let index = if play_state == AnimationPlayState::Idle {
+                    None
+                } else {
+                    effect.effect_keyframe_index()
+                };
+                effect.set_applied_keyframe(index)
+            });
+        if changed && let Some(target) = effect.target() {
             apply_script_animations_to(cx, &target);
         }
     }

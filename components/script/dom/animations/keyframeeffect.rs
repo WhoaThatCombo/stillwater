@@ -45,13 +45,15 @@ use script_bindings::num::Finite;
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use script_bindings::root::DomRoot;
 use script_bindings::str::DOMString;
-use style::parser::ParserContext;
+use style::parser::{Parse, ParserContext};
 use style::properties::generated::PropertyDeclaration;
 use style::properties::{
     Importance, LonghandId, NonCustomPropertyId, PropertyDeclarationBlock, PropertyId,
     SourcePropertyDeclaration,
 };
 use style::stylesheets::CssRuleType;
+use style::values::generics::easing::BeforeFlag;
+use style::values::specified::TimingFunction;
 use style_traits::{CssWriter, ParsingMode, ToCss};
 
 use crate::css::css::parser_context_for_document;
@@ -90,7 +92,17 @@ pub(crate) struct KeyframeEffect {
 
     /// The keyframe whose values this effect currently applies to its target, if any.
     applied_keyframe: Cell<Option<usize>>,
+
+    /// The interpolated values this effect applies instead while its animation is paused
+    /// (see [`KeyframeEffect::interpolated_declarations`]), and the segment and progress they
+    /// were computed for.
+    #[no_trace]
+    #[ignore_malloc_size_of = "small, and only while an animation is paused"]
+    applied_interpolation: DomRefCell<Option<(InterpolationKey, Vec<PropertyDeclaration>)>>,
 }
+
+/// The starting keyframe and the bits of the progress within its segment.
+type InterpolationKey = (usize, u64);
 
 impl KeyframeEffect {
     pub(crate) fn new_inherited(window: &Window) -> Self {
@@ -100,6 +112,7 @@ impl KeyframeEffect {
             keyframes: Default::default(),
             composite: Cell::new(CompositeOperation::Replace),
             applied_keyframe: Cell::new(None),
+            applied_interpolation: Default::default(),
         }
     }
 
@@ -167,7 +180,152 @@ impl KeyframeEffect {
 
     /// Record which keyframe is applied; returns whether that changed.
     pub(crate) fn set_applied_keyframe(&self, index: Option<usize>) -> bool {
-        self.applied_keyframe.replace(index) != index
+        let had_interpolation = self.applied_interpolation.borrow_mut().take().is_some();
+        (self.applied_keyframe.replace(index) != index) || had_interpolation
+    }
+
+    /// Apply the values interpolated at the effect's current progress (for a paused
+    /// animation, whose values don't change until script seeks it). Returns `None` if they
+    /// can't be interpolated, else whether what is applied changed.
+    pub(crate) fn set_applied_interpolation(&self) -> Option<bool> {
+        let (key, segment) = self.interpolation_segment()?;
+        if self
+            .applied_interpolation
+            .borrow()
+            .as_ref()
+            .is_some_and(|(applied_key, _)| *applied_key == key)
+        {
+            return Some(false);
+        }
+        let declarations = self.interpolated_declarations(segment);
+        *self.applied_interpolation.borrow_mut() = Some((key, declarations));
+        self.applied_keyframe.set(None);
+        Some(true)
+    }
+
+    /// The pair of keyframes the effect is between at its current progress, and the eased
+    /// progress from the first to the second.
+    fn interpolation_segment(&self) -> Option<(InterpolationKey, (usize, usize, f64))> {
+        let state = self.upcast::<AnimationEffect>().calculate_timing();
+        let progress = state.transformed_progress?;
+        let keyframes = self.keyframes.borrow();
+        if keyframes.len() < 2 {
+            return None;
+        }
+        let offsets = compute_missing_keyframe_offsets(&keyframes);
+        let last = offsets.len() - 1;
+        let to = offsets
+            .iter()
+            .position(|offset| *offset > progress)
+            .unwrap_or(last)
+            .max(1);
+        let from = to - 1;
+        let span = offsets[to] - offsets[from];
+        let mut local = if span > 0.0 {
+            (progress - offsets[from]) / span
+        } else {
+            1.0
+        };
+
+        // The easing of the keyframe the segment starts at.
+        let easing = keyframes[from].easing_function.str();
+        if !easing.is_empty() && &*easing != "linear" {
+            let document = self.upcast::<AnimationEffect>().window().Document();
+            let url_data = document.url().into_url().into();
+            let parser_context = parser_context_for_document(
+                &document,
+                CssRuleType::Style,
+                ParsingMode::DEFAULT,
+                &url_data,
+            );
+            let mut parser = Parser::new(&easing);
+            if let Ok(function) = TimingFunction::parse(&parser_context, &mut parser) {
+                local = function
+                    .to_computed_value_without_context()
+                    .calculate_output(local, BeforeFlag::Unset, 1e-7);
+            }
+        }
+        if !local.is_finite() {
+            return None;
+        }
+        Some(((from, local.to_bits()), (from, to, local)))
+    }
+
+    /// The declarations for the values between two keyframes. Stillwater has no access to
+    /// computed animation values here, so each value is written as CSS that computes to the
+    /// interpolated one: colours channel by channel, transform lists function by function,
+    /// anything else numeric with `calc()`. A property that can't be written that way switches
+    /// from one keyframe's value to the other's at the halfway point, like a discrete
+    /// animation.
+    fn interpolated_declarations(
+        &self,
+        (from, to, progress): (usize, usize, f64),
+    ) -> Vec<PropertyDeclaration> {
+        let keyframes = self.keyframes.borrow();
+        let window = self.upcast::<AnimationEffect>().window();
+        let document = window.Document();
+        let url_data = document.url().into_url().into();
+        let mut parser_context = parser_context_for_document(
+            &document,
+            CssRuleType::Style,
+            ParsingMode::DEFAULT,
+            &url_data,
+        );
+        let serialize = |pair: &KeyframePropertyDeclaration| {
+            let mut value = String::new();
+            let mut layout = window.layout_mut();
+            pair.block
+                .single_value_to_css(&pair.property_id, &mut value, None, layout.stylist_mut())
+                .ok()?;
+            Some(value)
+        };
+        let all_of = |pair: &KeyframePropertyDeclaration| {
+            pair.block
+                .declaration_importance_iter()
+                .map(|(declaration, _)| declaration.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let mut declarations = Vec::new();
+        for start in &keyframes[from].declarations {
+            let end = keyframes[to]
+                .declarations
+                .iter()
+                .find(|pair| pair.property_id == start.property_id);
+            let Some(end) = end else {
+                declarations.extend(all_of(start));
+                continue;
+            };
+            let interpolated = (|| {
+                let PropertyId::NonCustom(property) = start.property_id else {
+                    return None;
+                };
+                let (start_value, end_value) = (serialize(start)?, serialize(end)?);
+                let candidates = [
+                    interpolate_transform_css(&start_value, &end_value, progress),
+                    interpolate_color_css(&start_value, &end_value, progress),
+                    Some(interpolate_calc_css(&start_value, &end_value, progress)),
+                ];
+                candidates.into_iter().flatten().find_map(|css| {
+                    parse_single_property_declaration(property, &css, &mut parser_context)
+                })
+            })();
+            match interpolated {
+                Some(pair) => declarations.extend(all_of(&pair)),
+                None if progress < 0.5 => declarations.extend(all_of(start)),
+                None => declarations.extend(all_of(end)),
+            }
+        }
+        for end in &keyframes[to].declarations {
+            if !keyframes[from]
+                .declarations
+                .iter()
+                .any(|pair| pair.property_id == end.property_id)
+            {
+                declarations.extend(all_of(end));
+            }
+        }
+        declarations
     }
 
     /// Forget the applied keyframe, so the next update reapplies it.
@@ -177,6 +335,9 @@ impl KeyframeEffect {
 
     /// The declarations of the keyframe this effect currently applies.
     pub(crate) fn applied_declarations(&self) -> Vec<PropertyDeclaration> {
+        if let Some((_, declarations)) = self.applied_interpolation.borrow().as_ref() {
+            return declarations.clone();
+        }
         let Some(index) = self.applied_keyframe.get() else {
             return Vec::new();
         };
@@ -522,6 +683,129 @@ pub(crate) fn apply_script_animations_to(cx: &mut JSContext, target: &Element) {
         .animation_manager()
         .set_script_animation_declarations(node, declarations);
     node.dirty(cx.no_gc(), NodeDamage::Style);
+}
+
+/// `calc()` weights for a value `progress` of the way from one value to another.
+fn interpolation_weights(progress: f64) -> (String, String) {
+    (format!("{:.12}", 1.0 - progress), format!("{progress:.12}"))
+}
+
+/// CSS for a numeric value (number, length, percentage, angle, time...) between two values.
+fn interpolate_calc_css(start: &str, end: &str, progress: f64) -> String {
+    let (start_weight, end_weight) = interpolation_weights(progress);
+    format!("calc(({start}) * {start_weight} + ({end}) * {end_weight})")
+}
+
+/// The channels of a colour serialized as `rgb(r, g, b)` or `rgba(r, g, b, a)`.
+fn parse_rgb_css(value: &str) -> Option<[f64; 4]> {
+    let value = value.trim();
+    let arguments = value
+        .strip_prefix("rgba(")
+        .or_else(|| value.strip_prefix("rgb("))?
+        .strip_suffix(')')?;
+    let mut channels = arguments
+        .split([',', '/', ' '])
+        .filter(|part| !part.is_empty())
+        .map(|part| part.trim().parse::<f64>().ok());
+    let color = [
+        channels.next()??,
+        channels.next()??,
+        channels.next()??,
+        channels.next().unwrap_or(Some(1.0))?,
+    ];
+    channels.next().is_none().then_some(color)
+}
+
+/// CSS for the colour between two sRGB colours, interpolated with premultiplied alpha.
+/// <https://drafts.csswg.org/css-color-4/#interpolation-alpha>
+fn interpolate_color_css(start: &str, end: &str, progress: f64) -> Option<String> {
+    let (start, end) = (parse_rgb_css(start)?, parse_rgb_css(end)?);
+    let mix = |from: f64, to: f64| from + (to - from) * progress;
+    let alpha = mix(start[3], end[3]).clamp(0.0, 1.0);
+    let channel = |index: usize| {
+        if alpha <= 0.0 {
+            return 0.0;
+        }
+        (mix(start[index] * start[3], end[index] * end[3]) / alpha).clamp(0.0, 255.0)
+    };
+    Some(format!(
+        "rgb({:.6} {:.6} {:.6} / {:.6})",
+        channel(0),
+        channel(1),
+        channel(2),
+        alpha
+    ))
+}
+
+/// The functions of a serialized transform list, as (name, arguments).
+fn parse_transform_css(value: &str) -> Option<Vec<(&str, Vec<&str>)>> {
+    let mut functions = Vec::new();
+    let mut rest = value.trim();
+    while !rest.is_empty() {
+        let open = rest.find('(')?;
+        let name = rest[..open].trim();
+        let mut depth = 0usize;
+        let close = rest[open..].char_indices().find_map(|(index, character)| {
+            match character {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(open + index);
+                    }
+                },
+                _ => {},
+            }
+            None
+        })?;
+        // Arguments are separated by commas at the top level.
+        let mut arguments = Vec::new();
+        let (mut depth, mut start) = (0usize, open + 1);
+        for (index, character) in rest[open + 1..close].char_indices() {
+            match character {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    arguments.push(rest[start..open + 1 + index].trim());
+                    start = open + 2 + index;
+                },
+                _ => {},
+            }
+        }
+        arguments.push(rest[start..close].trim());
+        if name.is_empty() || arguments.iter().any(|argument| argument.is_empty()) {
+            return None;
+        }
+        functions.push((name, arguments));
+        rest = rest[close + 1..].trim_start();
+    }
+    (!functions.is_empty()).then_some(functions)
+}
+
+/// CSS for the transform between two transform lists with the same functions, each argument
+/// interpolated on its own (so `rotate()` turns rather than blending matrices).
+/// <https://drafts.csswg.org/css-transforms-1/#interpolation-of-transforms>
+fn interpolate_transform_css(start: &str, end: &str, progress: f64) -> Option<String> {
+    let (start, end) = (parse_transform_css(start)?, parse_transform_css(end)?);
+    if start.len() != end.len() {
+        return None;
+    }
+    let mut css = String::new();
+    for ((start_name, start_arguments), (end_name, end_arguments)) in start.iter().zip(&end) {
+        if start_name != end_name || start_arguments.len() != end_arguments.len() {
+            return None;
+        }
+        let arguments: Vec<String> = start_arguments
+            .iter()
+            .zip(end_arguments)
+            .map(|(from, to)| interpolate_calc_css(from, to, progress))
+            .collect();
+        if !css.is_empty() {
+            css.push(' ');
+        }
+        css.push_str(&format!("{start_name}({})", arguments.join(", ")));
+    }
+    Some(css)
 }
 
 /// <https://drafts.csswg.org/web-animations-1/#compute-missing-keyframe-offsets>
