@@ -1667,24 +1667,26 @@ impl InitialFlexLineLayout<'_> {
             let mut resolved_justify_content = match justify_content_style.value() {
                 // On the inline axis `left`/`right` are line-left/line-right.
                 // https://drafts.csswg.org/css-align/#valdef-justify-content-left
+                // They don't depend on `flex-direction`, so they map to the
+                // writing-mode-relative `start`/`end`, not to `flex-start`/`flex-end`.
                 AlignFlags::LEFT if inline_axis_is_main_axis => {
                     if line_left_is_inline_start {
-                        AlignFlags::FLEX_START
+                        AlignFlags::START
                     } else {
-                        AlignFlags::FLEX_END
+                        AlignFlags::END
                     }
                 },
                 // https://drafts.csswg.org/css-align/#valdef-justify-content-right
                 AlignFlags::RIGHT if inline_axis_is_main_axis => {
                     if line_left_is_inline_start {
-                        AlignFlags::FLEX_END
+                        AlignFlags::END
                     } else {
-                        AlignFlags::FLEX_START
+                        AlignFlags::START
                     }
                 },
                 // On the block axis these keywords are not parallel with the
                 // left-right axis, so they behave as `start`.
-                AlignFlags::LEFT | AlignFlags::RIGHT => AlignFlags::FLEX_START,
+                AlignFlags::LEFT | AlignFlags::RIGHT => AlignFlags::START,
                 justify_content => justify_content,
             };
             let mut is_safe = justify_content_style.flags() == AlignFlags::SAFE;
@@ -1712,17 +1714,22 @@ impl InitialFlexLineLayout<'_> {
         };
 
         // Implement "unsafe" alignment. "safe" alignment is handled by the fallback process above.
+        //
+        // Positions here are flex-relative: zero is the main-start edge, which for
+        // `row-reverse`/`column-reverse` is the writing mode's end edge. So `flex-start`/
+        // `flex-end` need no adjustment, while `start`/`end` (relative to the writing mode)
+        // swap when the direction is reversed.
         let main_start_position = match resolved_justify_content {
-            AlignFlags::START => Au::zero(),
-            AlignFlags::FLEX_START => {
+            AlignFlags::FLEX_START => Au::zero(),
+            AlignFlags::START => {
                 if flex_context.config.flex_direction_is_reversed {
                     free_space_in_main_axis
                 } else {
                     Au::zero()
                 }
             },
-            AlignFlags::END => free_space_in_main_axis,
-            AlignFlags::FLEX_END => {
+            AlignFlags::FLEX_END => free_space_in_main_axis,
+            AlignFlags::END => {
                 if flex_context.config.flex_direction_is_reversed {
                     Au::zero()
                 } else {
