@@ -132,7 +132,7 @@ class Edge:
         self.stop()
 
     def start(self) -> None:
-        args = [self.exe, "--headless=new", "--remote-debugging-port=0",
+        args = [self.exe, "--headless=new", "--edge-skip-compat-layer-relaunch", "--remote-debugging-port=0",
                 "--remote-debugging-address=127.0.0.1", f"--user-data-dir={self.profile}",
                 "--mute-audio", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check",
                 "--disable-extensions", "--disable-sync", "--disable-background-networking",

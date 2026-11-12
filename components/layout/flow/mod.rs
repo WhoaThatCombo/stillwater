@@ -1698,14 +1698,51 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         ))
     };
     let justify_self = resolve_justify_self(style, containing_block.style, has_inline_parent);
-    let inline_size = content_box_sizes.inline.resolve(
+    // `aspect-ratio` on a non-replaced box with an automatic inline size and a definite block
+    // size: the inline size comes from the block size instead of stretching.
+    // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-automatic>
+    let ratio_for_inline_size = (!is_table &&
+        !context.is_some_and(|context| context.is_replaced()) &&
+        content_box_sizes.inline.preferred.is_initial())
+    .then(|| style.preferred_aspect_ratio(None, &pbm.padding_border_sums))
+    .flatten();
+    let automatic_inline_size = match (ratio_for_inline_size, tentative_block_size) {
+        (Some(ratio), SizeConstraint::Definite(block_size))
+            if matches!(content_box_sizes.block.preferred, Size::Numeric(_)) =>
+        {
+            Size::Numeric(ratio.compute_dependent_size(LogicalAxis::Inline, block_size))
+        },
+        _ => automatic_inline_size(justify_self, context),
+    };
+    let mut inline_size = content_box_sizes.inline.resolve(
         LogicalAxis::Inline,
-        automatic_inline_size(justify_self, context),
+        automatic_inline_size,
         Au::zero,
         inline_stretch_size,
         get_inline_content_sizes,
         is_table,
     );
+    // A minimum or maximum block size is transferred through the ratio to the inline axis
+    // when that axis has no such constraint of its own.
+    // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-size-transfers>
+    if let Some(ratio) = ratio_for_inline_size &&
+        content_box_sizes.block.preferred.is_initial()
+    {
+        if let Size::Numeric(max_block_size) = content_box_sizes.block.max &&
+            content_box_sizes.inline.max.is_initial()
+        {
+            inline_size.min_assign(
+                ratio.compute_dependent_size(LogicalAxis::Inline, max_block_size),
+            );
+        }
+        if let Size::Numeric(min_block_size) = content_box_sizes.block.min &&
+            content_box_sizes.inline.min.is_initial()
+        {
+            inline_size.max_assign(
+                ratio.compute_dependent_size(LogicalAxis::Inline, min_block_size),
+            );
+        }
+    }
 
     // `aspect-ratio` on a non-replaced box with an automatic block size: the block size comes
     // from the inline size, as if it had been specified (so percentages inside resolve against

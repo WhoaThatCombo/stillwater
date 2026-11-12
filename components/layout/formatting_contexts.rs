@@ -11,6 +11,7 @@ use servo_arc::Arc;
 use style::context::SharedStyleContext;
 use style::logical_geometry::LogicalAxis;
 use style::properties::ComputedValues;
+use style::values::generics::font::LineHeight;
 use style::selector_parser::PseudoElement;
 
 use crate::containing_block::{
@@ -301,15 +302,37 @@ impl IndependentFormattingContext {
     /// The natural content size of a text control: `cols` characters wide and, for a
     /// `<textarea>`, `rows` lines tall.
     /// <https://html.spec.whatwg.org/multipage/#textarea-effective-width>
-    fn text_control_natural_size(&self) -> Option<LogicalVec2<Option<Au>>> {
+    fn text_control_natural_size(
+        &self,
+        layout_context: &LayoutContext,
+    ) -> Option<LogicalVec2<Option<Au>>> {
         let (cols, rows) = self.text_control_cols_and_rows?;
-        let font_size = self.style().get_font().font_size.computed_size().px();
+        let font = self.style().get_font();
+        let font_size = font.font_size.computed_size().px();
         // "Converting a character width to pixels", with half the font size as the average
         // advance and the whole of it as the maximum.
         let inline = font_size * 0.5 * (cols.max(1) - 1) as f32 + font_size;
+        // Each row is one line box tall.
+        let block = rows.map(|rows| {
+            let line_height: Au = match font.line_height {
+                LineHeight::Normal => {
+                    let font_context = &layout_context.font_context;
+                    font_context
+                        .font_group(self.style().clone_font())
+                        .first(font_context)
+                        .map_or_else(
+                            || Au::from_f32_px(font_size * 1.2),
+                            |font| font.metrics().line_gap,
+                        )
+                },
+                LineHeight::Number(number) => Au::from_f32_px(font_size * number.0),
+                LineHeight::Length(length) => length.0.into(),
+            };
+            line_height * rows.max(1) as i32
+        });
         Some(LogicalVec2 {
             inline: Some(Au::from_f32_px(inline)),
-            block: rows.map(|rows| Au::from_f32_px(font_size * rows.max(1) as f32)),
+            block,
         })
     }
 
@@ -319,7 +342,7 @@ impl IndependentFormattingContext {
         constraint_space: &ConstraintSpace,
     ) -> InlineContentSizesResult {
         if let Some(inline) = self
-            .text_control_natural_size()
+            .text_control_natural_size(layout_context)
             .and_then(|size| size.inline)
         {
             return InlineContentSizesResult {
@@ -522,7 +545,7 @@ impl IndependentFormattingContext {
                 // A `<textarea>` is as tall as its rows, whatever it holds. Settle that before
                 // the contents are laid out, since that resolves the block size too.
                 let natural_block_size = self
-                    .text_control_natural_size()
+                    .text_control_natural_size(layout_context)
                     .and_then(|size| size.block);
                 if let Some(block_size) = natural_block_size {
                     lazy_block_size.resolve(|| block_size);
