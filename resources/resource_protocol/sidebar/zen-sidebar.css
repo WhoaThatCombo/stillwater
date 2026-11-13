@@ -52,14 +52,14 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --zen-main-browser-background: #1b1b1b;
+    --zen-main-browser-background: #323232;
     --toolbox-textcolor: rgba(255, 255, 255, 0.8);
     --toolbarbutton-background-color-hover: rgba(255, 255, 255, 0.07);
     --toolbarbutton-background-color-active: rgba(255, 255, 255, 0.1);
-    --zen-urlbar-background: rgba(255, 255, 255, 0.06);
-    --zen-urlbar-background-focus: rgb(42, 42, 42);
+    --zen-urlbar-background: rgba(255, 255, 255, 0.09);
+    --zen-urlbar-background-focus: rgb(70, 70, 70);
     --zen-pinned-separator-color: rgba(255, 255, 255, 0.1);
-    --tab-selected-bgcolor: rgba(255, 255, 255, 0.11);
+    --tab-selected-bgcolor: rgba(255, 255, 255, 0.12);
     --tab-selected-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
   }
 }

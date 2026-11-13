@@ -667,7 +667,8 @@ impl Workspaces {
     /// workspace's accent colour.
     pub(crate) fn background(&self, theme: Theme) -> [u8; 3] {
         let (base, amount) = match theme {
-            Theme::Dark => ([27u8, 27, 27], 0.16),
+            // Zen's dark grey (what its Mica backdrop looks like over a dark wallpaper).
+            Theme::Dark => ([50u8, 50, 50], 0.16),
             Theme::Light => ([235u8, 235, 235], 0.22),
         };
         let Some(accent) = self
