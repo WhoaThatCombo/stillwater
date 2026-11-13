@@ -170,6 +170,44 @@
     chain.forEach((e) => describe(e, 1, false));
   }
 
+  // Why the boxes above don't take clicks: the style rules that set pointer-events on the
+  // first of them and its ancestors (selectors are the site's own CSS, not page content).
+  if (skipped.length) {
+    const rules = [];
+    const collect = (list) => {
+      for (const rule of list) {
+        if (rule.cssRules && !rule.selectorText) {
+          try { collect(rule.cssRules); } catch (e) {}
+        } else if (rule.selectorText && rule.style && rule.style.getPropertyValue("pointer-events")) {
+          rules.push(rule);
+        }
+      }
+    };
+    for (const sheet of document.styleSheets) {
+      try { collect(sheet.cssRules); } catch (e) {}
+    }
+    lines.push("", "== pointer-events rules on the first skipped box and its ancestors (innermost first)");
+    const chain = [];
+    for (let e = skipped[0]; e && e !== document.documentElement && chain.length < 30; e = e.parentElement) chain.push(e);
+    for (const element of chain) {
+      const found = [];
+      for (const rule of rules) {
+        let matches = false;
+        try { matches = element.matches(rule.selectorText); } catch (e) {}
+        if (matches) {
+          found.push(rule.selectorText.slice(0, 120) + " { pointer-events: " +
+            rule.style.getPropertyValue("pointer-events") +
+            (rule.style.getPropertyPriority("pointer-events") ? " !important" : "") + " }");
+        }
+      }
+      const inline = element.style && element.style.getPropertyValue("pointer-events");
+      if (inline) found.push("style attribute { pointer-events: " + inline + " }");
+      lines.push("  " + tagOf(element) + " " + rectOf(element) + " computed=" +
+        getComputedStyle(element).getPropertyValue("pointer-events"));
+      for (const line of found) lines.push("      " + line);
+    }
+  }
+
   lines.push("", "== The element under the pointer (marked > above) and its 12 nearest ancestors (outermost first)");
   const chain = [];
   for (let element = target; element && chain.length < 13; element = element.parentElement) chain.push(element);
