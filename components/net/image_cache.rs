@@ -116,6 +116,7 @@ fn decode_bytes_sync(
                 DecodedImage::Vector(VectorImageData {
                     svg_tree: Arc::new(svg_tree),
                     cors_status: cors,
+                    aspect: SvgAspect::of_document(bytes),
                 })
             })
     } else {
@@ -284,6 +285,104 @@ struct VectorImageData {
     #[conditional_malloc_size_of]
     svg_tree: Arc<usvg::Tree>,
     cors_status: CorsStatus,
+    /// The root element's `preserveAspectRatio`, for drawing it at a size of another shape.
+    #[ignore_malloc_size_of = "plain value"]
+    aspect: SvgAspect,
+}
+
+/// The `preserveAspectRatio` of an SVG document's root element: how its picture is fitted into
+/// a viewport of a different shape. resvg's tree has its own size, so this decides the
+/// transform from that size to the size it is drawn at.
+/// <https://svgwg.org/svg2-draft/coords.html#PreserveAspectRatioAttribute>
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SvgAspect {
+    /// `none`: stretch to fill.
+    stretch: bool,
+    /// Alignment in each axis: 0 = min, 0.5 = mid, 1 = max.
+    align: (f32, f32),
+    /// `slice` (cover) rather than `meet` (contain).
+    slice: bool,
+}
+
+impl Default for SvgAspect {
+    fn default() -> Self {
+        Self {
+            stretch: false,
+            align: (0.5, 0.5),
+            slice: false,
+        }
+    }
+}
+
+impl SvgAspect {
+    /// Read from the root `<svg>` tag of a document's source. A document without a `viewBox`
+    /// has no aspect ratio of its own to keep, so it stretches.
+    fn of_document(bytes: &[u8]) -> Self {
+        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(16 * 1024)]);
+        let Some(start) = text.find("<svg") else {
+            return Self::default();
+        };
+        let Some(end) = text[start..].find('>') else {
+            return Self::default();
+        };
+        let tag = &text[start..start + end];
+        let attribute = |name: &str| {
+            let at = tag.find(&format!("{name}="))? + name.len() + 1;
+            let quote = tag[at..].chars().next()?;
+            if quote != '"' && quote != '\'' {
+                return None;
+            }
+            let value = &tag[at + 1..];
+            Some(value[..value.find(quote)?].trim().to_owned())
+        };
+        if attribute("viewBox").is_none() {
+            return Self {
+                stretch: true,
+                ..Self::default()
+            };
+        }
+        let Some(value) = attribute("preserveAspectRatio") else {
+            return Self::default();
+        };
+        let mut parts = value.split_whitespace();
+        let align = parts.next().unwrap_or("xMidYMid");
+        if align == "none" {
+            return Self {
+                stretch: true,
+                ..Self::default()
+            };
+        }
+        let axis = |text: &str| match text {
+            "Min" => 0.0,
+            "Max" => 1.0,
+            _ => 0.5,
+        };
+        let (x, y) = match (align.get(1..4), align.get(5..8)) {
+            (Some(x), Some(y)) => (axis(x), axis(y)),
+            _ => (0.5, 0.5),
+        };
+        Self {
+            stretch: false,
+            align: (x, y),
+            slice: parts.next() == Some("slice"),
+        }
+    }
+
+    /// The transform drawing a picture of `natural` size into a viewport of `target` size.
+    fn transform(&self, natural: (f32, f32), target: (f32, f32)) -> tiny_skia::Transform {
+        let (scale_x, scale_y) = (target.0 / natural.0, target.1 / natural.1);
+        if self.stretch {
+            return tiny_skia::Transform::from_scale(scale_x, scale_y);
+        }
+        let scale = if self.slice {
+            scale_x.max(scale_y)
+        } else {
+            scale_x.min(scale_y)
+        };
+        let offset_x = (target.0 - natural.0 * scale) * self.align.0;
+        let offset_y = (target.1 - natural.1 * scale) * self.align.1;
+        tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, offset_x, offset_y)
+    }
 }
 
 impl std::fmt::Debug for VectorImageData {
@@ -1356,9 +1455,12 @@ impl ImageCache for ImageCacheImpl {
 
         let store = self.store.clone();
         self.thread_pool.spawn(move || {
-            let transform = tiny_skia::Transform::from_scale(
-                tinyskia_requested_size.width() as f32 / natural_size.width() as f32,
-                tinyskia_requested_size.height() as f32 / natural_size.height() as f32,
+            let transform = vector_image.aspect.transform(
+                (natural_size.width() as f32, natural_size.height() as f32),
+                (
+                    tinyskia_requested_size.width() as f32,
+                    tinyskia_requested_size.height() as f32,
+                ),
             );
             let mut pixmap = tiny_skia::Pixmap::new(
                 tinyskia_requested_size.width(),
