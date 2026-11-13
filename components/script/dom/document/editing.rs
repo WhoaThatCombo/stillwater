@@ -28,6 +28,7 @@ use script_bindings::root::DomRoot;
 use script_bindings::str::DOMString;
 use servo_base::generic_channel::GenericCallback;
 use servo_base::text::RangeAny;
+use xml5ever::local_name;
 
 use crate::dom::clipboard::clipboard::may_write_clipboard;
 use crate::dom::clipboardevent::ClipboardEventType;
@@ -38,8 +39,9 @@ use crate::dom::selection_range::{RootedSelectionBoundary, SelectionRange};
 use crate::dom::text_control::TextControlElement;
 use crate::dom::text_input::InputEventType;
 use crate::dom::types::{
-    ClipboardEvent, DataTransfer, Event, EventTarget, HTMLInputElement, HTMLTextAreaElement,
-    MouseEvent, Text, UIEvent,
+    ClipboardEvent, DataTransfer, Element, Event, EventTarget, HTMLButtonElement,
+    HTMLImageElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, MouseEvent, Text,
+    UIEvent,
 };
 use crate::dom::iterators::ShadowIncluding;
 use crate::dom::{CharacterData, Document, Node, NodeTraits};
@@ -529,6 +531,13 @@ impl Document {
             return;
         };
 
+        // Stillwater: like Chrome, a press on an image (it may start a drag) or on a button
+        // or a `<select>` leaves the selection as it is: it neither moves the caret there,
+        // nor selects a "word" on a double click, nor starts (or extends) a drag selection.
+        if press_leaves_selection_alone(&hit_test_result.node) {
+            return;
+        }
+
         // When the hit test cannot find a suitable DOM position for selection, just
         // use the first offset within the target node of the `mousedown` event. This
         // is a reasonable place to start the selection from.
@@ -623,6 +632,21 @@ impl Document {
 
         mouse_event.upcast::<Event>().mark_as_handled();
     }
+}
+
+/// Stillwater: whether a primary press on `node` leaves the page selection alone, as in
+/// Chrome: an image that can be dragged (Chrome only starts a selection on mouse moves that
+/// don't drag it, and dragging images isn't supported here yet), and the contents of a
+/// button or a `<select>`.
+fn press_leaves_selection_alone(node: &Node) -> bool {
+    node.inclusive_ancestors(ShadowIncluding::Yes).any(|ancestor| {
+        if ancestor.is::<HTMLImageElement>() {
+            return ancestor.downcast::<Element>().is_none_or(|element| {
+                element.get_string_attribute(&local_name!("draggable")) != "false"
+            });
+        }
+        ancestor.is::<HTMLButtonElement>() || ancestor.is::<HTMLSelectElement>()
+    })
 }
 
 pub(crate) enum TextControlElementEditingContext {

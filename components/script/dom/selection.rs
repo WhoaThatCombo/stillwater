@@ -1958,22 +1958,36 @@ impl<'no_gc> VisibleSelectionFlagUpdate<'no_gc> {
 
         if let Some(flat_tree_selection) = flat_tree_selection {
             let traversal = flat_tree_selection.traversal();
-            for ancestor in traversal
-                .start
+            // Stillwater: an element is only painted as selected (the tint over an image or
+            // an `<svg>`) when it is wholly inside the selection, as in Chrome. The elements
+            // that contain either end only overlap it: without this, a click on an image or
+            // an inline `<svg>` (a collapsed selection inside it) tinted the whole box.
+            let end_inclusive_ancestors: FxHashSet<_> = traversal
+                .end
                 .node()
-                .ancestors_in_flat_tree_unrooted(no_gc)
-            {
-                update.set(&ancestor, flat_tree_selection);
+                .inclusive_ancestors_in_flat_tree_unrooted(no_gc)
+                .collect();
+            let start_node = UnrootedDom::from_ref(traversal.start.node(), no_gc);
+            let start_is_before = matches!(traversal.start, FlatTreeNodePosition::Before(_));
+            for ancestor in start_node.ancestors_in_flat_tree_unrooted(no_gc) {
+                update.set(&ancestor, flat_tree_selection, false);
             }
             for node in traversal {
-                update.set(&node, flat_tree_selection);
+                let wholly_selected = !end_inclusive_ancestors.contains(&node) &&
+                    (start_is_before || node != start_node);
+                update.set(&node, flat_tree_selection, wholly_selected);
             }
         }
 
         update.finish(document);
     }
 
-    fn set(&mut self, node: &UnrootedDom<'no_gc, Node>, flat_tree_selection: &FlatTreeSelection) {
+    fn set(
+        &mut self,
+        node: &UnrootedDom<'no_gc, Node>,
+        flat_tree_selection: &FlatTreeSelection,
+        wholly_selected: bool,
+    ) {
         if !node.get_flag(NodeFlags::OVERLAPS_DOCUMENT_SELECTION) {
             node.set_flag(NodeFlags::OVERLAPS_DOCUMENT_SELECTION, true);
             debug_assert!(!self.previously_flagged_nodes.contains(node));
@@ -1987,9 +2001,19 @@ impl<'no_gc> VisibleSelectionFlagUpdate<'no_gc> {
         // layout old and are never run again until the selection changes.
         let user_select = node.used_user_select(self.no_gc, &mut self.used_user_select_cache);
         let inhibited = user_select == UsedUserSelect::None;
-        node.set_flag(NodeFlags::SELECTION_INHIBITED, inhibited);
+        // For an element, the flag also means "only partly selected" (see `run`): layout
+        // reads it to decide whether replaced content paints the selection tint.
+        let is_character_data = node.is::<CharacterData>();
+        node.set_flag(
+            NodeFlags::SELECTION_INHIBITED,
+            inhibited || (!is_character_data && !wholly_selected),
+        );
 
-        self.set_node_selection(node, (!inhibited).then_some(flat_tree_selection));
+        if is_character_data {
+            self.set_node_selection(node, (!inhibited).then_some(flat_tree_selection));
+        } else if node.set_element_selection(!inhibited && wholly_selected) {
+            self.needs_new_display_list = true;
+        }
     }
 
     fn clear(&mut self, node: &Node) {
