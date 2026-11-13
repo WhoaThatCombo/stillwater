@@ -177,6 +177,7 @@ use crate::dom::history::History;
 use crate::dom::html::htmlanchorelement::HTMLAnchorElement;
 use crate::dom::html::htmlareaelement::HTMLAreaElement;
 use crate::dom::html::htmlbaseelement::HTMLBaseElement;
+use crate::dom::html::htmlallcollection::HTMLAllCollection;
 use crate::dom::html::htmlcollection::{CollectionFilter, HTMLCollection};
 use crate::dom::html::htmldialogelement::HTMLDialogElement;
 use crate::dom::html::htmlelement::HTMLElement;
@@ -483,6 +484,7 @@ pub(crate) struct Document {
     forms: MutNullableDom<HTMLCollection>,
     scripts: MutNullableDom<HTMLCollection>,
     anchors: MutNullableDom<HTMLCollection>,
+    all: MutNullableDom<HTMLAllCollection>,
     applets: MutNullableDom<HTMLCollection>,
     /// Information about the `<iframes>` in this [`Document`].
     iframes: IFrameCollection,
@@ -4468,6 +4470,7 @@ impl Document {
             forms: Default::default(),
             scripts: Default::default(),
             anchors: Default::default(),
+            all: Default::default(),
             applets: Default::default(),
             iframes: IFrameCollection::new(),
             shared_style_locks,
@@ -7104,6 +7107,12 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
                 element.is::<HTMLScriptElement>()
             })
         })
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-document-all>
+    fn All(&self, cx: &mut JSContext) -> DomRoot<HTMLAllCollection> {
+        self.all
+            .or_init(|| HTMLAllCollection::new(cx, &self.window, self))
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-document-anchors>

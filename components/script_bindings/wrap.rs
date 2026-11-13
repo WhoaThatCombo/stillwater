@@ -98,7 +98,7 @@ unsafe fn wrap_object(
                     handler,
                     Handle::undefined(),
                     canonical_proto.get(),
-                    ptr::null(),
+                    config.class.map_or(ptr::null(), |class| class as *const JSClass),
                     false,
                 ));
             };

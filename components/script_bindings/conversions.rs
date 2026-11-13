@@ -536,7 +536,9 @@ pub fn is_array_like<D: crate::DomTypes>(cx: &mut JSContext, value: HandleValue)
     };
 
     unsafe {
-        // TODO: HTMLAllCollection
+        if root_from_object::<D::HTMLAllCollection>(cx, object).is_ok() {
+            return true;
+        }
         if root_from_object::<D::DOMTokenList>(cx, object).is_ok() {
             return true;
         }

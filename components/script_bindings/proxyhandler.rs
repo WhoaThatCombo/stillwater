@@ -1165,3 +1165,19 @@ pub fn is_platform_object_same_origin(realm: &CurrentRealm, obj: HandleObject) -
 
     result
 }
+
+static HTML_ALL_COLLECTION_CLASS: crate::lock::ThreadUnsafeOnceLock<js::jsapi::JSClass> =
+    crate::lock::ThreadUnsafeOnceLock::new();
+
+/// The proxy class of `HTMLAllCollection` reflectors: SpiderMonkey's default proxy class
+/// plus `JSCLASS_EMULATES_UNDEFINED`, which gives these objects the [[IsHTMLDDA]] internal
+/// slot (<https://tc39.es/ecma262/#sec-IsHTMLDDA-internal-slot>).
+pub(crate) fn html_all_collection_class() -> &'static js::jsapi::JSClass {
+    unsafe {
+        HTML_ALL_COLLECTION_CLASS.get_or_init(|| {
+            let mut class = js::jsapi::ProxyClass;
+            class.flags |= js::jsapi::JSCLASS_EMULATES_UNDEFINED;
+            class
+        })
+    }
+}

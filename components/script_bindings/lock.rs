@@ -30,6 +30,15 @@ impl<T> ThreadUnsafeOnceLock<T> {
     pub unsafe fn get(&self) -> &T {
         self.0.get().unwrap()
     }
+
+    /// Get a reference to the value inside this lock, initializing it first if needed.
+    ///
+    /// # Safety
+    ///   The caller must ensure that it does not mutate value contained inside this lock
+    ///   (using interior mutability).
+    pub unsafe fn get_or_init(&self, init: impl FnOnce() -> T) -> &T {
+        self.0.get_or_init(init)
+    }
 }
 
 unsafe impl<T> Sync for ThreadUnsafeOnceLock<T> {}

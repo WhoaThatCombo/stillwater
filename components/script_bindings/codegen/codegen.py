@@ -3432,7 +3432,13 @@ class CGWrapMethod(CGAbstractMethod):
         prototype_id = f"PrototypeList::ID::{self.descriptor.name}"
         proto_object_fn = "GetProtoObject::<D>"
         if self.descriptor.proxy:
-            c = "None"
+            # HTMLAllCollection is the only interface with [[IsHTMLDDA]]; its reflector needs
+            # a proxy class with JSCLASS_EMULATES_UNDEFINED. This is deliberately not an IDL
+            # extended attribute, so that no other interface can opt into it.
+            if self.descriptor.interface.identifier.name == "HTMLAllCollection":
+                c = "Some(crate::proxyhandler::html_all_collection_class())"
+            else:
+                c = "None"
         else:
             c = "Some(&Class.get().base)"
 

@@ -23,6 +23,7 @@ pub(crate) mod tabular_data;
 pub(crate) use self::tabular_data::*;
 pub(crate) mod textual;
 pub(crate) use self::textual::*;
+pub(crate) mod htmlallcollection;
 pub(crate) mod htmlcollection;
 pub(crate) mod htmlelement;
 pub(crate) mod htmlslotelement;
