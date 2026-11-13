@@ -1113,7 +1113,7 @@ impl Gui {
         state.sync_color_scheme_hint(theme);
         let hidpi_scale = window.platform_window().hidpi_scale_factor();
         self.sidebar.ensure_webview(state, theme, hidpi_scale);
-        load_pending_favicons(window, &mut self.sidebar);
+        load_pending_favicons(window, &mut self.sidebar, hidpi_scale.get());
         self.handle_sidebar_commands(state, window, headed_window);
         let winit_window = headed_window.winit_window();
         {
@@ -1697,7 +1697,12 @@ fn zen_scan(profile: usize) -> serde_json::Value {
 const FAVICON_MAX: u32 = 48;
 
 /// Converts all favicons that have not yet been processed into PNG data URLs for the sidebar.
-fn load_pending_favicons(window: &ServoShellWindow, sidebar: &mut Sidebar) {
+fn load_pending_favicons(window: &ServoShellWindow, sidebar: &mut Sidebar, hidpi_scale: f32) {
+    // Icons are drawn at 16 CSS px in tab rows and 20 in Essentials tiles. The sidebar page
+    // scales an image down with plain bilinear filtering, which turns a 48 px icon shown at
+    // 16 px into a jagged one: resample here, with a good filter, to the device pixels of the
+    // larger use (the small step down to 16 px still filters cleanly).
+    let favicon_max = ((20.0 * hidpi_scale.max(1.0)).round() as u32).clamp(16, FAVICON_MAX);
     for id in window.take_pending_favicon_loads() {
         let Some(webview) = window.webview_by_id(id) else {
             continue;
@@ -1717,10 +1722,15 @@ fn load_pending_favicons(window: &ServoShellWindow, sidebar: &mut Sidebar) {
         // data URL goes into every state push, every sidebar render and the session file
         // (which drops icons over 16 KB): keep at most FAVICON_MAX px a side.
         let (width, height, rgba) = match image::RgbaImage::from_raw(width, height, rgba) {
-            Some(full) if width.max(height) > FAVICON_MAX => {
-                let scale = FAVICON_MAX as f32 / width.max(height) as f32;
+            Some(full) if width.max(height) > favicon_max => {
+                let scale = favicon_max as f32 / width.max(height) as f32;
                 let fit = |side: u32| ((side as f32 * scale).round() as u32).max(1);
-                let small = image::imageops::thumbnail(&full, fit(width), fit(height));
+                let small = image::imageops::resize(
+                    &full,
+                    fit(width),
+                    fit(height),
+                    image::imageops::FilterType::Lanczos3,
+                );
                 (small.width(), small.height(), small.into_raw())
             },
             Some(full) => (width, height, full.into_raw()),

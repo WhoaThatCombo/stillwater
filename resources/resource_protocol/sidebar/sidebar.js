@@ -1169,10 +1169,21 @@ function syncPlaceholder() {
 url.addEventListener("input", syncPlaceholder);
 url.addEventListener("focus", () => {
   urlbar.classList.add("focused");
-  if (urlShowsHost) {
-    showUrlForEditing();
-    if (url.value) url.select();
-  }
+  if (urlShowsHost) showUrlForEditing();
+  if (url.value) url.select();
+});
+// Like Firefox and Zen: the click that focuses the address bar selects all of it (the
+// mouseup of that click would otherwise drop the selection for a caret). Clicks once it has
+// focus place the caret, a double click selects a word, and dragging selects as usual.
+let urlSelectAllOnClick = false;
+url.addEventListener("mousedown", (event) => {
+  urlSelectAllOnClick = event.button === 0 && document.activeElement !== url;
+});
+url.addEventListener("mouseup", () => {
+  if (!urlSelectAllOnClick) return;
+  urlSelectAllOnClick = false;
+  // A drag made its own selection; keep it.
+  if (url.selectionStart === url.selectionEnd) url.select();
 });
 url.addEventListener("blur", () => {
   urlbar.classList.remove("focused");

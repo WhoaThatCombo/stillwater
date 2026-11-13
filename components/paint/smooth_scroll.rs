@@ -27,7 +27,7 @@
 use std::time::{Duration, Instant};
 
 /// How long one notch's animation lasts.
-pub(crate) const NOTCH_DURATION_MS: f32 = 130.0;
+pub(crate) const NOTCH_DURATION_MS: f32 = 110.0;
 
 /// A retarget never makes the curve shorter than this.
 const MIN_DURATION_MS: f32 = 30.0;
