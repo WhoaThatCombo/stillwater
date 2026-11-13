@@ -461,6 +461,9 @@ lto = "thin"
 codegen-units = 1
 
 [patch.crates-io]
+# Stillwater: surfman with DirectComposition window surfaces on Windows (ANGLE's
+# `EGL_ANGLE_direct_composition`) for the Mica window backdrop. See third_party/surfman.
+surfman = { path = "third_party/surfman" }
 # If you need to temporarily test Servo with a local fork of some upstream
 # crate, add that here. Use the form:
 #

@@ -23,6 +23,7 @@ pub(crate) mod event_loop;
 pub(crate) mod find_bar;
 #[cfg(feature = "gamepad")]
 pub(crate) mod gamepad;
+pub(crate) mod glass;
 pub mod geometry;
 mod gui;
 pub(crate) mod headed_window;

@@ -1343,3 +1343,46 @@ body:not(:hover) #urlbar:not(.focused) #key:not(:focus),
 body:not(:hover) #urlbar:not(.focused) #shield:not(:focus) {
   opacity: 0;
 }
+
+/* ---- Glass (Mica) window background (Settings → Appearance → Window background) ----
+   The body's background is the window's translucent tint (state.background), so Windows'
+   blurred wallpaper shows through; Stillwater clears this page's surface to transparent.
+   Like Zen on Windows 11, the selected tab, address bar and Essentials stay a little lighter. */
+:root.glass:not(.incognito) {
+  --tab-selected-bgcolor: rgba(255, 255, 255, 0.6);
+  --zen-urlbar-background: rgba(255, 255, 255, 0.35);
+  --toolbarbutton-background-color-hover: rgba(255, 255, 255, 0.3);
+  --toolbarbutton-background-color-active: rgba(255, 255, 255, 0.45);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root.glass:not(.incognito) {
+    --tab-selected-bgcolor: rgba(255, 255, 255, 0.12);
+    --zen-urlbar-background: rgba(255, 255, 255, 0.08);
+    --toolbarbutton-background-color-hover: rgba(255, 255, 255, 0.07);
+    --toolbarbutton-background-color-active: rgba(255, 255, 255, 0.1);
+  }
+}
+
+/* The opaque fade over long titles would show as a patch on glass: clip them instead. */
+:root.glass .tab-label::after {
+  display: none;
+}
+
+/* Side panels are translucent too, so hide what they cover rather than paint over it. */
+:root.glass .panel {
+  background: transparent;
+}
+
+:root.glass body.panel-open > :not(.panel):not(#menu) {
+  visibility: hidden;
+}
+
+/* The download ring's middle is cut out instead of covered with the sidebar colour. */
+:root.glass .dl-ring::after {
+  display: none;
+}
+
+:root.glass .dl-ring {
+  mask-image: radial-gradient(circle closest-side, transparent calc(100% - 2px), black calc(100% - 2px));
+}

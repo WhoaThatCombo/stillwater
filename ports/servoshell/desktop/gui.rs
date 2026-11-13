@@ -100,6 +100,10 @@ pub struct Gui {
 
     /// Whether the window has been shown yet (it stays hidden until its first frame).
     shown: bool,
+    /// Whether the window has the Mica glass background (see `glass`).
+    glass: bool,
+    /// STILLWATER_GLASS_PROBE: when the window's pixels were last logged (tests).
+    last_probe: Option<std::time::Instant>,
 
     /// Zen's hover-reveal top bar with the window buttons, while it's showing.
     top_bar_rect: Option<egui::Rect>,
@@ -279,6 +283,7 @@ impl Gui {
         rendering_context: Rc<OffscreenRenderingContext>,
         window_rendering_context: Rc<WindowRenderingContext>,
         sidebar: Sidebar,
+        glass: bool,
     ) -> Self {
         rendering_context
             .make_current()
@@ -319,6 +324,8 @@ impl Gui {
             status_text: None,
             pending_accesskit_updates: vec![],
             shown: false,
+            glass,
+            last_probe: None,
             top_bar_rect: None,
             top_bar_zone: None,
             window_rendering_context,
@@ -1222,6 +1229,7 @@ impl Gui {
         headed_window: &headed_window::HeadedWindow,
     ) {
         headed_window.set_theme_override(self.sidebar.theme_override(), window);
+        headed_window.update_glass_theme();
         let theme = headed_window.theme();
         state.sync_color_scheme_hint(theme);
         let hidpi_scale = window.platform_window().hidpi_scale_factor();
@@ -1361,8 +1369,11 @@ impl Gui {
             *content_rect = new_content_rect;
             *split_rect = new_split_rect;
 
-            let [r, g, b] = sidebar.background();
-            let background = Color32::from_rgb(r, g, b);
+            // Glass: a translucent tint over the Mica backdrop (the window is cleared to
+            // transparent first, see `paint`); solid: opaque, as before.
+            let [r, g, b, a] = sidebar.background_rgba();
+            let background = Color32::from_rgba_unmultiplied(r, g, b, a);
+            let glass = sidebar.glass();
             ctx.layer_painter(LayerId::background())
                 .rect_filled(full_rect, 0.0, background);
 
@@ -1498,6 +1509,12 @@ impl Gui {
                 let gap = crate::desktop::sidebar::CONTENT_MARGIN;
                 let painter = ctx.layer_painter(LayerId::new(Order::Middle, Id::new("content-corners")));
                 for rect in [Some(new_content_rect), new_split_rect, *inspector_rect].into_iter().flatten() {
+                    // A translucent stroke would mix with the page and tint the margin twice:
+                    // replace the corner pixels with the tint instead.
+                    if glass {
+                        painter.add(crate::desktop::glass::fill(rect, background, 1.0, Some(CONTENT_RADIUS)));
+                        continue;
+                    }
                     painter.with_clip_rect(rect.expand(gap / 2.0)).rect_stroke(
                         rect.expand(thickness / 2.0),
                         CornerRadius::same((CONTENT_RADIUS + thickness / 2.0) as u8),
@@ -1527,6 +1544,8 @@ impl Gui {
                 let layer = LayerId::new(Order::Foreground, Id::new("glance"));
                 if pane.webview.load_status() != LoadStatus::Started {
                     add_surface(ctx, layer, rect, pane.rendering_context());
+                } else if glass {
+                    ctx.layer_painter(layer).add(crate::desktop::glass::fill(rect, background, 1.0, None));
                 } else {
                     ctx.layer_painter(layer).rect_filled(rect, CornerRadius::ZERO, background);
                 }
@@ -1634,7 +1653,7 @@ impl Gui {
                 *top_bar_zone = frameless.then_some(bar);
             }
             if let Some(bar) = *top_bar_rect {
-                draw_top_bar(ctx, bar, background, theme, headed_window);
+                draw_top_bar(ctx, bar, background, glass, theme, headed_window);
             }
 
             // Paint the sidebar's surface every frame, even while it's collapsed in compact
@@ -1668,7 +1687,7 @@ impl Gui {
 
             // The startup animation covers everything until the browser is ready to be seen.
             if let Some(animation) = splash.as_mut() &&
-                !animation.paint(ctx, full_rect, background, sidebar.is_ready())
+                !animation.paint(ctx, full_rect, background, glass, sidebar.is_ready())
             {
                 *splash = None;
             }
@@ -1706,13 +1725,62 @@ impl Gui {
         self.rendering_context
             .parent_context()
             .prepare_for_rendering();
+        if self.glass {
+            crate::desktop::glass::clear(&self.rendering_context.glow_gl_api());
+        }
         self.context.paint(window);
+        if std::env::var_os("STILLWATER_GLASS_PROBE").is_some() {
+            self.log_glass_probe(window);
+        }
         self.rendering_context.parent_context().present();
         if !self.shown {
             self.shown = true;
             window.set_visible(true);
             crate::desktop::diagnostics::log("first frame painted; window shown");
         }
+    }
+
+    /// Tests (STILLWATER_GLASS_PROBE): log what the window holds, alpha included, at a few
+    /// points (sidebar, margin, page, a page corner), at most once a second. Read from the
+    /// window's back buffer right after egui painted it.
+    fn log_glass_probe(&mut self, window: &Window) {
+        use glow::HasContext as _;
+        let now = std::time::Instant::now();
+        if self.last_probe.is_some_and(|last| now - last < std::time::Duration::from_secs(1)) {
+            return;
+        }
+        self.last_probe = Some(now);
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let (width, height) = (size.width as i32, size.height as i32);
+        let content = self.content_rect;
+        let mut points = vec![("sidebar", 12, height / 2), ("margin", width - 2, height / 2)];
+        if content.is_positive() {
+            let (x0, y0) = ((content.min.x * scale) as i32, (content.min.y * scale) as i32);
+            let (x1, y1) = ((content.max.x * scale) as i32, (content.max.y * scale) as i32);
+            points.push(("page", (x0 + x1) / 2, (y0 + y1) / 2));
+            points.push(("page-edge", (x0 + x1) / 2, y1 - 2));
+            points.push(("corner", x0, y0));
+            points.push(("corner+3", x0 + 3, y0 + 3));
+        }
+        let gl = self.rendering_context.glow_gl_api();
+        let mut text = String::new();
+        for (name, x, y) in points {
+            let mut pixel = [0u8; 4];
+            unsafe {
+                gl.read_pixels(
+                    x,
+                    height - 1 - y,
+                    1,
+                    1,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelPackData::Slice(Some(&mut pixel)),
+                );
+            }
+            text.push_str(&format!(" {name}@{x},{y}={pixel:?}"));
+        }
+        crate::desktop::diagnostics::log(format!("glass probe:{text}"));
     }
 
     fn update_status_text(&mut self, window: &ServoShellWindow) -> bool {
@@ -1906,6 +1974,7 @@ fn draw_top_bar(
     ctx: &egui::Context,
     bar: egui::Rect,
     background: Color32,
+    glass: bool,
     theme: servo::Theme,
     headed_window: &headed_window::HeadedWindow,
 ) {
@@ -1923,7 +1992,12 @@ fn draw_top_bar(
         .fixed_pos(bar.min)
         .show(ctx, |ui| {
             let painter = ui.painter().clone();
-            painter.rect_filled(bar, CornerRadius::ZERO, background);
+            if glass {
+                // Over the page: replace it with the tint rather than mix the two.
+                painter.add(crate::desktop::glass::fill(bar, background, 1.0, None));
+            } else {
+                painter.rect_filled(bar, CornerRadius::ZERO, background);
+            }
 
             // Claim the bar's area so egui reports the pointer as over it.
             let _ = ui.interact(bar, Id::new("top-bar-drag"), egui::Sense::hover());

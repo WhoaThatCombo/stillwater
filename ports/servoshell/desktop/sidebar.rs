@@ -65,7 +65,7 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "import-run", "import-passwords-file", "check-updates",
     "hist-clear", "hist-show", "dl-ask", "dl-panel", "set-spaces", "tr-auto", "tr-target", "tr-unlist",
     "tr-delete-model", "tr-models", "set-splash", "set-scrollbar", "set-preload",
-    "set-smooth-scroll",
+    "set-smooth-scroll", "set-window-background",
 ];
 
 /// Whether `url` is the settings page (whatever category it shows).
@@ -229,6 +229,8 @@ pub(crate) struct Sidebar {
     theme: Theme,
     window_actions: Vec<WindowAction>,
     frameless: bool,
+    /// Whether the window has the Mica glass background (see `glass`).
+    glass: bool,
     maximized: bool,
     update: Option<UpdateInfo>,
     update_status: Option<UpdateStatus>,
@@ -274,8 +276,12 @@ impl Sidebar {
     pub(crate) fn new(
         rendering_context: Rc<OffscreenRenderingContext>,
         waker: RepaintEventLoopWaker,
+        glass: bool,
     ) -> Self {
         let settings = Settings::load();
+        // Glass: the sidebar page's translucent background composites over the window's
+        // backdrop, so Servo clears its surface to transparent rather than to white.
+        rendering_context.set_transparent_background(glass);
         let (workspaces, next_tab_id) = session::load_workspaces();
         Self {
             rendering_context,
@@ -298,6 +304,7 @@ impl Sidebar {
             theme: Theme::Light,
             window_actions: Vec::new(),
             frameless: false,
+            glass,
             maximized: false,
             update: None,
             update_status: None,
@@ -578,6 +585,25 @@ impl Sidebar {
     /// Whether the startup animation is turned on in settings.
     pub(crate) fn startup_animation(&self) -> bool {
         self.settings.borrow().startup_animation
+    }
+
+    /// The window background colour as unmultiplied RGBA: opaque for a solid window,
+    /// translucent over the Mica backdrop for a glass one.
+    pub(crate) fn background_rgba(&self) -> [u8; 4] {
+        let [r, g, b] = self.background();
+        if self.glass {
+            crate::desktop::glass::tint(
+                [r, g, b],
+                self.theme == Theme::Dark,
+                crate::desktop::incognito::active(),
+            )
+        } else {
+            [r, g, b, 255]
+        }
+    }
+
+    pub(crate) fn glass(&self) -> bool {
+        self.glass
     }
 
     /// The window background colour, tinted by the current workspace.
@@ -1038,6 +1064,9 @@ impl Sidebar {
                 "set-splash" => self.settings.borrow_mut().set_startup_animation(argument == "1"),
                 "set-preload" => self.settings.borrow_mut().set_preload_tabs(argument),
                 "set-scrollbar" => self.settings.borrow_mut().set_scrollbar(&argument),
+                "set-window-background" => {
+                    self.settings.borrow_mut().set_window_background(&argument)
+                },
                 "set-smooth-scroll" => self
                     .settings
                     .borrow_mut()
@@ -1343,8 +1372,12 @@ impl Sidebar {
                 TabEntry::Unloaded(key) => tabs.extend(self.workspaces.unloaded_json(key)),
             }
         }
-        let [r, g, b] = self.background();
-        let background = format!("rgb({r}, {g}, {b})");
+        let [r, g, b, a] = self.background_rgba();
+        let background = if a == 255 {
+            format!("rgb({r}, {g}, {b})")
+        } else {
+            format!("rgba({r}, {g}, {b}, {:.3})", a as f32 / 255.0)
+        };
         let state = serde_json::json!({
             "tabs": tabs,
             "essentials": self.workspaces.essentials_json(window, active_id),
@@ -1370,6 +1403,7 @@ impl Sidebar {
             "workspaces": self.workspaces.to_json(),
             "background": background,
             "frameless": self.frameless,
+            "glass": self.glass,
             "settings": self.settings.borrow().to_json(),
             "updateCheck": self.update_check,
             "maximized": self.maximized,

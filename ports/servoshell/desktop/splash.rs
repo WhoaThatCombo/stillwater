@@ -77,6 +77,7 @@ impl Splash {
         ctx: &egui::Context,
         rect: Rect,
         background: Color32,
+        glass: bool,
         ready: bool,
     ) -> bool {
         let now = Instant::now();
@@ -110,12 +111,19 @@ impl Splash {
             return false;
         }
 
-        let dark = luminance(background) < 0.5;
+        let [r, g, b, _] = background.to_srgba_unmultiplied();
+        let dark = luminance(Color32::from_rgb(r, g, b)) < 0.5;
         let ink = if dark { Color32::from_rgb(236, 238, 245) } else { Color32::from_rgb(28, 30, 38) };
         let under_wave = if dark { Color32::from_rgb(120, 130, 150) } else { Color32::from_rgb(150, 158, 176) };
 
         let painter = ctx.layer_painter(LayerId::new(Order::Debug, Id::new("startup-animation")));
-        painter.rect_filled(rect, 0.0, fade(background, cover));
+        if glass {
+            // Glass: hide what is behind by replacing it with the translucent tint (blending
+            // the tint over it would let the page show through).
+            painter.add(crate::desktop::glass::fill(rect, background, cover, None));
+        } else {
+            painter.rect_filled(rect, 0.0, fade(background, cover));
+        }
 
         // Sized from the window, so it sits right in a small window and a maximised one.
         let unit = (rect.width().min(rect.height()) / 6.5).clamp(40.0, 120.0);

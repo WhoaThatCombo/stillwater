@@ -164,7 +164,22 @@ pub(crate) struct Settings {
     pub(crate) smooth_scroll: bool,
     /// Width of the docked sidebar in device-independent pixels (dragged by its right edge).
     pub(crate) sidebar_width: f32,
+    /// "glass" (Mica) or "solid" window background, as chosen; `None` is the default for this
+    /// Windows (see `glass::wanted`). New windows read it.
+    window_background: Option<&'static str>,
     path: Option<PathBuf>,
+}
+
+/// The window background saved in settings ("glass" or "solid"), if one was chosen. Read
+/// before a window is created, when no `Settings` exists yet.
+pub(crate) fn saved_window_background() -> Option<&'static str> {
+    let path = config_dir()?.join("stillwater-settings.json");
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    window_background_from_id(saved["windowBackground"].as_str()?)
+}
+
+fn window_background_from_id(id: &str) -> Option<&'static str> {
+    ["glass", "solid"].into_iter().find(|choice| *choice == id)
 }
 
 impl Settings {
@@ -210,6 +225,9 @@ impl Settings {
                 .map(|width| width as f32)
                 .filter(|width| width.is_finite())
                 .unwrap_or(crate::desktop::sidebar::SIDEBAR_WIDTH),
+            window_background: saved["windowBackground"]
+                .as_str()
+                .and_then(window_background_from_id),
             // Incognito reads the settings but never saves changes (they last for the session).
             path: path.filter(|_| !crate::desktop::incognito::active()),
         };
@@ -237,6 +255,7 @@ impl Settings {
             "scrollbar": self.scrollbar.id(),
             "smoothScroll": self.smooth_scroll,
             "sidebarWidth": self.sidebar_width,
+            "windowBackground": self.window_background,
         });
         let result = path
             .parent()
@@ -343,6 +362,14 @@ impl Settings {
         self.save();
     }
 
+    /// "glass" or "solid", for windows opened from now on.
+    pub(crate) fn set_window_background(&mut self, id: &str) {
+        if let Some(choice) = window_background_from_id(id) {
+            self.window_background = Some(choice);
+            self.save();
+        }
+    }
+
     pub(crate) fn set_new_tab_bar(&mut self, enabled: bool) {
         self.new_tab_bar = enabled;
         self.save();
@@ -367,6 +394,10 @@ impl Settings {
             "preloadTabs": self.preload_tabs.id(),
             "scrollbar": self.scrollbar.id(),
             "smoothScroll": self.smooth_scroll,
+            "windowBackground": self.window_background.unwrap_or(
+                if crate::desktop::glass::supported() { "glass" } else { "solid" },
+            ),
+            "glassSupported": crate::desktop::glass::supported(),
             "version": crate::desktop::updater::CURRENT_VERSION,
         })
     }

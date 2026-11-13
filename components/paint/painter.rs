@@ -553,6 +553,11 @@ impl Painter {
     /// longer gets a white band, and the `shell_background_color_rgba` default (white, which is
     /// also what a page with a transparent canvas shows) otherwise.
     fn clear_color(&self) -> ColorF {
+        // Stillwater: a transparent context (the glass sidebar) takes its whole background,
+        // translucent or not, from what the page paints.
+        if self.rendering_context.transparent_background() {
+            return ColorF::TRANSPARENT;
+        }
         let default = servo_config::pref!(shell_background_color_rgba);
         let default = ColorF::new(
             default[0] as f32,

@@ -85,6 +85,12 @@ pub trait RenderingContext {
     fn refresh_driver(&self) -> Option<Rc<dyn RefreshDriver>> {
         None
     }
+    /// Stillwater: whether Servo clears this context to transparent instead of the shell
+    /// background colour (and ignores the page's canvas colour for the clear), so a page with
+    /// a translucent background composites as premultiplied alpha (the glass sidebar).
+    fn transparent_background(&self) -> bool {
+        false
+    }
 }
 
 /// A rendering context that uses the Surfman library to create and manage
@@ -739,6 +745,7 @@ pub struct OffscreenRenderingContext {
     parent_context: Rc<WindowRenderingContext>,
     size: Cell<PhysicalSize<u32>>,
     framebuffer: RefCell<Framebuffer>,
+    transparent_background: Cell<bool>,
 }
 
 type RenderToParentCallback = Box<dyn Fn(&glow::Context, Rect<i32>) + Send + Sync>;
@@ -755,11 +762,17 @@ impl OffscreenRenderingContext {
             parent_context,
             size: Cell::new(size),
             framebuffer,
+            transparent_background: Cell::new(false),
         }
     }
 
     pub fn parent_context(&self) -> &WindowRenderingContext {
         &self.parent_context
+    }
+
+    /// Stillwater: see [`RenderingContext::transparent_background`].
+    pub fn set_transparent_background(&self, transparent: bool) {
+        self.transparent_background.set(transparent);
     }
 
     pub fn render_to_parent_callback(&self) -> Option<RenderToParentCallback> {
@@ -906,6 +919,10 @@ impl RenderingContext for OffscreenRenderingContext {
 
     fn refresh_driver(&self) -> Option<Rc<dyn RefreshDriver>> {
         self.parent_context().refresh_driver()
+    }
+
+    fn transparent_background(&self) -> bool {
+        self.transparent_background.get()
     }
 }
 
