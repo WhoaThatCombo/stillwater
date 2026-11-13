@@ -95,6 +95,7 @@ wireChoices($("startup"), (value) => send("session-startup", value));
 wireChoices($("preload"), (value) => send("set-preload", value));
 wireChoices($("newtab"), (value) => send("set-newtab", value));
 wireChoices($("scrollbar"), (value) => send("set-scrollbar", value));
+wireChoices($("window-background"), (value) => send("set-window-background", value));
 $("smooth-scroll").addEventListener("click", () => send("set-smooth-scroll", state.settings && state.settings.smoothScroll === false ? "1" : "0"));
 $("compact").addEventListener("click", () => send("toggle-compact"));
 $("lowmem").addEventListener("click", () => send("set-unload-low-memory", state.settings && state.settings.unloadOnLowMemory ? "0" : "1"));
@@ -109,6 +110,10 @@ function renderGeneral() {
   markChoices($("preload"), settings.preloadTabs || "all");
   markChoices($("newtab"), settings.newTabBar === false ? "0" : "1");
   markChoices($("scrollbar"), settings.scrollbar || "auto");
+  markChoices($("window-background"), settings.windowBackground || "solid");
+  if (settings.glassSupported === false) {
+    $("glass-hint").textContent = "Glass needs Windows 11 version 22H2 or later; this window stays solid. Changes apply to windows opened afterwards.";
+  }
   pressed($("smooth-scroll"), settings.smoothScroll !== false);
   pressed($("compact"), state.compact);
   choices($("engines"), (settings.searchEngines || []).map((engine) => ({ label: engine.name, value: engine.id })),

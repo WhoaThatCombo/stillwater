@@ -1014,6 +1014,7 @@ function revealActiveRow() {
 function render() {
   // Before the colours are worked out (renderWorkspaces): incognito has its own.
   document.documentElement.classList.toggle("incognito", !!state.incognito);
+  document.documentElement.classList.toggle("glass", !!state.glass);
   $("incognito-badge").hidden = !state.incognito;
   fitIncognitoBadge();
   renderCompare();
@@ -1353,3 +1354,8 @@ document.addEventListener("keydown", (event) => {
 });
 
 send("ready");
+
+// Glass: an open side panel hides what it covers (zen-sidebar.css), as it can't paint over it.
+new MutationObserver(() => {
+  document.body.classList.toggle("panel-open", !!document.querySelector(".panel:not([hidden])"));
+}).observe(document.body, { subtree: true, attributes: true, attributeFilter: ["hidden"] });

@@ -125,6 +125,12 @@ pub struct HeadedWindow {
     last_top_bar_press: Cell<Option<std::time::Instant>>,
     /// Light/dark chosen in Stillwater's settings; `None` follows Windows.
     theme_override: Cell<Option<Theme>>,
+    /// Whether this window has the Mica glass background (see `glass`), and the light/dark
+    /// Mica last asked of DWM.
+    glass: bool,
+    glass_dark: Cell<Option<bool>>,
+    /// A redraw was asked for (`request_redraw`) since the last paint.
+    redraw_wanted: Cell<bool>,
     /// Mouse buttons pressed on the page whose release the page hasn't seen yet. The release
     /// always goes to the page, wherever the cursor is, and is synthesized when the window
     /// loses focus first (Alt+Tab mid-press: Windows gives the release to the other app), so
@@ -203,6 +209,8 @@ impl HeadedWindow {
     ) -> Rc<Self> {
         let no_native_titlebar = servoshell_preferences.no_native_titlebar;
         let inner_size = servoshell_preferences.initial_window_size;
+        // Glass (Mica) needs the frameless window: the backdrop fills its whole client area.
+        let glass = no_native_titlebar && crate::desktop::glass::wanted();
         let window_attr = winit::window::Window::default_attributes()
             .with_title(crate::desktop::incognito::app_name().to_string())
             .with_decorations(!no_native_titlebar)
@@ -225,6 +233,9 @@ impl HeadedWindow {
             window_attr
                 .with_undecorated_shadow(true)
                 .with_skip_taskbar(background_window())
+                // Glass: no GDI redirection surface, so the GL surface presents through
+                // DirectComposition with alpha (third_party/surfman) over DWM's backdrop.
+                .with_no_redirection_bitmap(glass)
         };
         // Automated tests: open off-screen and never take focus from what the user is doing.
         let window_attr = if background_window() {
@@ -256,6 +267,11 @@ impl HeadedWindow {
         HeadedWindow::force_srgb_color_space(window_handle.as_raw());
         if no_native_titlebar {
             round_window_corners(window_handle.as_raw());
+        }
+        #[cfg(target_os = "windows")]
+        if glass && let RawWindowHandle::Win32(handle) = window_handle.as_raw() {
+            let dark = winit_window.theme() == Some(winit::window::Theme::Dark);
+            crate::desktop::glass::enable_backdrop(handle.hwnd.get(), dark);
         }
 
         let monitor = winit_window
@@ -318,6 +334,7 @@ impl HeadedWindow {
         let sidebar = Sidebar::new(
             Rc::new(window_rendering_context.offscreen_context(inner_size)),
             RepaintEventLoopWaker::new(event_loop_proxy.clone(), window_id.into()),
+            glass,
         );
         let gui = RefCell::new(Gui::new(
             &winit_window,
@@ -326,7 +343,17 @@ impl HeadedWindow {
             rendering_context.clone(),
             window_rendering_context.clone(),
             sidebar,
+            glass,
         ));
+        #[cfg(target_os = "windows")]
+        if glass && let RawWindowHandle::Win32(handle) = winit_window.window_handle().expect("window handle").as_raw() {
+            crate::desktop::diagnostics::log(format!(
+                "glass: window background is Mica glass ({})",
+                crate::desktop::glass::describe(handle.hwnd.get())
+            ));
+        } else {
+            crate::desktop::diagnostics::log("glass: window background is solid");
+        }
 
         debug!("Created window {:?}", winit_window.id());
         Rc::new(HeadedWindow {
@@ -360,6 +387,9 @@ impl HeadedWindow {
             switch_wait: Cell::new(None),
             last_top_bar_press: Cell::new(None),
             theme_override: Cell::new(None),
+            glass,
+            glass_dark: Cell::new(None),
+            redraw_wanted: Cell::new(false),
             page_buttons_held: Default::default(),
             pane_buttons_held: Default::default(),
             sidebar_resize_grab: Cell::new(None),
@@ -376,6 +406,34 @@ impl HeadedWindow {
 
     pub(crate) fn winit_window(&self) -> &winit::window::Window {
         &self.winit_window
+    }
+
+    /// Ask winit for a paint message (RedrawRequested).
+    fn request_redraw(&self) {
+        self.redraw_wanted.set(true);
+        self.winit_window.request_redraw();
+    }
+
+    /// Match the Mica backdrop's light or dark tint to Stillwater's theme.
+    pub(crate) fn update_glass_theme(&self) {
+        if !self.glass {
+            return;
+        }
+        let dark = self.theme() == Theme::Dark;
+        if self.glass_dark.replace(Some(dark)) == Some(dark) {
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        if let Ok(handle) = self.winit_window.window_handle() &&
+            let RawWindowHandle::Win32(handle) = handle.as_raw()
+        {
+            crate::desktop::glass::set_dark(handle.hwnd.get(), dark);
+            crate::desktop::diagnostics::log(format!(
+                "glass: {} Mica ({})",
+                if dark { "dark" } else { "light" },
+                crate::desktop::glass::describe(handle.hwnd.get())
+            ));
+        }
     }
 
     /// Paint now if a repaint is pending and the window hasn't been painted for a few
@@ -441,7 +499,8 @@ impl HeadedWindow {
         for (_, webview) in window.webviews() {
             webview.notify_theme_change(effective);
         }
-        self.winit_window.request_redraw();
+        self.update_glass_theme();
+        self.request_redraw();
     }
 
     /// How long a frame lasts on the monitor the window is on (its refresh rate: 60 Hz, 144 Hz,
@@ -541,7 +600,7 @@ impl HeadedWindow {
     /// Change the sidebar's state from outside a UI update (e.g. updater progress).
     pub(crate) fn with_sidebar(&self, change: impl FnOnce(&mut crate::desktop::sidebar::Sidebar)) {
         change(&mut self.gui.borrow_mut().sidebar);
-        self.winit_window.request_redraw();
+        self.request_redraw();
     }
 
     /// Restore and focus the window (e.g. when another launch handed us a link).
@@ -797,7 +856,7 @@ impl HeadedWindow {
     fn inspector_request(&self, window: &ServoShellWindow, request: crate::desktop::inspector::Request) {
         crate::desktop::inspector::request(request);
         window.set_needs_update();
-        self.winit_window.request_redraw();
+        self.request_redraw();
     }
 
     /// Resize the inspector by dragging the gap between it and the page. Returns true if the
@@ -815,7 +874,7 @@ impl HeadedWindow {
                     let moved = if bottom { point.y - start.y } else { point.x - start.x };
                     crate::desktop::inspector::set_size(size - moved);
                     window.set_needs_update();
-                    self.winit_window.request_redraw();
+                    self.request_redraw();
                     return true;
                 }
                 let gui = self.gui.borrow();
@@ -880,7 +939,7 @@ impl HeadedWindow {
                     if self.gui.borrow().sidebar.drag_width(point.x - grab, window_width) {
                         // The page and sidebar resize on the next frame (see Gui::update).
                         window.set_needs_update();
-                        self.winit_window.request_redraw();
+                        self.request_redraw();
                     }
                     return true;
                 }
@@ -938,7 +997,7 @@ impl HeadedWindow {
                     self.last_sidebar_handle_press.set(None);
                     gui.sidebar.reset_width();
                     window.set_needs_update();
-                    self.winit_window.request_redraw();
+                    self.request_redraw();
                 } else if let Some(point) = self.last_mouse_position.get() {
                     let edge = gui.sidebar.width_for(window_width);
                     self.sidebar_resize_grab.set(Some(point.x - edge));
@@ -1012,7 +1071,7 @@ impl HeadedWindow {
             },
             WindowEvent::CursorLeft { .. } if !bars.captured() => {
                 if bars.pointer_left() {
-                    self.winit_window.request_redraw();
+                    self.request_redraw();
                 }
                 false
             },
@@ -1026,13 +1085,13 @@ impl HeadedWindow {
                 }
                 if !bars.captured() && !self.scrollbar_may_take(&gui, window, point) {
                     if bars.pointer_left() {
-                        self.winit_window.request_redraw();
+                        self.request_redraw();
                     }
                     return false;
                 }
                 let moved = bars.pointer_moved([point.x, point.y]);
                 if moved.redraw {
-                    self.winit_window.request_redraw();
+                    self.request_redraw();
                 }
                 if let Some(page) = moved.left_page {
                     page.notify_input_event(InputEvent::MouseLeftViewport(
@@ -1055,7 +1114,7 @@ impl HeadedWindow {
             } if bars.captured() => {
                 if *button == MouseButton::Left {
                     bars.released();
-                    self.winit_window.request_redraw();
+                    self.request_redraw();
                 }
                 true
             },
@@ -1079,7 +1138,7 @@ impl HeadedWindow {
                 }
                 if bars.pressed([point.x, point.y]) {
                     diagnostics::log(format!("click: scrollbar at {point:?}"));
-                    self.winit_window.request_redraw();
+                    self.request_redraw();
                     return true;
                 }
                 false
@@ -1156,7 +1215,7 @@ impl HeadedWindow {
         gui.sidebar.set_focused(false, window);
         gui.find_bar.handle(command);
         window.set_needs_update();
-        self.winit_window.request_redraw();
+        self.request_redraw();
     }
 
     /// Handle key events before sending them to Servo.
@@ -1291,7 +1350,7 @@ impl HeadedWindow {
             .shortcut(Modifiers::CONTROL | Modifiers::ALT, 'C', || {
                 self.gui.borrow().sidebar.toggle_compact();
                 window.set_needs_update();
-                self.winit_window.request_redraw();
+                self.request_redraw();
             })
             .otherwise(|| handled = false);
         handled
@@ -1784,7 +1843,18 @@ impl HeadedWindow {
 
         // If requested to redraw or resized, repaint as soon as possible, so that new buffer
         // contents are available to the window manager.
-        if event == WindowEvent::RedrawRequested && !resized && self.waiting_for_switched_tab(&window)
+        // Glass: a paint message that nothing asked for since the last paint (the repaint it
+        // came for was already painted by `redraw_if_pending`) would draw the same frame again;
+        // the composition swap chain keeps showing the last one. A solid window paints anyway,
+        // as before (its presents wait for the display, which spaces these out).
+        let redundant = self.glass &&
+            event == WindowEvent::RedrawRequested &&
+            !resized &&
+            !self.repaint_pending.get() &&
+            !self.redraw_wanted.get();
+        if redundant {
+            diagnostics::count("redraw_skipped");
+        } else if event == WindowEvent::RedrawRequested && !resized && self.waiting_for_switched_tab(&window)
         {
             // Painted once the new tab's frame is ready (its notification asks for a repaint)
             // or the wait is over (the event loop wakes up then: `switch_wait_deadline`).
@@ -1792,6 +1862,7 @@ impl HeadedWindow {
         } else if event == WindowEvent::RedrawRequested || resized {
             let frame_start = std::time::Instant::now();
             self.repaint_pending.set(false);
+            self.redraw_wanted.set(false);
             self.last_paint.set(Some(frame_start));
             self.switch_wait.set(None);
             let mut gui = self.gui.borrow_mut();
@@ -1914,7 +1985,7 @@ impl HeadedWindow {
             let point = winit_position_to_euclid_point(*position).to_f32() / self.hidpi_scale_factor();
             if self.gui.borrow().sidebar.update_peek(point) {
                 window.set_needs_update();
-                self.winit_window.request_redraw();
+                self.request_redraw();
             }
         }
 
@@ -1937,7 +2008,7 @@ impl HeadedWindow {
                         // frame to show it.
                         let response = self.gui.borrow_mut().on_window_event(&self.winit_window, &event);
                         if response.repaint {
-                            self.winit_window.request_redraw();
+                            self.request_redraw();
                         }
                         return;
                     }
@@ -2044,7 +2115,7 @@ impl HeadedWindow {
 
                 // Request a winit redraw event, so we can recomposite, update and paint
                 // the GUI, and present the new frame.
-                self.winit_window.request_redraw();
+                self.request_redraw();
             },
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -2104,7 +2175,7 @@ impl HeadedWindow {
                     _ => response.repaint,
                 };
                 if repaint && *event != WindowEvent::RedrawRequested {
-                    self.winit_window.request_redraw();
+                    self.request_redraw();
                 }
 
                 if let WindowEvent::Focused(focused) = event {
@@ -2188,6 +2259,7 @@ impl HeadedWindow {
                     for (_, webview) in window.webviews() {
                         webview.notify_theme_change(theme);
                     }
+                    self.update_glass_theme();
                 },
                 WindowEvent::Ime(ime) => match ime {
                     Ime::Enabled => {
@@ -2271,7 +2343,7 @@ impl HeadedWindow {
                 .borrow_mut()
                 .handle_accesskit_event(&event.window_event)
             {
-                self.winit_window.request_redraw();
+                self.request_redraw();
             }
         }
     }
@@ -2355,7 +2427,7 @@ impl PlatformWindow for HeadedWindow {
 
     fn request_repaint(&self, _: &ServoShellWindow) {
         self.repaint_pending.set(true);
-        self.winit_window.request_redraw();
+        self.request_redraw();
     }
 
     fn request_resize(&self, _: &WebView, new_outer_size: DeviceIntSize) -> Option<DeviceIntSize> {
