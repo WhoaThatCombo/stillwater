@@ -1328,3 +1328,18 @@ body.no-spaces #ws-delete {
     --zen-urlbar-background: rgba(205, 180, 255, 0.08);
   }
 }
+
+/* Like Zen: the address bar's page buttons (bookmark, saved passwords, ad blocking) fade out
+   while the pointer isn't over the sidebar, and come back on hover, when the address bar is
+   focused, or when one of them has keyboard focus. */
+#star,
+#key,
+#shield {
+  transition: opacity 0.15s ease;
+}
+
+body:not(:hover) #urlbar:not(.focused) #star:not(:focus),
+body:not(:hover) #urlbar:not(.focused) #key:not(:focus),
+body:not(:hover) #urlbar:not(.focused) #shield:not(:focus) {
+  opacity: 0;
+}

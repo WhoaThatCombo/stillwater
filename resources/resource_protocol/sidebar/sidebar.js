@@ -1060,8 +1060,10 @@ function hostForDisplay(text) {
     return text;
   }
   if (!parsed.host) return text;
-  if (parsed.protocol === "https:") return parsed.host;
-  if (parsed.protocol === "http:") return `http://${parsed.host}`;
+  // Like Zen, a leading `www.` is left out too (it never decides which site this is).
+  const host = parsed.host.replace(/^www\.(?=[^.]+\.[^.])/i, "");
+  if (parsed.protocol === "https:") return host;
+  if (parsed.protocol === "http:") return `http://${host}`;
   return text;
 }
 
