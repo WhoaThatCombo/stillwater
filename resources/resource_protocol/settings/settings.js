@@ -64,6 +64,8 @@ function pressed(element, on) {
   element.setAttribute("aria-pressed", String(!!on));
 }
 function choices(container, items, current, onPick) {
+  // Rebuilding the buttons would drop keyboard focus; put it back on the same one.
+  const focused = [...container.children].indexOf(document.activeElement);
   container.replaceChildren(...items.map((item) => {
     const button = document.createElement("button");
     button.textContent = item.label;
@@ -76,6 +78,7 @@ function choices(container, items, current, onPick) {
     button.addEventListener("click", () => onPick(item.value));
     return button;
   }));
+  if (focused >= 0 && container.children[focused]) container.children[focused].focus({ preventScroll: true });
 }
 function wireChoices(container, onPick) {
   container.querySelectorAll("button").forEach((button) => button.addEventListener("click", () => onPick(button.dataset.value)));
@@ -179,8 +182,9 @@ $("login-search").addEventListener("input", renderLogins);
 
 function flash(button, text) {
   const original = button.textContent;
+  button.style.minWidth = `${button.offsetWidth}px`;
   button.textContent = text;
-  setTimeout(() => { button.textContent = original; }, 1200);
+  setTimeout(() => { button.textContent = original; button.style.minWidth = ""; }, 1200);
 }
 function loginRow(login) {
   const row = document.createElement("div");
@@ -237,7 +241,13 @@ function renderLogins() {
   const query = $("login-search").value.trim().toLowerCase();
   const list = (data.list || []).filter((login) =>
     !query || login.host.toLowerCase().includes(query) || login.username.toLowerCase().includes(query));
+  // Rebuilding the rows drops keyboard focus; put it back on the same row and button.
+  const held = document.activeElement && document.activeElement.closest ? document.activeElement.closest(".login") : null;
+  const heldRow = held && held.parentNode === $("logins") ? [...$("logins").children].indexOf(held) : -1;
+  const heldButton = heldRow >= 0 ? [...held.querySelectorAll("button")].indexOf(document.activeElement) : -1;
   $("logins").replaceChildren(...list.map(loginRow));
+  const back = heldRow >= 0 && $("logins").children[heldRow] && $("logins").children[heldRow].querySelectorAll("button")[heldButton];
+  if (back) back.focus({ preventScroll: true });
   $("logins-empty").hidden = list.length > 0;
   $("logins-empty").textContent = query
     ? "No saved passwords match."
@@ -282,11 +292,19 @@ const importChoice = { browser: "", profile: 0, pins: true, tabs: false, passwor
 let importBusy = false;
 let importing = false;
 const imported = () => state.browserImport || null;
+// While a scan is in flight the list keeps its rows (and the last list of browsers) and the
+// counts say "Counting…", so nothing above or below moves; the answer replaces them in place.
+let scanning = null;
+let scanTimer = 0;
 function scanBrowser(browser, profile) {
   importBusy = true;
   importChoice.browser = browser;
   importChoice.profile = profile;
-  state.browserImport = Object.assign({}, { fileResult: (imported() || {}).fileResult });
+  const last = imported() || {};
+  const known = (last.browsers || []).find((item) => item.id === browser);
+  scanning = { browsers: last.browsers, browser, profile, name: known ? known.name : "", hasTabs: last.hasTabs, spacesKind: last.spacesKind, scanning: true };
+  clearTimeout(scanTimer);
+  scanTimer = setTimeout(() => { scanning = null; renderImport(); }, 15000);
   renderImport();
   send("import-scan", `${browser}\t${profile}`);
 }
@@ -309,8 +327,13 @@ $("import-run").addEventListener("click", () => {
 });
 $("import-csv").addEventListener("click", () => send("import-passwords-file"));
 function renderImport() {
-  const data = imported();
-  $("import-csv-status").textContent = (data && data.fileResult) || "";
+  let data = imported();
+  const fileResult = data && data.fileResult;
+  if (scanning) {
+    const answered = data && data.browsers && (!scanning.browser || (data.browser === scanning.browser && (data.profile || 0) === scanning.profile));
+    if (answered) { scanning = null; clearTimeout(scanTimer); } else data = scanning;
+  }
+  $("import-csv-status").textContent = fileResult || "";
   if (!data || !data.browsers) {
     $("import-found").hidden = true;
     $("import-status").textContent = importBusy ? "Looking for browsers…" : "";
@@ -332,7 +355,11 @@ function renderImport() {
     value: browser.id,
   })), data.browser, (id) => { if (id !== data.browser) scanBrowser(id, 0); });
   const current = browsers.find((browser) => browser.id === data.browser) || { profiles: [] };
-  $("import-profiles").hidden = current.profiles.length < 2;
+  // Reserve room for the longest profile list of any browser, so switching browsers keeps the
+  // rows below where they are.
+  const slots = Math.max(0, ...browsers.map((browser) => browser.profiles.length));
+  $("import-profiles").style.minHeight = slots < 2 ? "" : `${slots * 39 + (slots - 1) * 4}px`;
+  $("import-profiles").style.visibility = current.profiles.length < 2 ? "hidden" : "";
   choices($("import-profiles"), current.profiles.map((name, index) => ({ label: name, value: index })), importChoice.profile,
     (index) => scanBrowser(data.browser, index));
   const zen = data.spacesKind === "zen";
@@ -349,14 +376,21 @@ function renderImport() {
     cookies: data.cookiesProblem || `${count(data.cookies || 0, "cookie", "cookies")}; replaces Stillwater's cookies for the same sites` + protectedNote(data.protectedCookies),
   };
   const offered = importable(data);
-  document.querySelectorAll("[data-import-count]").forEach((span) => { span.textContent = counts[span.dataset.importCount]; });
-  document.querySelectorAll("[data-import]").forEach((toggle) => {
-    toggle.hidden = !offered.includes(toggle.dataset.import);
-    pressed(toggle, importChoice[toggle.dataset.import]);
+  // Rows a browser can't give stay in place, greyed out, so the rest doesn't shift.
+  const missing = () => `Not available from ${data.name || "this browser"}`;
+  document.querySelectorAll("[data-import-count]").forEach((span) => {
+    const what = span.dataset.importCount;
+    const text = data.scanning ? "Counting…" : offered.includes(what) ? counts[what] : missing();
+    span.textContent = text;
+    span.title = text;
   });
-  $("import-run").disabled = !offered.some((what) => importChoice[what]);
+  document.querySelectorAll("[data-import]").forEach((toggle) => {
+    toggle.disabled = !offered.includes(toggle.dataset.import);
+    pressed(toggle, importChoice[toggle.dataset.import] && !toggle.disabled);
+  });
+  $("import-run").disabled = !!data.scanning || !offered.some((what) => importChoice[what]);
   if (data.result) importing = false;
-  $("import-status").textContent = data.result || (importing ? `Importing from ${data.name}…` : "");
+  $("import-status").textContent = data.scanning ? "" : data.result || (importing ? `Importing from ${data.name}…` : "");
 }
 
 // ---- Keyboard shortcuts (a reference) ----

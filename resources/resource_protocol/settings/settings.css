@@ -83,6 +83,7 @@ a {
   background: var(--nav);
   border-right: 1px solid var(--line);
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .brand {
@@ -164,6 +165,8 @@ a {
   min-width: 0;
   padding: 28px 40px 60px;
   overflow-y: auto;
+  /* Panes differ in height; keep the width the same so a scrollbar appearing doesn't shift the text. */
+  scrollbar-gutter: stable;
 }
 
 .pane {
@@ -223,6 +226,8 @@ h2 {
 }
 
 .status {
+  /* One line is always reserved, so a message appearing doesn't push what's below it. */
+  min-height: 1.5em;
   color: var(--muted);
   font-size: 13px;
 }
@@ -259,7 +264,8 @@ h2 {
 .segmented button[aria-pressed="true"] {
   background: var(--selected);
   box-shadow: var(--shadow);
-  font-weight: 600;
+  /* Heavier text without bold's extra width, which would shift the buttons beside it. */
+  text-shadow: 0.4px 0 0 currentColor, -0.4px 0 0 currentColor;
 }
 
 .options {
@@ -323,6 +329,19 @@ h2 {
 .toggle > span:first-child {
   display: flex;
   flex-direction: column;
+  min-width: 0;
+}
+
+.toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* The count line stays one line tall (the full text is in its tooltip). */
+.toggle > span:first-child > span[data-import-count] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .switch {
