@@ -183,8 +183,24 @@
         }
       }
     };
-    for (const sheet of document.styleSheets) {
+    const sheets = [...document.styleSheets, ...(document.adoptedStyleSheets || [])];
+    for (const sheet of sheets) {
       try { collect(sheet.cssRules); } catch (e) {}
+    }
+    // Every class name any style rule mentions, to spot classes an element has that no rule
+    // styles (a rule the site added that this engine dropped).
+    const known = new Set();
+    const collectClasses = (list) => {
+      for (const rule of list) {
+        if (rule.cssRules && !rule.selectorText) {
+          try { collectClasses(rule.cssRules); } catch (e) {}
+        } else if (rule.selectorText) {
+          for (const match of rule.selectorText.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)) known.add(match[1]);
+        }
+      }
+    };
+    for (const sheet of sheets) {
+      try { collectClasses(sheet.cssRules); } catch (e) {}
     }
     lines.push("", "== pointer-events rules on the first skipped box and its ancestors (innermost first)");
     const chain = [];
@@ -202,8 +218,11 @@
       }
       const inline = element.style && element.style.getPropertyValue("pointer-events");
       if (inline) found.push("style attribute { pointer-events: " + inline + " }");
+      // Site classes are atomic style names (like X's "r-633pao"), not page content.
+      const unstyled = [...element.classList].filter((name) => !known.has(name));
       lines.push("  " + tagOf(element) + " " + rectOf(element) + " computed=" +
-        getComputedStyle(element).getPropertyValue("pointer-events"));
+        getComputedStyle(element).getPropertyValue("pointer-events") +
+        (unstyled.length ? " classes-without-rules=" + unstyled.slice(0, 12).join(",") : ""));
       for (const line of found) lines.push("      " + line);
     }
   }
