@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Inspector</title>
+<link rel="stylesheet" href="servo:inspector/inspector.css">
+</head>
+<body>
+<header id="bar">
+  <button id="pick" class="icon" title="Select an element in the page (Ctrl+Shift+C)" aria-label="Select an element in the page">
+    <svg viewBox="0 0 16 16" width="16" height="16"><path d="M2 2h8v1.5H3.5V10H2zM7 6l7.5 3-3 1.2 2.6 2.6-1.1 1.1-2.6-2.6L9 14z" fill="currentColor"/></svg>
+  </button>
+  <nav id="tabs" role="tablist">
+    <button role="tab" data-tab="elements" class="on">Elements</button>
+    <button role="tab" data-tab="console">Console<span id="errcount" hidden></span></button>
+    <button role="tab" data-tab="network">Network</button>
+    <button role="tab" data-tab="sources">Sources</button>
+  </nav>
+  <span id="target" class="dim"></span>
+  <button id="dock" class="icon" title="Dock to bottom" aria-label="Change dock side">
+    <svg viewBox="0 0 16 16" width="16" height="16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor"/><rect id="dockmark" x="9" y="3" width="5" height="10" fill="currentColor" opacity=".6"/></svg>
+  </button>
+  <button id="close" class="icon" title="Close (F12)" aria-label="Close the inspector">
+    <svg viewBox="0 0 16 16" width="16" height="16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5"/></svg>
+  </button>
+</header>
+
+<main>
+  <section id="elements" class="tab on">
+    <div id="treepane">
+      <div class="tools">
+        <button id="edit-html" disabled title="Edit the selected node as HTML (F2)">Edit as HTML</button>
+        <button id="add-attr" disabled title="Add an attribute to the selected element">+ Attribute</button>
+        <button id="delete-node" disabled title="Delete the selected node (Del)">Delete</button>
+        <button id="refresh-tree" title="Reload the tree">Refresh</button>
+      </div>
+      <div id="tree" tabindex="0" role="tree" aria-label="Page elements"></div>
+      <div id="crumbs" class="dim"></div>
+    </div>
+    <div id="sidepane">
+      <div class="subtabs" role="tablist">
+        <button data-sub="styles" class="on">Styles</button>
+        <button data-sub="computed">Computed</button>
+      </div>
+      <div id="styles" class="sub on"><p class="dim pad">Select an element to see its styles.</p></div>
+      <div id="computed" class="sub">
+        <input id="computed-filter" type="search" placeholder="Filter properties" spellcheck="false">
+        <div id="computed-list"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="console" class="tab">
+    <div class="tools">
+      <button id="console-clear">Clear</button>
+      <input id="console-filter" type="search" placeholder="Filter" spellcheck="false">
+      <label><input type="checkbox" id="show-errors" checked> Errors</label>
+      <label><input type="checkbox" id="show-warnings" checked> Warnings</label>
+      <label><input type="checkbox" id="show-logs" checked> Logs</label>
+    </div>
+    <div id="log" role="log"></div>
+    <div id="prompt"><span class="caret">&rsaquo;</span><textarea id="input" rows="1" spellcheck="false" placeholder="Run JavaScript in the page ($0 is the selected element)"></textarea></div>
+  </section>
+
+  <section id="network" class="tab">
+    <div class="tools">
+      <button id="network-refresh">Refresh</button>
+      <input id="network-filter" type="search" placeholder="Filter URLs" spellcheck="false">
+      <span id="network-summary" class="dim"></span>
+    </div>
+    <div class="scroll"><table id="network-table"><thead><tr><th>Name</th><th>Status</th><th>Type</th><th>Size</th><th>Time</th></tr></thead><tbody></tbody></table></div>
+    <p class="dim pad small">From the page's resource timing: requests the page made since it loaded. Status shows where the engine reports it.</p>
+  </section>
+
+  <section id="sources" class="tab">
+    <div id="source-list"></div>
+    <div id="source-view"><p class="dim pad">Pick a script or stylesheet.</p></div>
+  </section>
+</main>
+
+<div id="html-editor" class="modal" hidden>
+  <div class="dlg">
+    <div class="dlg-title">Edit as HTML <span class="dim small">Ctrl+Enter applies, Esc cancels</span></div>
+    <textarea id="html-text" spellcheck="false"></textarea>
+    <div class="dlg-buttons"><button type="button" id="html-cancel">Cancel</button><button type="button" id="html-apply" class="primary">Apply</button></div>
+  </div>
+</div>
+
+<script src="servo:inspector/inspector.js"></script>
+</body>
+</html>

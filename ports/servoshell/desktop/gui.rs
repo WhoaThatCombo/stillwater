@@ -60,6 +60,11 @@ use crate::desktop::sidebar::{CONTENT_RADIUS, Sidebar, WindowAction, png_data_ur
 use crate::desktop::report;
 use crate::desktop::{browser_import, zen_import};
 
+thread_local! {
+    /// STILLWATER_TEST_INSPECTOR has opened the inspector (once per run).
+    static TEST_INSPECTOR_OPENED: Cell<bool> = const { Cell::new(false) };
+}
+
 /// A change to the split view / Glance panes, applied on the next update.
 pub(crate) enum PaneRequest {
     Open(PaneKind, url::Url),
@@ -107,6 +112,11 @@ pub struct Gui {
     split: Option<Pane>,
     /// Glance: a link preview floating over the page.
     glance: Option<Pane>,
+    /// The developer inspector (F12), docked beside or below the page.
+    inspector: Option<crate::desktop::inspector::Inspector>,
+    /// Where the inspector is drawn, and the gap between it and the page (its resize handle).
+    inspector_rect: Option<egui::Rect>,
+    inspector_gap: Option<egui::Rect>,
     /// Zen's floating address bar for a new tab.
     pub(crate) command_bar: crate::desktop::command_bar::CommandBar,
     /// Pane changes requested since the last update (applied in `update`).
@@ -314,6 +324,9 @@ impl Gui {
             window_rendering_context,
             split: None,
             glance: None,
+            inspector: None,
+            inspector_rect: None,
+            inspector_gap: None,
             command_bar: Default::default(),
             pane_requests: Default::default(),
             pane_focus: Cell::new(None),
@@ -438,6 +451,96 @@ impl Gui {
         match kind {
             PaneKind::Split => self.split.as_ref(),
             PaneKind::Glance => self.glance.as_ref(),
+            PaneKind::Inspector => self.inspector.as_ref().map(|inspector| &inspector.pane),
+        }
+    }
+
+    /// Whether the inspector page sent messages that the next update handles.
+    pub(crate) fn inspector_has_messages(&self) -> bool {
+        self.inspector
+            .as_ref()
+            .is_some_and(|inspector| inspector.pane.has_messages() || inspector.has_results())
+    }
+
+    /// Whether `position` is on the gap between the page and the inspector, which drags to
+    /// resize the inspector.
+    pub(crate) fn inspector_handle_contains(&self, position: Point2D<f32, DeviceIndependentPixel>) -> bool {
+        self.inspector_gap
+            .is_some_and(|gap| gap.expand(1.0).contains(pos2(position.x, position.y)))
+    }
+
+    /// The inspector's size along its resize direction, and whether it is docked at the bottom.
+    pub(crate) fn inspector_extent(&self) -> Option<(f32, bool)> {
+        let rect = self.inspector_rect?;
+        Some(match crate::desktop::inspector::dock() {
+            crate::desktop::inspector::Dock::Right => (rect.width(), false),
+            crate::desktop::inspector::Dock::Bottom => (rect.height(), true),
+        })
+    }
+
+    /// Open or close the inspector, pick an element, or inspect one at a point, as asked for
+    /// since the last update; and relay what the inspector page asked for.
+    fn apply_inspector_requests(
+        &mut self,
+        state: &RunningAppState,
+        window: &ServoShellWindow,
+        headed_window: &headed_window::HeadedWindow,
+    ) {
+        use crate::desktop::inspector::{Inspector, Request};
+        // Tests: STILLWATER_TEST_INSPECTOR opens the inspector once the first web page loaded.
+        if self.inspector.is_none() &&
+            std::env::var_os("STILLWATER_TEST_INSPECTOR").is_some() &&
+            !TEST_INSPECTOR_OPENED.with(Cell::get) &&
+            window.active_webview().is_some_and(|webview| {
+                webview.load_status() == LoadStatus::Complete &&
+                    webview.url().is_some_and(|url| matches!(url.scheme(), "http" | "https"))
+            })
+        {
+            TEST_INSPECTOR_OPENED.with(|opened| opened.set(true));
+            crate::desktop::inspector::request(Request::Toggle);
+        }
+        for request in crate::desktop::inspector::take_requests() {
+            if matches!(request, Request::Toggle) && self.inspector.is_some() {
+                self.inspector = None;
+                if self.pane_focus.get() == Some(PaneKind::Inspector) {
+                    self.set_pane_focus(None, window);
+                }
+                continue;
+            }
+            if self.inspector.is_none() {
+                let Ok(url) = url::Url::parse(crate::desktop::inspector::PAGE_URL) else {
+                    continue;
+                };
+                let pane = Pane::new(
+                    PaneKind::Inspector,
+                    url,
+                    state,
+                    &self.window_rendering_context,
+                    RepaintEventLoopWaker::new(headed_window.event_loop_proxy(), headed_window.id()),
+                    headed_window.theme(),
+                    window.platform_window().hidpi_scale_factor(),
+                );
+                self.inspector = Some(Inspector::new(pane));
+            }
+            let inspector = self.inspector.as_mut().expect("just opened");
+            inspector.sync_target(window.active_webview(), state);
+            match request {
+                Request::Toggle => {},
+                Request::Pick => inspector.push(serde_json::json!({ "type": "pick" })),
+                Request::InspectAt(x, y) => {
+                    inspector.push(serde_json::json!({ "type": "inspectAt", "x": x, "y": y }))
+                },
+            }
+        }
+        if let Some(inspector) = self.inspector.as_mut() {
+            inspector.handle_messages();
+            inspector.sync_target(window.active_webview(), state);
+            if inspector.wants_close {
+                self.inspector = None;
+                if self.pane_focus.get() == Some(PaneKind::Inspector) {
+                    self.set_pane_focus(None, window);
+                }
+            }
         }
     }
 
@@ -451,6 +554,9 @@ impl Gui {
             rect.filter(|rect| rect.contains(point))
                 .map(|rect| (kind, Point2D::new(point.x - rect.min.x, point.y - rect.min.y)))
         };
+        if let Some(hit) = hit(self.inspector_rect, PaneKind::Inspector) {
+            return Some(hit);
+        }
         if self.glance.is_some() {
             return hit(self.glance_rect, PaneKind::Glance);
         }
@@ -476,7 +582,7 @@ impl Gui {
         if let Some(active) = window.active_webview() {
             active.set_focused(focus.is_none() && window_focused);
         }
-        for kind in [PaneKind::Split, PaneKind::Glance] {
+        for kind in PaneKind::ALL {
             if let Some(pane) = self.pane(kind) {
                 pane.webview.set_focused(focus == Some(kind) && window_focused);
             }
@@ -502,7 +608,7 @@ impl Gui {
         if let Some(webview) = self.sidebar.webview() {
             webview.set_focused(sidebar && window_focused);
         }
-        for kind in [PaneKind::Split, PaneKind::Glance] {
+        for kind in PaneKind::ALL {
             if let Some(pane_view) = self.pane(kind) {
                 pane_view.webview.set_focused(pane == Some(kind) && window_focused);
             }
@@ -541,6 +647,7 @@ impl Gui {
         window: &ServoShellWindow,
         headed_window: &headed_window::HeadedWindow,
     ) {
+        self.apply_inspector_requests(state, window, headed_window);
         if let Some(url) = crate::desktop::panes::take_glance_url() {
             self.pane_requests.borrow_mut().push(PaneRequest::Open(PaneKind::Glance, url));
         }
@@ -579,6 +686,7 @@ impl Gui {
         let requests = std::mem::take(&mut *self.pane_requests.borrow_mut());
         for request in requests {
             match request {
+                PaneRequest::Open(PaneKind::Inspector, _) => {},
                 PaneRequest::Open(kind, url) => {
                     let pane = Pane::new(
                         kind,
@@ -592,6 +700,7 @@ impl Gui {
                     match kind {
                         PaneKind::Split => self.split = Some(pane),
                         PaneKind::Glance => self.glance = Some(pane),
+                        PaneKind::Inspector => {},
                     }
                     self.set_pane_focus(Some(kind), window);
                 },
@@ -599,6 +708,7 @@ impl Gui {
                     match kind {
                         PaneKind::Split => self.split = None,
                         PaneKind::Glance => self.glance = None,
+                        PaneKind::Inspector => self.inspector = None,
                     }
                     if self.pane_focus.get() == Some(kind) {
                         self.set_pane_focus(None, window);
@@ -620,8 +730,11 @@ impl Gui {
         }
         // Tell the sidebar about the panes (titles, URLs, which one has focus).
         let summary = |pane: &Pane| (pane.title(), pane.url().map(|url| url.to_string()).unwrap_or_default());
+        // (The URL bar never shows the inspector's own page.)
         self.sidebar.set_panes(
-            self.pane_focus().and_then(|kind| self.pane_webview(kind)),
+            self.pane_focus()
+                .filter(|kind| *kind != PaneKind::Inspector)
+                .and_then(|kind| self.pane_webview(kind)),
             self.split.as_ref().map(summary),
             self.glance.as_ref().map(summary),
         );
@@ -1191,6 +1304,9 @@ impl Gui {
             glance,
             split_rect,
             glance_rect,
+            inspector,
+            inspector_rect,
+            inspector_gap,
             pane_requests,
             pane_control_rects,
             command_bar,
@@ -1214,9 +1330,19 @@ impl Gui {
             // TODO: While in fullscreen add some way to mitigate the increased phishing risk
             // when not displaying the URL bar: https://github.com/servo/servo/issues/32443
             let full_rect = ctx.available_rect_before_wrap();
-            let (new_sidebar_rect, content_area) =
+            let (new_sidebar_rect, mut content_area) =
                 sidebar.layout(full_rect, headed_window.is_fullscreen_from_document());
             *sidebar_rect = new_sidebar_rect;
+            // The inspector takes the right or bottom part of the page area.
+            *inspector_rect = None;
+            *inspector_gap = None;
+            if inspector.is_some() {
+                let gap = crate::desktop::sidebar::CONTENT_MARGIN;
+                let (page, gap_rect, panel) = crate::desktop::inspector::layout(content_area, gap);
+                content_area = page;
+                *inspector_gap = Some(gap_rect);
+                *inspector_rect = Some(panel);
+            }
             // Split view: the active tab on the left, the split pane on the right.
             let (new_content_rect, new_split_rect) = match split {
                 Some(_) => {
@@ -1322,6 +1448,13 @@ impl Gui {
                     }
                 }
             }
+            // The inspector, beside or below the page.
+            if let (Some(inspector), Some(rect)) = (inspector.as_ref(), *inspector_rect) {
+                inspector.pane.paint(rect, scale);
+                if inspector.pane.webview.load_status() != LoadStatus::Started {
+                    add_surface(ctx, LayerId::background(), rect, inspector.pane.rendering_context());
+                }
+            }
             // A page's render surface is white until the page first draws; show the window
             // background instead of a white flash until then (once per tab): from the page's
             // first contentful frame, not only once it has fully loaded.
@@ -1364,7 +1497,7 @@ impl Gui {
                 let thickness = CONTENT_RADIUS * 2.0;
                 let gap = crate::desktop::sidebar::CONTENT_MARGIN;
                 let painter = ctx.layer_painter(LayerId::new(Order::Middle, Id::new("content-corners")));
-                for rect in [Some(new_content_rect), new_split_rect].into_iter().flatten() {
+                for rect in [Some(new_content_rect), new_split_rect, *inspector_rect].into_iter().flatten() {
                     painter.with_clip_rect(rect.expand(gap / 2.0)).rect_stroke(
                         rect.expand(thickness / 2.0),
                         CornerRadius::same((CONTENT_RADIUS + thickness / 2.0) as u8),

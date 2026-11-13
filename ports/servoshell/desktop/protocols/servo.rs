@@ -57,6 +57,11 @@ impl ProtocolHandler for ServoProtocolHandler {
                 let path = format!("/{path}");
                 ResourceProtocolHandler::response_for_path(request, done_chan, context, &path)
             },
+            // The developer inspector's panel: `servo:inspector/<file>`.
+            path if path.starts_with("inspector/") => {
+                let path = format!("/{path}");
+                ResourceProtocolHandler::response_for_path(request, done_chan, context, &path)
+            },
             // Stillwater's settings page: `servo:settings` and its files `servo:settings/<file>`.
             "settings" => ResourceProtocolHandler::response_for_path(
                 request,

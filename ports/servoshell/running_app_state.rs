@@ -1457,6 +1457,11 @@ impl WebViewDelegate for RunningAppState {
             }
             return;
         }
+        // The developer inspector's console, while it is open on this tab.
+        #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+        if crate::desktop::inspector::on_console(webview.id(), &level, &message) {
+            self.window_for_webview(&webview).set_needs_update();
+        }
         if matches!(level, ConsoleLogLevel::Error | ConsoleLogLevel::Warn) {
             let mut errors = self.recent_console_errors.borrow_mut();
             let list = errors.entry(webview.id()).or_default();

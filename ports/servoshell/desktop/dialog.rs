@@ -769,6 +769,8 @@ impl Dialog {
                     let mut report_picked =
                         std::env::var("STILLWATER_TEST_CONTEXT_MENU_PICK").as_deref() ==
                             Ok("Save layout report");
+                    let mut inspect_picked =
+                        std::env::var("STILLWATER_TEST_CONTEXT_MENU_PICK").as_deref() == Ok("Inspect");
                     let mut position = context_menu.position();
                     position.min.x += toolbar_offset.x as i32;
                 position.max.x += toolbar_offset.x as i32;
@@ -895,9 +897,23 @@ impl Dialog {
                                     report_picked = true;
                                     ui.close();
                                 }
+                                if extra_menu_button(ui, "Inspect") {
+                                    inspect_picked = true;
+                                    ui.close();
+                                }
                             })
                         });
 
+                    if inspect_picked {
+                        crate::desktop::diagnostics::log("context menu: inspect");
+                        crate::desktop::inspector::request(
+                            crate::desktop::inspector::Request::InspectAt(report_point.0, report_point.1),
+                        );
+                        if let Some(context_menu) = menu.take() {
+                            context_menu.dismiss();
+                        }
+                        return false;
+                    }
                     if report_picked {
                         crate::desktop::diagnostics::log("context menu: layout report");
                         LAYOUT_REPORTS.with(|reports| reports.borrow_mut().push(report_point));

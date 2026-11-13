@@ -135,6 +135,10 @@ pub struct HeadedWindow {
     pane_buttons_held: RefCell<Vec<(PaneKind, MouseButton, Point2D<f32, DevicePixel>)>>,
     /// While dragging the sidebar's right edge: the cursor's x offset from that edge.
     sidebar_resize_grab: Cell<Option<f32>>,
+    /// Dragging the inspector's edge: where the drag started, the inspector's size then, and
+    /// whether it is docked at the bottom.
+    inspector_resize_grab: Cell<Option<(Point2D<f32, DeviceIndependentPixel>, f32, bool)>>,
+    over_inspector_handle: Cell<bool>,
     /// The cursor is on the sidebar's resize edge.
     over_sidebar_handle: Cell<bool>,
     /// The last press on the sidebar's edge, to reset the width on double-click.
@@ -359,6 +363,8 @@ impl HeadedWindow {
             page_buttons_held: Default::default(),
             pane_buttons_held: Default::default(),
             sidebar_resize_grab: Cell::new(None),
+            inspector_resize_grab: Cell::new(None),
+            over_inspector_handle: Cell::new(false),
             over_sidebar_handle: Cell::new(false),
             last_sidebar_handle_press: Cell::new(None),
             caption_press: Cell::new(None),
@@ -393,7 +399,7 @@ impl HeadedWindow {
     pub(crate) fn has_pending_sidebar_commands(&self) -> bool {
         self.gui
             .try_borrow()
-            .is_ok_and(|gui| gui.sidebar.has_pending_messages())
+            .is_ok_and(|gui| gui.sidebar.has_pending_messages() || gui.inspector_has_messages())
     }
 
     /// Another tab became the active one since the last paint, and its first frame isn't
@@ -470,8 +476,9 @@ impl HeadedWindow {
         });
         let mut webviews: Vec<WebView> = window.active_webview().into_iter().collect();
         if let Ok(gui) = self.gui.try_borrow() {
-            webviews.extend(gui.pane_webview(PaneKind::Split));
-            webviews.extend(gui.pane_webview(PaneKind::Glance));
+            for kind in PaneKind::ALL {
+                webviews.extend(gui.pane_webview(kind));
+            }
             webviews.extend(gui.sidebar.webview().cloned());
         }
         for webview in webviews {
@@ -783,6 +790,77 @@ impl HeadedWindow {
             },
             // Other buttons pressed on the top bar do nothing.
             (ElementState::Pressed, _) => hit.is_some(),
+            _ => false,
+        }
+    }
+
+    fn inspector_request(&self, window: &ServoShellWindow, request: crate::desktop::inspector::Request) {
+        crate::desktop::inspector::request(request);
+        window.set_needs_update();
+        self.winit_window.request_redraw();
+    }
+
+    /// Resize the inspector by dragging the gap between it and the page. Returns true if the
+    /// event was consumed.
+    fn handle_inspector_resize_event(
+        &self,
+        window: &Rc<ServoShellWindow>,
+        event: &WindowEvent,
+    ) -> bool {
+        let scale = self.hidpi_scale_factor();
+        match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                let point = winit_position_to_euclid_point(*position).to_f32() / scale;
+                if let Some((start, size, bottom)) = self.inspector_resize_grab.get() {
+                    let moved = if bottom { point.y - start.y } else { point.x - start.x };
+                    crate::desktop::inspector::set_size(size - moved);
+                    window.set_needs_update();
+                    self.winit_window.request_redraw();
+                    return true;
+                }
+                let gui = self.gui.borrow();
+                let over = self.page_buttons_held.borrow().is_empty() &&
+                    self.pane_buttons_held.borrow().is_empty() &&
+                    gui.inspector_handle_contains(point);
+                if self.over_inspector_handle.replace(over) != over {
+                    let icon = match gui.inspector_extent() {
+                        Some((_, true)) if over => winit::window::CursorIcon::RowResize,
+                        _ if over => winit::window::CursorIcon::ColResize,
+                        _ => winit::window::CursorIcon::Default,
+                    };
+                    self.winit_window.set_cursor(icon);
+                }
+                over
+            },
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } if self.over_inspector_handle.get() => {
+                if let (Some(point), Some((size, bottom))) =
+                    (self.last_mouse_position.get(), self.gui.borrow().inspector_extent())
+                {
+                    self.inspector_resize_grab.set(Some((point, size, bottom)));
+                }
+                true
+            },
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } if self.inspector_resize_grab.get().is_some() => {
+                self.inspector_resize_grab.set(None);
+                true
+            },
+            WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }
+                if self.over_inspector_handle.get() =>
+            {
+                true
+            },
+            WindowEvent::Focused(false) => {
+                self.inspector_resize_grab.set(None);
+                false
+            },
             _ => false,
         }
     }
@@ -1184,6 +1262,16 @@ impl HeadedWindow {
             .shortcut(CMD_OR_CONTROL, 'D', || post("bm-star"))
             .shortcut(CMD_OR_CONTROL, 'J', || post("dl-panel"))
             .shortcut(CMD_OR_CONTROL, 'Q', || state.schedule_exit())
+            // The developer inspector.
+            .shortcut(Modifiers::empty(), Key::Named(NamedKey::F12), || {
+                self.inspector_request(window, crate::desktop::inspector::Request::Toggle)
+            })
+            .shortcut(Modifiers::CONTROL | Modifiers::SHIFT, 'I', || {
+                self.inspector_request(window, crate::desktop::inspector::Request::Toggle)
+            })
+            .shortcut(Modifiers::CONTROL | Modifiers::SHIFT, 'C', || {
+                self.inspector_request(window, crate::desktop::inspector::Request::Pick)
+            })
             .shortcut(CMD_OR_CONTROL, 'L', || self.gui.borrow().sidebar.focus_url(window))
             // Find in page.
             .shortcut(CMD_OR_CONTROL, 'F', || self.find(window, FindCommand::Open))
@@ -1806,6 +1894,11 @@ impl HeadedWindow {
 
         // The page scrollbars: presses on them, and drags that started on them, are theirs.
         if self.handle_scrollbar_event(&window, &event) {
+            return;
+        }
+
+        // Drag the gap between the page and the inspector to resize the inspector.
+        if self.handle_inspector_resize_event(&window, &event) {
             return;
         }
 

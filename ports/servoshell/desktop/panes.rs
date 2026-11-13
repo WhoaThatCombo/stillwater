@@ -57,6 +57,12 @@ pub(crate) fn take_glance_url() -> Option<Url> {
 pub(crate) enum PaneKind {
     Split,
     Glance,
+    /// The developer inspector (F12), docked beside or below the page it inspects.
+    Inspector,
+}
+
+impl PaneKind {
+    pub(crate) const ALL: [PaneKind; 3] = [PaneKind::Split, PaneKind::Glance, PaneKind::Inspector];
 }
 
 /// State the pane's delegate shares with the window.
@@ -66,8 +72,11 @@ struct PaneShared {
 }
 
 struct PaneDelegate {
+    kind: PaneKind,
     shared: Rc<PaneShared>,
     downloads: crate::desktop::downloads::SharedDownloads,
+    /// The inspector page's messages to the shell (`console.log` with a prefix).
+    inbox: Rc<RefCell<Vec<String>>>,
 }
 
 impl PaneDelegate {
@@ -103,7 +112,31 @@ impl WebViewDelegate for PaneDelegate {
     }
 
     fn request_navigation(&self, _: WebView, request: NavigationRequest) {
+        // The inspector never navigates away from its own page.
+        if self.kind == PaneKind::Inspector &&
+            !request.url.as_str().starts_with(crate::desktop::inspector::PAGE_PREFIX)
+        {
+            request.deny();
+            return;
+        }
         request.allow();
+    }
+
+    fn show_console_message(&self, _: WebView, level: servo::ConsoleLogLevel, message: String) {
+        if self.kind != PaneKind::Inspector {
+            return;
+        }
+        match message.strip_prefix(crate::desktop::inspector::MESSAGE_PREFIX) {
+            Some(message) => {
+                self.inbox.borrow_mut().push(message.to_owned());
+                self.shared.waker.wake_by_ref();
+            },
+            // The inspector's own script errors.
+            None if matches!(level, servo::ConsoleLogLevel::Error) => {
+                crate::desktop::diagnostics::log(format!("inspector page: {message}"))
+            },
+            None => {},
+        }
     }
 
     fn request_download(&self, _: WebView, request: servo::DownloadRequest) {
@@ -116,6 +149,7 @@ pub(crate) struct Pane {
     pub(crate) webview: WebView,
     rendering_context: Rc<OffscreenRenderingContext>,
     shared: Rc<PaneShared>,
+    inbox: Rc<RefCell<Vec<String>>>,
 }
 
 impl Pane {
@@ -135,23 +169,29 @@ impl Pane {
             cursor: Cell::new(Cursor::Default),
             waker: Waker::from(Arc::new(waker)),
         });
-        let webview = WebViewBuilder::new(state.servo(), rendering_context.clone())
+        let inbox: Rc<RefCell<Vec<String>>> = Default::default();
+        let mut builder = WebViewBuilder::new(state.servo(), rendering_context.clone())
             .url(url)
             .hidpi_scale_factor(scale)
-            .user_content_manager(state.user_content_manager.clone())
             .clipboard_delegate(crate::desktop::clipboard::delegate())
             .delegate(Rc::new(PaneDelegate {
+                kind,
                 shared: shared.clone(),
                 downloads: state.downloads.clone(),
-            }))
-            .build();
+                inbox: inbox.clone(),
+            }));
+        // The inspector is the browser's own page: no ad blocking or other page scripts.
+        if kind != PaneKind::Inspector {
+            builder = builder.user_content_manager(state.user_content_manager.clone());
+        }
+        let webview = builder.build();
         webview.notify_theme_change(theme);
         webview.show();
-        let _ = kind;
         Self {
             webview,
             rendering_context,
             shared,
+            inbox,
         }
     }
 
@@ -176,6 +216,20 @@ impl Pane {
 
     pub(crate) fn rendering_context(&self) -> &Rc<OffscreenRenderingContext> {
         &self.rendering_context
+    }
+
+    /// Wakes the window (a repaint, and an update while `has_messages`).
+    pub(crate) fn waker(&self) -> Waker {
+        self.shared.waker.clone()
+    }
+
+    pub(crate) fn has_messages(&self) -> bool {
+        !self.inbox.borrow().is_empty()
+    }
+
+    /// Messages the inspector page sent since the last call.
+    pub(crate) fn take_messages(&self) -> Vec<String> {
+        std::mem::take(&mut *self.inbox.borrow_mut())
     }
 
     pub(crate) fn cursor(&self) -> Cursor {
