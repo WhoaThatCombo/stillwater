@@ -205,7 +205,9 @@ impl ServoShellWindow {
         if self.webview_collection.borrow().active_id() == Some(webview.id()) {
             self.new_frame_ready.set(Some(webview.id()));
             #[cfg(not(any(target_os = "android", target_env = "ohos")))]
-            crate::desktop::diagnostics::frame_ready();
+            crate::desktop::diagnostics::frame_ready(|| {
+                webview.root_scroll_state().map(|state| state.offset[1])
+            });
         }
         self.set_needs_repaint();
     }

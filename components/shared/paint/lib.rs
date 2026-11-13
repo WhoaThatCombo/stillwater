@@ -198,6 +198,10 @@ pub enum PaintMessage {
     /// Let `Paint` know that the given WebView is ready to have a screenshot taken
     /// after the given pipeline's epochs have been rendered.
     ScreenshotReadinessReponse(WebViewId, FxHashMap<PipelineId, Epoch>),
+    /// Stillwater: whether the given pipeline's document has `wheel` listeners that are not
+    /// passive (and so may call `preventDefault()`). Without any, `Paint` scrolls for a wheel
+    /// event at once instead of waiting for script to dispatch it.
+    SetHasBlockingWheelListeners(WebViewId, PipelineId, bool),
 }
 
 impl Debug for PaintMessage {
@@ -545,6 +549,21 @@ impl CrossProcessPaintApi {
             webview_id,
             pipeline_id,
             source,
+        ));
+    }
+
+    /// Stillwater: tell `Paint` whether the given pipeline's document has wheel listeners
+    /// that may cancel the wheel event (see [`PaintMessage::SetHasBlockingWheelListeners`]).
+    pub fn set_has_blocking_wheel_listeners(
+        &self,
+        webview_id: WebViewId,
+        pipeline_id: PipelineId,
+        value: bool,
+    ) {
+        let _ = self.0.send(PaintMessage::SetHasBlockingWheelListeners(
+            webview_id,
+            pipeline_id,
+            value,
         ));
     }
 }

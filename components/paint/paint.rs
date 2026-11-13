@@ -208,6 +208,8 @@ bitflags! {
         const BlinkingCaret = 1 << 5;
         /// The observers of the refresh driver wait for a paint after the next frame start.
         const FrameStart = 1 << 6;
+        /// Stillwater: a mouse-wheel scroll animation has started.
+        const StartedSmoothScroll = 1 << 7;
     }
 }
 
@@ -626,6 +628,17 @@ impl Paint {
             PaintMessage::ScreenshotReadinessReponse(webview_id, pipelines_and_epochs) => {
                 if let Some(painter) = self.maybe_painter(webview_id.into()) {
                     painter.handle_screenshot_readiness_reply(webview_id, pipelines_and_epochs);
+                }
+            },
+            PaintMessage::SetHasBlockingWheelListeners(webview_id, pipeline_id, value) => {
+                if let Some(mut painter) = self.maybe_painter_mut(webview_id.into()) &&
+                    let Some(webview_renderer) = painter.webview_renderer_mut(webview_id) &&
+                    // Script sends this after the pipeline's initial transaction (same
+                    // channel), so the details exist unless the pipeline has gone; don't
+                    // recreate those.
+                    let Some(details) = webview_renderer.pipelines.get_mut(&pipeline_id)
+                {
+                    details.has_blocking_wheel_listeners = value;
                 }
             },
         }

@@ -92,6 +92,7 @@ wireChoices($("startup"), (value) => send("session-startup", value));
 wireChoices($("preload"), (value) => send("set-preload", value));
 wireChoices($("newtab"), (value) => send("set-newtab", value));
 wireChoices($("scrollbar"), (value) => send("set-scrollbar", value));
+$("smooth-scroll").addEventListener("click", () => send("set-smooth-scroll", state.settings && state.settings.smoothScroll === false ? "1" : "0"));
 $("compact").addEventListener("click", () => send("toggle-compact"));
 $("lowmem").addEventListener("click", () => send("set-unload-low-memory", state.settings && state.settings.unloadOnLowMemory ? "0" : "1"));
 $("splash").addEventListener("click", () => send("set-splash", state.settings && state.settings.startupAnimation === false ? "1" : "0"));
@@ -105,6 +106,7 @@ function renderGeneral() {
   markChoices($("preload"), settings.preloadTabs || "all");
   markChoices($("newtab"), settings.newTabBar === false ? "0" : "1");
   markChoices($("scrollbar"), settings.scrollbar || "auto");
+  pressed($("smooth-scroll"), settings.smoothScroll !== false);
   pressed($("compact"), state.compact);
   choices($("engines"), (settings.searchEngines || []).map((engine) => ({ label: engine.name, value: engine.id })),
     settings.searchEngine, (id) => send("set-search", id));

@@ -338,7 +338,10 @@ impl DocumentEventHandler {
                 .and_then(|index| pending_input_events.get_mut(index)) &&
                 let InputEvent::Wheel(ref mut existing_wheel_event) =
                     existing_constellation_wheel_event.event.event &&
-                existing_wheel_event.delta.mode == new_wheel_event.delta.mode
+                existing_wheel_event.delta.mode == new_wheel_event.delta.mode &&
+                // Stillwater: an event that Paint already scrolled for (not cancelable) must
+                // not absorb one that Paint holds until script answers, or vice versa.
+                existing_wheel_event.cancelable == new_wheel_event.cancelable
             {
                 self.coalesced_wheel_event_ids
                     .borrow_mut()
@@ -1985,16 +1988,21 @@ impl DocumentEventHandler {
 
         let event_type = "wheel".into();
 
+        // Stillwater: Paint marks the events it has already scrolled for (the document has no
+        // wheel listener that could cancel them, or this gesture's first event wasn't
+        // cancelled) as not cancelable.
         let cancelable = EventCancelable::from(
-            self.window
-                .upcast::<EventTarget>()
-                .has_non_passive_listener(&event_type) ||
-                node.inclusive_ancestors(ShadowIncluding::Yes)
-                    .any(|target| {
-                        target
-                            .upcast::<EventTarget>()
-                            .has_non_passive_listener(&event_type)
-                    }),
+            event.cancelable &&
+                (self
+                    .window
+                    .upcast::<EventTarget>()
+                    .has_non_passive_listener(&event_type) ||
+                    node.inclusive_ancestors(ShadowIncluding::Yes)
+                        .any(|target| {
+                            target
+                                .upcast::<EventTarget>()
+                                .has_non_passive_listener(&event_type)
+                        })),
         );
         // https://w3c.github.io/uievents/#event-wheelevents
         let dom_event = WheelEvent::new(

@@ -539,9 +539,34 @@ pub(crate) struct Window {
 
     /// <https://html.spec.whatwg.org/multipage/#close-watcher-manager>
     close_watcher_manager: CloseWatcherManager,
+
+    /// Stillwater: how many `wheel` listeners in this window's realm may cancel the event
+    /// (not passive). Paint waits for script before wheel scrolling only while there are any.
+    blocking_wheel_listeners: Cell<u32>,
 }
 
 impl Window {
+    /// Stillwater: a `wheel` listener that may cancel the event was added or removed. Paint
+    /// learns when the count goes between zero and non-zero.
+    pub(crate) fn note_blocking_wheel_listener(&self, added: bool) {
+        let old = self.blocking_wheel_listeners.get();
+        let new = if added {
+            old.saturating_add(1)
+        } else {
+            old.saturating_sub(1)
+        };
+        self.blocking_wheel_listeners.set(new);
+        if (old == 0) != (new == 0) &&
+            let Some(document) = self.document.get()
+        {
+            self.paint_api.set_has_blocking_wheel_listeners(
+                self.webview_id(),
+                document.pipeline_id(),
+                new != 0,
+            );
+        }
+    }
+
     pub(crate) fn script_thread(&self) -> Rc<ScriptThread> {
         Weak::upgrade(&self.weak_script_thread)
             .expect("Weak reference should always be upgradable when a ScriptThread is running")
@@ -4388,6 +4413,7 @@ impl Window {
                 UserActivationTimestamp::PositiveInfinity,
             ),
             close_watcher_manager: CloseWatcherManager::new(),
+            blocking_wheel_listeners: Cell::new(0),
         });
 
         WindowBinding::Wrap::<crate::DomTypeHolder>(cx, &origin, win)

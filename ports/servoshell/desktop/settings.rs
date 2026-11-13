@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use log::warn;
 use serde_json::{Value, json};
@@ -23,6 +24,19 @@ const SEARCH_ENGINES: &[(&str, &str, &str)] = &[
 /// The current search URL template, readable from the protocol handler thread so the
 /// New Tab page (`servo:search-engine.js`) searches with the same engine.
 static SEARCH_TEMPLATE: RwLock<String> = RwLock::new(String::new());
+
+/// The "Smooth scrolling" setting, readable where wheel events are made.
+static SMOOTH_SCROLL: AtomicBool = AtomicBool::new(true);
+
+/// Whether a mouse-wheel notch animates its scroll (Paint eases it over ~130 ms, as Edge
+/// does) instead of jumping: the "Smooth scrolling" setting, unless `STILLWATER_SMOOTH_SCROLL`
+/// is set (`0` off, anything else on).
+pub(crate) fn smooth_scroll_enabled() -> bool {
+    static ENV: std::sync::LazyLock<Option<bool>> = std::sync::LazyLock::new(|| {
+        std::env::var_os("STILLWATER_SMOOTH_SCROLL").map(|value| value != "0")
+    });
+    ENV.unwrap_or_else(|| SMOOTH_SCROLL.load(Ordering::Relaxed))
+}
 
 /// Where Stillwater keeps its settings, spaces and pins. `STILLWATER_CONFIG_DIR` overrides it
 /// (used to test without touching a real profile).
@@ -146,6 +160,8 @@ pub(crate) struct Settings {
     pub(crate) preload_tabs: PreloadMode,
     /// How the page scrollbar shows: "auto" (overlay, fades out), "always" or "hidden".
     pub(crate) scrollbar: crate::desktop::scrollbar::ScrollbarMode,
+    /// Animate each mouse-wheel notch instead of jumping (see `smooth_scroll_enabled`).
+    pub(crate) smooth_scroll: bool,
     /// Width of the docked sidebar in device-independent pixels (dragged by its right edge).
     pub(crate) sidebar_width: f32,
     path: Option<PathBuf>,
@@ -188,6 +204,7 @@ impl Settings {
                 .as_str()
                 .and_then(crate::desktop::scrollbar::ScrollbarMode::from_id)
                 .unwrap_or_default(),
+            smooth_scroll: saved["smoothScroll"].as_bool().unwrap_or(true),
             sidebar_width: saved["sidebarWidth"]
                 .as_f64()
                 .map(|width| width as f32)
@@ -198,6 +215,7 @@ impl Settings {
         };
         settings.publish_search_template();
         crate::desktop::scrollbar::set_mode(settings.scrollbar);
+        SMOOTH_SCROLL.store(settings.smooth_scroll, Ordering::Relaxed);
         settings
     }
 
@@ -217,6 +235,7 @@ impl Settings {
             "startupAnimation": self.startup_animation,
             "preloadTabs": self.preload_tabs.id(),
             "scrollbar": self.scrollbar.id(),
+            "smoothScroll": self.smooth_scroll,
             "sidebarWidth": self.sidebar_width,
         });
         let result = path
@@ -318,6 +337,12 @@ impl Settings {
         }
     }
 
+    pub(crate) fn set_smooth_scroll(&mut self, enabled: bool) {
+        self.smooth_scroll = enabled;
+        SMOOTH_SCROLL.store(enabled, Ordering::Relaxed);
+        self.save();
+    }
+
     pub(crate) fn set_new_tab_bar(&mut self, enabled: bool) {
         self.new_tab_bar = enabled;
         self.save();
@@ -341,6 +366,7 @@ impl Settings {
             "startupAnimation": self.startup_animation,
             "preloadTabs": self.preload_tabs.id(),
             "scrollbar": self.scrollbar.id(),
+            "smoothScroll": self.smooth_scroll,
             "version": crate::desktop::updater::CURRENT_VERSION,
         })
     }

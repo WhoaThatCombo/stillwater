@@ -903,7 +903,14 @@ impl Handler {
                 mode: WheelMode::DeltaPixel,
             };
             let point = WebViewPoint::Page(Point2D::new(x as f32, y as f32));
-            let input_event = InputEvent::Wheel(WheelEvent::new(delta, point));
+            // Stillwater test hook: STILLWATER_WEBDRIVER_WHEEL_NOTCH=1 sends wheel actions as
+            // mouse-wheel notches, which Paint animates (a real wheel's path in the shell),
+            // so tests can sample the smooth scroll.
+            static AS_NOTCH: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+                std::env::var_os("STILLWATER_WEBDRIVER_WHEEL_NOTCH").is_some_and(|v| v == "1")
+            });
+            let input_event =
+                InputEvent::Wheel(WheelEvent::new(delta, point).with_smooth(*AS_NOTCH));
 
             self.send_blocking_input_event_to_embedder(input_event);
 

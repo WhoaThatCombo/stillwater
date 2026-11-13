@@ -149,10 +149,15 @@ fn frame_log() -> bool {
 /// A new frame of the active page has been painted, and is shown with the window's next present.
 static FRAME_PAINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The active page has a new frame to show.
-pub(crate) fn frame_ready() {
+/// The active page has a new frame to show. With `STILLWATER_FRAME_LOG=1` the line carries the
+/// page's vertical scroll offset at that moment (`ready y=<page px>`), so wheel-to-scrolled-frame
+/// latency and smooth-scroll positions over time can be read from the log.
+pub(crate) fn frame_ready(scroll_y: impl FnOnce() -> Option<f32>) {
     if frame_log() {
-        log("ready");
+        match scroll_y() {
+            Some(y) => log(format!("ready y={y:.1}")),
+            None => log("ready"),
+        }
     }
 }
 

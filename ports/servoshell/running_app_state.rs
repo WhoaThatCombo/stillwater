@@ -788,6 +788,15 @@ impl RunningAppState {
         response_sender: Option<Sender<()>>,
     ) {
         if let Some(webview) = self.webview_by_id(webview_id) {
+            // With STILLWATER_FRAME_LOG=1, mark when a WebDriver wheel event reaches the
+            // engine, so tests can time event -> scrolled frame without WebDriver's own
+            // round trips (which wait for the page's script thread).
+            #[cfg(not(any(target_os = "android", target_env = "ohos")))]
+            if matches!(input_event, InputEvent::Wheel(_)) &&
+                std::env::var_os("STILLWATER_FRAME_LOG").is_some_and(|v| v == "1")
+            {
+                crate::desktop::diagnostics::log("webdriver wheel");
+            }
             let event_id = webview.notify_input_event(input_event);
             if let Some(response_sender) = response_sender {
                 self.pending_webdriver_events

@@ -65,6 +65,7 @@ const SETTINGS_COMMANDS: &[&str] = &[
     "import-run", "import-passwords-file", "check-updates",
     "hist-clear", "hist-show", "dl-ask", "dl-panel", "set-spaces", "tr-auto", "tr-target", "tr-unlist",
     "tr-delete-model", "tr-models", "set-splash", "set-scrollbar", "set-preload",
+    "set-smooth-scroll",
 ];
 
 /// Whether `url` is the settings page (whatever category it shows).
@@ -1037,6 +1038,10 @@ impl Sidebar {
                 "set-splash" => self.settings.borrow_mut().set_startup_animation(argument == "1"),
                 "set-preload" => self.settings.borrow_mut().set_preload_tabs(argument),
                 "set-scrollbar" => self.settings.borrow_mut().set_scrollbar(&argument),
+                "set-smooth-scroll" => self
+                    .settings
+                    .borrow_mut()
+                    .set_smooth_scroll(argument == "1"),
                 "set-spaces" => {
                     let enabled = argument == "1";
                     self.settings.borrow_mut().set_spaces(enabled);

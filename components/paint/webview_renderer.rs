@@ -5,6 +5,7 @@
 use std::cell::Cell;
 use std::collections::hash_map::Entry;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use embedder_traits::{
@@ -37,7 +38,8 @@ use crate::paint::RepaintReason;
 use crate::painter::{PaintMetricState, Painter};
 use crate::pinch_zoom::PinchZoom;
 use crate::pipeline_details::PipelineDetails;
-use crate::refresh_driver::BaseRefreshDriver;
+use crate::refresh_driver::{BaseRefreshDriver, RefreshDriverObserver};
+use crate::smooth_scroll::SmoothScrollAnimation;
 use crate::touch::{
     PanPolicyInput, PendingTouchInputEvent, TouchHandler, TouchIdMoveTracking, TouchMoveAllowed,
     TouchSequenceState,
@@ -93,6 +95,41 @@ fn paint_holding_enabled() -> bool {
     *ENABLED
 }
 
+/// Stillwater: a wheel event that arrives this long after the previous one starts a new
+/// gesture (Chromium's wheel latching uses a similar gap).
+const WHEEL_GESTURE_GAP: Duration = Duration::from_millis(300);
+
+/// Stillwater: a wheel event that script may cancel scrolls anyway once script has taken this
+/// long to answer, so a busy or stuck page can't freeze wheel scrolling.
+pub(crate) const WHEEL_SCRIPT_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Stillwater: scroll-first wheel handling is on unless STILLWATER_WHEEL_SCROLL_FIRST=0, which
+/// restores the old behaviour for comparisons (every wheel event waits for script, no timeout).
+fn scroll_first_enabled() -> bool {
+    static ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var_os("STILLWATER_WHEEL_SCROLL_FIRST").is_none_or(|value| value != "0")
+    });
+    *ENABLED
+}
+
+/// Stillwater: what script did with the first wheel event of a gesture that had to wait for it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WheelGestureState {
+    /// Not answered yet (or nothing had to wait yet): events that script may cancel wait.
+    Undecided,
+    /// Not cancelled: the rest of the gesture scrolls at once, as non-cancelable events.
+    Allowed,
+    /// Cancelled (a map zooming, a custom scroller): every event of the gesture waits.
+    Prevented,
+}
+
+/// Stillwater: a wheel event waiting for script before it may scroll.
+pub(crate) struct PendingWheelEvent {
+    event: WheelEvent,
+    gesture: u64,
+    sent: Instant,
+}
+
 /// A renderer for a libservo `WebView`. This is essentially the [`ServoRenderer`]'s interface to a
 /// libservo `WebView`, but the code here cannot depend on libservo in order to prevent circular
 /// dependencies, which is why we store a `dyn WebViewTrait` here instead of the `WebView` itself.
@@ -130,7 +167,30 @@ pub(crate) struct WebViewRenderer {
     /// A map of pending wheel events. These are events that have been sent to script,
     /// but are waiting for processing. When they are handled by script, they may trigger
     /// scroll events depending on whether `preventDefault()` was called on the event.
-    pending_wheel_events: FxHashMap<InputEventId, WheelEvent>,
+    ///
+    /// Stillwater: only events that script may cancel wait here (see `on_wheel_event`).
+    pending_wheel_events: FxHashMap<InputEventId, PendingWheelEvent>,
+    /// Stillwater: wheel events that waited for script longer than `WHEEL_SCRIPT_TIMEOUT` and
+    /// were scrolled for anyway, with their gesture. Script's late answer is dropped, except
+    /// that a cancelled one makes the rest of its gesture wait for script again.
+    expired_wheel_events: FxHashMap<InputEventId, u64>,
+    /// Stillwater: when the latest wheel event arrived; a gap of `WHEEL_GESTURE_GAP` starts a
+    /// new gesture.
+    last_wheel_event: Option<Instant>,
+    /// Stillwater: a counter identifying the current wheel gesture.
+    wheel_gesture: u64,
+    /// Stillwater: what script decided about the current gesture's first wheel event.
+    wheel_gesture_state: WheelGestureState,
+    /// Stillwater: a wheel event now waits for script, so `Painter` should arm the timer that
+    /// enforces `WHEEL_SCRIPT_TIMEOUT`.
+    pub(crate) wants_wheel_timeout: bool,
+    /// Stillwater: the running mouse-wheel scroll animation and the point it scrolls at.
+    smooth_scroll: Option<(SmoothScrollAnimation, DevicePoint)>,
+    /// Stillwater: whether a [`SmoothScrollRefreshDriverObserver`] is registered for this
+    /// WebView.
+    observing_frames_for_smooth_scroll: bool,
+    /// Stillwater: when pending scroll events (wheel, keys, touch) last scrolled something.
+    last_input_scroll: Option<Instant>,
     /// Touch input state machine
     touch_handler: TouchHandler,
     /// "Desktop-style" zoom that resizes the viewport to fit the window.
@@ -194,6 +254,14 @@ impl WebViewRenderer {
             touch_handler: TouchHandler::new(webview_id),
             pending_scroll_zoom_events: Default::default(),
             pending_wheel_events: Default::default(),
+            expired_wheel_events: Default::default(),
+            last_wheel_event: None,
+            wheel_gesture: 0,
+            wheel_gesture_state: WheelGestureState::Undecided,
+            wants_wheel_timeout: false,
+            smooth_scroll: None,
+            observing_frames_for_smooth_scroll: false,
+            last_input_scroll: None,
             page_zoom: DEFAULT_PAGE_ZOOM,
             pinch_zoom: PinchZoom::new(rect),
             hidpi_scale_factor: Scale::new(hidpi_scale_factor.0),
@@ -324,6 +392,8 @@ impl WebViewRenderer {
         let old_pipeline_id = self.root_pipeline_id.replace(pipeline_id);
 
         if old_pipeline_id != self.root_pipeline_id {
+            // Stillwater: the rest of a wheel scroll animation belongs to the previous page.
+            let _ = self.cancel_smooth_scroll();
             debug!(
                 "Updating webview ({:?}) from pipeline {:?} to {:?}",
                 3, old_pipeline_id, self.root_pipeline_id
@@ -553,6 +623,14 @@ impl WebViewRenderer {
             }
         }
 
+        self.forward_input_event(event, hit_test_result)
+    }
+
+    fn forward_input_event(
+        &self,
+        event: InputEventAndId,
+        hit_test_result: Option<PaintHitTestResult>,
+    ) -> bool {
         if let Err(error) = self.embedder_to_constellation_sender.send(
             EmbedderToConstellationMessage::ForwardInputEvent(self.id, event, hit_test_result),
         ) {
@@ -574,11 +652,240 @@ impl WebViewRenderer {
         }
 
         if let InputEvent::Wheel(wheel_event) = event_and_id.event {
-            self.pending_wheel_events
-                .insert(event_and_id.id, wheel_event);
+            return self.on_wheel_event(render_api, repaint_reason, wheel_event, event_and_id.id);
         }
 
         self.dispatch_input_event_with_hit_testing(render_api, event_and_id)
+    }
+
+    /// Stillwater: whether a `wheel` listener in the document of `pipeline_id`, or of a
+    /// document containing it, may cancel wheel events.
+    fn wheel_listeners_may_cancel(&self, mut pipeline_id: PipelineId) -> bool {
+        // Bounded, in case a broken frame tree had a cycle.
+        for _ in 0..32 {
+            let Some(details) = self.pipelines.get(&pipeline_id) else {
+                return false;
+            };
+            if details.has_blocking_wheel_listeners {
+                return true;
+            }
+            let Some(parent) = details.parent_pipeline_id else {
+                return false;
+            };
+            pipeline_id = parent;
+        }
+        true
+    }
+
+    /// Stillwater: scroll-first wheel handling (as Chromium and Gecko do). Scrolling used to
+    /// wait until script had dispatched the `wheel` event at its next rendering update and
+    /// answered: 13-30 ms per notch on a light page, 180-200 ms on a long Wikipedia article.
+    /// Now `Paint` scrolls at once and sends the event to script as not cancelable, unless the
+    /// page has a `wheel` listener that may cancel it. Then only the first event of a gesture
+    /// waits for script (for at most `WHEEL_SCRIPT_TIMEOUT`); if script didn't cancel it, the
+    /// rest of the gesture scrolls at once. Ctrl+wheel always waits, as before.
+    fn on_wheel_event(
+        &mut self,
+        render_api: &RenderApi,
+        repaint_reason: &Cell<RepaintReason>,
+        mut wheel_event: WheelEvent,
+        id: InputEventId,
+    ) -> bool {
+        let point = wheel_event
+            .point
+            .as_device_point(self.device_pixels_per_page_pixel());
+        let Some(hit_test_result) = self.hit_test(render_api, point).into_iter().next() else {
+            warn!("Empty hit test result for input event, ignoring.");
+            return false;
+        };
+
+        let now = Instant::now();
+        if self
+            .last_wheel_event
+            .is_none_or(|last| now.saturating_duration_since(last) > WHEEL_GESTURE_GAP)
+        {
+            self.wheel_gesture += 1;
+            self.wheel_gesture_state = WheelGestureState::Undecided;
+        }
+        self.last_wheel_event = Some(now);
+
+        if !scroll_first_enabled() {
+            self.pending_wheel_events.insert(
+                id,
+                PendingWheelEvent {
+                    event: wheel_event,
+                    gesture: self.wheel_gesture,
+                    sent: now,
+                },
+            );
+            return self.forward_input_event(
+                InputEventAndId {
+                    event: InputEvent::Wheel(wheel_event),
+                    id,
+                },
+                Some(hit_test_result),
+            );
+        }
+
+        let wait_for_script = wheel_event.always_blocking ||
+            (self.wheel_gesture_state != WheelGestureState::Allowed &&
+                self.wheel_listeners_may_cancel(hit_test_result.pipeline_id));
+
+        if wait_for_script {
+            self.pending_wheel_events.insert(
+                id,
+                PendingWheelEvent {
+                    event: wheel_event,
+                    gesture: self.wheel_gesture,
+                    sent: now,
+                },
+            );
+            self.wants_wheel_timeout = true;
+        } else {
+            wheel_event.cancelable = false;
+            self.scroll_for_wheel_event(&wheel_event, repaint_reason, now);
+        }
+
+        self.forward_input_event(
+            InputEventAndId {
+                event: InputEvent::Wheel(wheel_event),
+                id,
+            },
+            Some(hit_test_result),
+        )
+    }
+
+    /// Stillwater: scroll for a wheel event that script hasn't cancelled (or that it can't).
+    /// A notch of a mouse wheel animates (see `smooth_scroll.rs`); precise input (touchpads,
+    /// pixel deltas) is applied as it comes, being smooth already.
+    fn scroll_for_wheel_event(
+        &mut self,
+        wheel_event: &WheelEvent,
+        repaint_reason: &Cell<RepaintReason>,
+        now: Instant,
+    ) {
+        // A scroll delta for a wheel event is the inverse of the wheel delta.
+        let scroll_delta =
+            DeviceVector2D::new(-wheel_event.delta.x as f32, -wheel_event.delta.y as f32);
+        let point = wheel_event
+            .point
+            .as_device_point(self.device_pixels_per_page_pixel());
+
+        if !wheel_event.smooth {
+            self.on_scroll_window_event(
+                Scroll::Delta(scroll_delta.into()),
+                point,
+                ScrollType::InputEvents,
+            );
+            return;
+        }
+
+        match self.smooth_scroll.as_mut() {
+            Some((animation, animation_point)) => {
+                animation.add_delta((scroll_delta.x, scroll_delta.y), now);
+                *animation_point = point;
+            },
+            None => {
+                let mut animation =
+                    SmoothScrollAnimation::new((scroll_delta.x, scroll_delta.y), now);
+                // The first step goes out with this event, so the page moves in the very next
+                // frame rather than one frame later.
+                let (step, _) = animation.step(now);
+                self.push_smooth_scroll_step(step, point);
+                self.smooth_scroll = Some((animation, point));
+            },
+        }
+
+        if !self.observing_frames_for_smooth_scroll {
+            self.refresh_driver
+                .add_observer(Rc::new(SmoothScrollRefreshDriverObserver { webview_id: self.id }));
+            self.observing_frames_for_smooth_scroll = true;
+            repaint_reason.set(repaint_reason.get().union(RepaintReason::StartedSmoothScroll));
+        }
+    }
+
+    fn push_smooth_scroll_step(&mut self, step: (f32, f32), point: DevicePoint) {
+        if step == (0.0, 0.0) {
+            return;
+        }
+        self.on_scroll_window_event(
+            Scroll::Delta(DeviceVector2D::new(step.0, step.1).into()),
+            point,
+            ScrollType::InputEvents,
+        );
+    }
+
+    /// Stillwater: advance the wheel scroll animation at a frame start. Returns whether it
+    /// continues (and so whether to keep observing frames).
+    pub(crate) fn update_smooth_scroll_at_new_frame_start(&mut self, now: Instant) -> bool {
+        let Some((mut animation, point)) = self.smooth_scroll.take() else {
+            self.observing_frames_for_smooth_scroll = false;
+            return false;
+        };
+        let (step, more) = animation.step(now);
+        self.push_smooth_scroll_step(step, point);
+        if more {
+            self.smooth_scroll = Some((animation, point));
+        } else {
+            self.observing_frames_for_smooth_scroll = false;
+        }
+        more
+    }
+
+    /// Stillwater: whether a wheel scroll animation is running.
+    pub(crate) fn smooth_scrolling(&self) -> bool {
+        self.smooth_scroll.is_some()
+    }
+
+    /// Stillwater: stop the wheel scroll animation where it is (script scrolled the page, a
+    /// key or the scrollbar did, another page is shown, ...), so its remaining steps don't
+    /// move the new position. Returns whether one was running.
+    pub(crate) fn cancel_smooth_scroll(&mut self) -> bool {
+        self.smooth_scroll.take().is_some()
+    }
+
+    /// Stillwater: whether wheel/key input scrolled this WebView in the last 300 ms, so scroll
+    /// positions Paint sent to script for it may still be on their way.
+    pub(crate) fn input_scrolled_recently(&self) -> bool {
+        self.last_input_scroll
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(300))
+    }
+
+    /// Stillwater: scroll for the wheel events that have waited for script longer than
+    /// `WHEEL_SCRIPT_TIMEOUT`. Returns whether any are still waiting.
+    pub(crate) fn expire_pending_wheel_events(
+        &mut self,
+        repaint_reason: &Cell<RepaintReason>,
+        now: Instant,
+    ) -> bool {
+        if self.pending_wheel_events.is_empty() || !scroll_first_enabled() {
+            return false;
+        }
+        let mut expired: Vec<_> = self
+            .pending_wheel_events
+            .iter()
+            .filter(|(_, pending)| now.saturating_duration_since(pending.sent) >= WHEEL_SCRIPT_TIMEOUT)
+            .map(|(id, pending)| (pending.sent, *id))
+            .collect();
+        expired.sort_by_key(|(sent, _)| *sent);
+        for (_, id) in expired {
+            let Some(pending) = self.pending_wheel_events.remove(&id) else {
+                continue;
+            };
+            debug!("Wheel event {id:?}: script didn't answer in time, scrolling anyway");
+            if self.expired_wheel_events.len() > 64 {
+                // Answers that never came (the page went away).
+                self.expired_wheel_events.clear();
+            }
+            self.expired_wheel_events.insert(id, pending.gesture);
+            if pending.gesture == self.wheel_gesture &&
+                self.wheel_gesture_state == WheelGestureState::Undecided
+            {
+                self.wheel_gesture_state = WheelGestureState::Allowed;
+            }
+            self.scroll_for_wheel_event(&pending.event, repaint_reason, now);
+        }
+        !self.pending_wheel_events.is_empty()
     }
 
     fn send_touch_event(
@@ -966,6 +1273,7 @@ impl WebViewRenderer {
             )
         });
         if let Some(ref scroll_result) = scroll_result {
+            self.last_input_scroll = Some(Instant::now());
             self.send_scroll_positions_to_layout_for_pipeline(
                 scroll_result.hit_test_result.pipeline_id,
                 scroll_result.external_scroll_id,
@@ -1295,13 +1603,27 @@ impl WebViewRenderer {
                 );
         }
 
-        if let Some(wheel_event) = self.pending_wheel_events.remove(&id) &&
-            !result.contains(InputEventResult::DefaultPrevented)
+        let prevented = result.contains(InputEventResult::DefaultPrevented);
+        if let Some(pending) = self.pending_wheel_events.remove(&id) {
+            if pending.gesture == self.wheel_gesture &&
+                self.wheel_gesture_state == WheelGestureState::Undecided
+            {
+                self.wheel_gesture_state = if prevented {
+                    WheelGestureState::Prevented
+                } else {
+                    WheelGestureState::Allowed
+                };
+            }
+            if !prevented {
+                self.scroll_for_wheel_event(&pending.event, repaint_reason, Instant::now());
+            }
+        } else if let Some(gesture) = self.expired_wheel_events.remove(&id) &&
+            prevented &&
+            gesture == self.wheel_gesture
         {
-            // A scroll delta for a wheel event is the inverse of the wheel delta.
-            let scroll_delta =
-                DeviceVector2D::new(-wheel_event.delta.x as f32, -wheel_event.delta.y as f32);
-            self.notify_scroll_event(Scroll::Delta(scroll_delta.into()), wheel_event.point);
+            // The timeout scrolled for an event that script then cancelled: the page does
+            // handle the wheel itself, so the rest of this gesture waits for script again.
+            self.wheel_gesture_state = WheelGestureState::Prevented;
         }
     }
 
@@ -1326,3 +1648,15 @@ impl WebViewRenderer {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UnknownWebView(pub WebViewId);
+
+/// Stillwater: advances a WebView's mouse-wheel scroll animation at every frame start (the
+/// display's vertical blank with the vsync refresh driver) while it runs.
+pub(crate) struct SmoothScrollRefreshDriverObserver {
+    pub webview_id: WebViewId,
+}
+
+impl RefreshDriverObserver for SmoothScrollRefreshDriverObserver {
+    fn frame_started(&self, painter: &mut Painter) -> bool {
+        painter.step_smooth_scroll(self.webview_id)
+    }
+}

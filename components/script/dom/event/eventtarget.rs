@@ -484,6 +484,29 @@ impl EventTarget {
         }
     }
 
+    /// Stillwater: keep the window's count of `wheel` listeners that may cancel the event (not
+    /// passive), which tells Paint whether wheel scrolling has to wait for script. Only `wheel`
+    /// counts: it is the only wheel event Servo dispatches (no `mousewheel`/`DOMMouseScroll`),
+    /// so listeners for the legacy names can never cancel anything.
+    fn note_wheel_listener(&self, ty: &Atom, passive: bool, added: bool) {
+        if passive || &**ty != "wheel" {
+            return;
+        }
+        if std::env::var_os("STILLWATER_DEBUG_WHEEL_LISTENERS").is_some() {
+            let what = if let Some(node) = self.downcast::<Node>() {
+                format!("{} connected={}", node.debug_str(), node.is_connected())
+            } else if self.is::<Window>() {
+                "window".to_owned()
+            } else {
+                "other".to_owned()
+            };
+            eprintln!("wheel listener {}: {what}", if added { "added" } else { "removed" });
+        }
+        if let Some(window) = self.global().downcast::<Window>() {
+            window.note_blocking_wheel_listener(added);
+        }
+    }
+
     /// Notify the global about a listener being removed for a given event type.
     fn notify_listener_removed(&self, ty: &Atom) {
         if let Some(interest) = self.interest_for_event_type(ty) {
@@ -522,9 +545,10 @@ impl EventTarget {
         };
 
         for (ty, entries) in handlers.iter() {
-            entries
-                .iter()
-                .for_each(|entry| entry.borrow_mut().removed = true);
+            entries.iter().for_each(|entry| {
+                entry.borrow_mut().removed = true;
+                self.note_wheel_listener(ty, entry.borrow().passive, false);
+            });
             self.notify_listener_removed(ty);
         }
     }
@@ -584,21 +608,25 @@ impl EventTarget {
                         listener.take().expect("Guaranteed above").into(),
                     );
                 } else {
-                    entries.remove(idx).borrow_mut().removed = true;
+                    let removed = entries.remove(idx);
+                    removed.borrow_mut().removed = true;
+                    self.note_wheel_listener(&ty, removed.borrow().passive, false);
                     self.notify_listener_removed(&ty);
                 }
             },
             None => {
                 if listener.is_some() {
+                    let passive = self.default_passive_value(&ty);
                     entries.push(Rc::new(RefCell::new(EventListenerEntry {
                         phase: ListenerPhase::Bubbling,
                         listener: EventListenerType::Inline(
                             listener.take().expect("Guaranteed above").into(),
                         ),
                         once: false,
-                        passive: self.default_passive_value(&ty),
+                        passive,
                         removed: false,
                     })));
+                    self.note_wheel_listener(&ty, passive, true);
                     self.notify_listener_added(&ty)
                 }
             },
@@ -612,7 +640,9 @@ impl EventTarget {
             let Some(entries) = handlers.get_mut(ty) &&
             let Some(position) = entries.iter().position(|e| *e == *entry)
         {
-            entries.remove(position).borrow_mut().removed = true;
+            let removed = entries.remove(position);
+            removed.borrow_mut().removed = true;
+            self.note_wheel_listener(ty, removed.borrow().passive, false);
             self.notify_listener_removed(ty);
         }
     }
@@ -986,6 +1016,7 @@ impl EventTarget {
                 passive,
                 removed: false,
             })));
+            self.note_wheel_listener(&ty, passive, true);
             self.notify_listener_added(&ty);
         }
     }
@@ -1016,7 +1047,9 @@ impl EventTarget {
                 .position(|entry| entry.borrow().matches_additive(phase, listener))
             {
                 // Step 2. Set listener’s removed to true and remove listener from eventTarget’s event listener list.
-                entries.remove(position).borrow_mut().removed = true;
+                let removed = entries.remove(position);
+                removed.borrow_mut().removed = true;
+                self.note_wheel_listener(&ty_atom, removed.borrow().passive, false);
                 self.notify_listener_removed(&ty_atom);
             }
         }

@@ -406,11 +406,38 @@ pub struct WheelDelta {
 pub struct WheelEvent {
     pub delta: WheelDelta,
     pub point: WebViewPoint,
+    /// Stillwater: whether script may cancel this event with `preventDefault()`. `Paint`
+    /// clears it for an event it has already scrolled for without waiting for script.
+    pub cancelable: bool,
+    /// Stillwater: the event is a notch of a mouse wheel (rather than precise touchpad or
+    /// pixel input), so `Paint` animates the scroll it causes.
+    pub smooth: bool,
+    /// Stillwater: always let script see (and possibly cancel) this event before scrolling,
+    /// as for Ctrl+wheel, which pages use for zooming.
+    pub always_blocking: bool,
 }
 
 impl WheelEvent {
     pub fn new(delta: WheelDelta, point: WebViewPoint) -> Self {
-        WheelEvent { delta, point }
+        WheelEvent {
+            delta,
+            point,
+            cancelable: true,
+            smooth: false,
+            always_blocking: false,
+        }
+    }
+
+    /// Stillwater: a mouse-wheel notch, whose scroll `Paint` animates.
+    pub fn with_smooth(mut self, smooth: bool) -> Self {
+        self.smooth = smooth;
+        self
+    }
+
+    /// Stillwater: see [`Self::always_blocking`].
+    pub fn with_always_blocking(mut self, always_blocking: bool) -> Self {
+        self.always_blocking = always_blocking;
+        self
     }
 }
 

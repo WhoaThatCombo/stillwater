@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crossbeam_channel::Sender;
 use dpi::PhysicalSize;
 use embedder_traits::{
-    InputEvent, InputEventAndId, InputEventId, InputEventResult, PaintHitTestResult,
+    EventLoopWaker, InputEvent, InputEventAndId, InputEventId, InputEventResult, PaintHitTestResult,
     ScreenshotCaptureError, Scroll, ViewportDetails, WebViewPoint, WebViewRect,
 };
 use euclid::{Point2D, Rect, Scale, Size2D};
@@ -60,7 +60,9 @@ use wr_malloc_size_of::MallocSizeOfOps;
 
 use crate::Paint;
 use crate::paint::{RepaintReason, WebRenderDebugOption};
-use crate::refresh_driver::{AnimationRefreshDriverObserver, BaseRefreshDriver};
+use crate::refresh_driver::{
+    AnimationRefreshDriverObserver, BaseRefreshDriver, TimerRefreshDriver,
+};
 use crate::render_notifier::RenderNotifier;
 use crate::screenshot::ScreenshotTaker;
 use crate::web_content_animation::WebContentAnimator;
@@ -136,6 +138,13 @@ pub(crate) struct Painter {
 
     /// A counter used to generate new property binding keys for [`WebView`]s.
     property_binding_key_counter: Cell<u64>,
+
+    /// Stillwater: a timer to wake the event loop when a wheel event that waits for script
+    /// reaches `WHEEL_SCRIPT_TIMEOUT`, so `perform_updates` scrolls for it.
+    wheel_timeout_timer: Rc<TimerRefreshDriver>,
+
+    /// Stillwater: wakes the event loop from `wheel_timeout_timer`.
+    event_loop_waker: Box<dyn EventLoopWaker>,
 }
 
 impl Drop for Painter {
@@ -305,6 +314,8 @@ impl Painter {
                 (*timer_refresh_driver).clone(),
             ),
             property_binding_key_counter: Default::default(),
+            wheel_timeout_timer: (*timer_refresh_driver).clone(),
+            event_loop_waker: paint.event_loop_waker.clone_box(),
         };
         painter.assert_gl_framebuffer_complete();
         painter.clear_background(painter.clear_color());
@@ -330,6 +341,17 @@ impl Painter {
             self.send_root_pipeline_display_list();
         }
 
+        // Stillwater: wheel events that script has kept waiting too long scroll anyway.
+        let now = std::time::Instant::now();
+        let mut wheel_events_waiting = false;
+        for webview_renderer in self.webview_renderers.values_mut() {
+            wheel_events_waiting |=
+                webview_renderer.expire_pending_wheel_events(&self.needs_repaint, now);
+        }
+        if wheel_events_waiting {
+            self.arm_wheel_timeout_timer();
+        }
+
         let mut need_zoom = false;
         let scroll_offset_updates: Vec<_> = self
             .webview_renderers
@@ -348,6 +370,40 @@ impl Painter {
             dynamic_properties_updated,
             scroll_offset_updates,
         );
+    }
+
+    /// Stillwater: wake the event loop when a wheel event that now waits for script would time
+    /// out, so `perform_updates` runs then even if nothing else happens.
+    fn arm_wheel_timeout_timer(&self) {
+        let waker = self.event_loop_waker.clone_box();
+        self.wheel_timeout_timer.queue_timer(
+            crate::webview_renderer::WHEEL_SCRIPT_TIMEOUT + std::time::Duration::from_millis(1),
+            Box::new(move || waker.wake()),
+        );
+    }
+
+    /// Stillwater: advance the wheel scroll animation of `webview_id` at a frame start and
+    /// send its step to WebRender straight away, so it shows in the next frame. Returns
+    /// whether the animation continues.
+    pub(crate) fn step_smooth_scroll(&mut self, webview_id: WebViewId) -> bool {
+        let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) else {
+            return false;
+        };
+        let more = webview_renderer.update_smooth_scroll_at_new_frame_start(std::time::Instant::now());
+        let (zoom, scroll_result) =
+            webview_renderer.process_pending_scroll_and_pinch_zoom_events(&self.webrender_api);
+        self.maybe_send_scroll_and_dynamic_property_updates_transaction(
+            zoom == PinchZoomResult::DidPinchZoom,
+            scroll_result.into_iter().collect(),
+        );
+        more
+    }
+
+    /// Stillwater: whether any wheel scroll animation is running.
+    fn smooth_scrolling(&self) -> bool {
+        self.webview_renderers
+            .values()
+            .any(WebViewRenderer::smooth_scrolling)
     }
 
     #[track_caller]
@@ -479,7 +535,10 @@ impl Painter {
         // the scene no longer needs to be repainted.
         self.needs_repaint.set(RepaintReason::empty());
 
-        if !notified_refresh_driver_observers {
+        // Stillwater: while a wheel scroll animation runs, paint at every frame start even if
+        // its last step changed nothing on screen (a scroller at its end), or it would never be
+        // called again to finish.
+        if !notified_refresh_driver_observers || self.smooth_scrolling() {
             self.set_needs_repaint(RepaintReason::FrameStart);
         }
 
@@ -1075,6 +1134,7 @@ impl Painter {
             return;
         };
 
+        let old_offset = pipeline_details.scroll_tree.scroll_offset(external_scroll_id);
         let Some(offset) = pipeline_details
             .scroll_tree
             .set_scroll_offset_for_node_with_external_scroll_id(
@@ -1088,6 +1148,22 @@ impl Painter {
             warn!("Could not scroll node with id: {external_scroll_id:?}");
             return;
         };
+
+        // Stillwater: script moved a scroller (scrollTo, an anchor, find in page, focus):
+        // a running wheel animation stops rather than carry on from the new position. Script
+        // writing back the position it already has (some pages do so from `scroll` listeners)
+        // doesn't count.
+        if old_offset != Some(offset) {
+            let was_animating = webview_renderer.cancel_smooth_scroll();
+            // Positions from wheel scrolling that Paint sent to script just before this may
+            // still be on their way and would overwrite script's view of this scroll (script
+            // then reports the old position while the new one is shown). Send the current
+            // ones after them.
+            if was_animating || webview_renderer.input_scrolled_recently() {
+                webview_renderer
+                    .send_scroll_positions_to_layout_for_pipeline(pipeline_id, external_scroll_id);
+            }
+        }
 
         let mut transaction = Transaction::new();
         transaction.set_scroll_offsets(
@@ -1110,6 +1186,8 @@ impl Painter {
         let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) else {
             return;
         };
+        // Stillwater: a key or the scrollbar scrolls from where the page is now.
+        let _ = webview_renderer.cancel_smooth_scroll();
         let (pinch_zoom_result, scroll_results) = webview_renderer.scroll_viewport_by_delta(delta);
         let did_pinch_zoom = pinch_zoom_result == PinchZoomResult::DidPinchZoom;
         self.maybe_send_scroll_and_dynamic_property_updates_transaction(
@@ -1593,7 +1671,9 @@ impl Painter {
         webview_id: WebViewId,
         event: InputEventAndId,
     ) -> bool {
-        self.webview_renderers
+        let mut arm_wheel_timeout = false;
+        let result = self
+            .webview_renderers
             .get_mut(&webview_id)
             .is_some_and(|webview_renderer| {
                 match &event.event {
@@ -1612,8 +1692,18 @@ impl Painter {
                     _ => {},
                 }
 
-                webview_renderer.notify_input_event(&self.webrender_api, &self.needs_repaint, event)
-            })
+                let result = webview_renderer.notify_input_event(
+                    &self.webrender_api,
+                    &self.needs_repaint,
+                    event,
+                );
+                arm_wheel_timeout = std::mem::take(&mut webview_renderer.wants_wheel_timeout);
+                result
+            });
+        if arm_wheel_timeout {
+            self.arm_wheel_timeout_timer();
+        }
+        result
     }
 
     pub(crate) fn notify_scroll_event(

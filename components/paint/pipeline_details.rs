@@ -78,6 +78,10 @@ pub(crate) struct PipelineDetails {
 
     /// Like `animated_transforms`, for animated `opacity` values.
     pub animated_floats: Vec<PropertyValue<f32>>,
+
+    /// Stillwater: whether this pipeline's document has `wheel` listeners that may cancel a
+    /// wheel event (not passive). Without any, wheel scrolling doesn't wait for script.
+    pub has_blocking_wheel_listeners: bool,
 }
 
 impl PipelineDetails {
@@ -110,6 +114,7 @@ impl PipelineDetails {
             animations: Default::default(),
             animated_transforms: Vec::new(),
             animated_floats: Vec::new(),
+            has_blocking_wheel_listeners: false,
         }
     }
 

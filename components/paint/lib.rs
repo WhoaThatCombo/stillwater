@@ -29,6 +29,7 @@ mod program_cache;
 mod refresh_driver;
 mod render_notifier;
 mod screenshot;
+mod smooth_scroll;
 mod touch;
 mod web_content_animation;
 #[cfg(feature = "webgl")]

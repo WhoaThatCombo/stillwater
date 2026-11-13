@@ -23,7 +23,7 @@ use servo::{
     MouseButtonAction, MouseButtonEvent, MouseLeftViewportEvent, MouseMoveEvent, NamedKey,
     OffscreenRenderingContext, PermissionRequest, RenderingContext, ScreenGeometry, Theme,
     TouchEvent, TouchEventType, TouchId, TouchPointerType, WebRenderDebugOption, WebView,
-    WebViewId, WheelDelta, WheelEvent, WheelMode, WindowRenderingContext,
+    WebViewId, WebViewPoint, WheelDelta, WheelEvent, WheelMode, WindowRenderingContext,
     convert_rect_to_css_pixel,
 };
 use url::Url;
@@ -1010,6 +1010,28 @@ impl HeadedWindow {
         }
     }
 
+    /// The wheel event for a winit `MouseWheel`. A notch of a mouse wheel (`LineDelta`) scrolls
+    /// `LINE_HEIGHT` (`LINE_WIDTH`) pixels per line and, with "Smooth scrolling" on, Paint
+    /// animates it; precise input (touchpads: `PixelDelta`) goes as it comes. Ctrl+wheel always
+    /// lets the page see the event before anything scrolls (pages zoom with it).
+    fn wheel_event_from_winit(&self, delta: MouseScrollDelta, point: WebViewPoint) -> WheelEvent {
+        let (x, y, notch) = match delta {
+            MouseScrollDelta::LineDelta(x, y) => {
+                ((x * LINE_WIDTH) as f64, (y * LINE_HEIGHT) as f64, true)
+            },
+            MouseScrollDelta::PixelDelta(delta) => (delta.x, delta.y, false),
+        };
+        let delta = WheelDelta {
+            x,
+            y,
+            z: 0.0,
+            mode: WheelMode::DeltaPixel,
+        };
+        WheelEvent::new(delta, point)
+            .with_smooth(notch && crate::desktop::settings::smooth_scroll_enabled())
+            .with_always_blocking(self.modifiers_state.get().control_key())
+    }
+
     /// Helper function to handle mouse move events.
     fn handle_mouse_move_event(&self, webview: &WebView, position: PhysicalPosition<f64>) {
         let mut point = winit_position_to_euclid_point(position).to_f32();
@@ -1348,20 +1370,9 @@ impl HeadedWindow {
                 let Some(point) = self.sidebar_mouse_point.get() else {
                     return false;
                 };
-                let (x, y) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => {
-                        ((x * LINE_WIDTH) as f64, (y * LINE_HEIGHT) as f64)
-                    },
-                    MouseScrollDelta::PixelDelta(delta) => (delta.x, delta.y),
-                };
-                let delta = WheelDelta {
-                    x,
-                    y,
-                    z: 0.0,
-                    mode: WheelMode::DeltaPixel,
-                };
-                sidebar_webview
-                    .notify_input_event(InputEvent::Wheel(WheelEvent::new(delta, point.into())));
+                sidebar_webview.notify_input_event(InputEvent::Wheel(
+                    self.wheel_event_from_winit(*delta, point.into()),
+                ));
                 true
             },
             WindowEvent::KeyboardInput { event, .. } if gui.sidebar.is_focused() => {
@@ -1617,19 +1628,9 @@ impl HeadedWindow {
                 let Some(webview) = gui.pane_webview(kind) else {
                     return false;
                 };
-                let (x, y) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => {
-                        ((x * LINE_WIDTH) as f64, (y * LINE_HEIGHT) as f64)
-                    },
-                    MouseScrollDelta::PixelDelta(delta) => (delta.x, delta.y),
-                };
-                let delta = WheelDelta {
-                    x,
-                    y,
-                    z: 0.0,
-                    mode: WheelMode::DeltaPixel,
-                };
-                webview.notify_input_event(InputEvent::Wheel(WheelEvent::new(delta, local.into())));
+                webview.notify_input_event(InputEvent::Wheel(
+                    self.wheel_event_from_winit(*delta, local.into()),
+                ));
                 true
             },
             WindowEvent::KeyboardInput { event, .. } => {
@@ -2063,26 +2064,8 @@ impl HeadedWindow {
                     }
                 },
                 WindowEvent::MouseWheel { delta, .. } => {
-                    let (delta_x, delta_y, mode) = match delta {
-                        MouseScrollDelta::LineDelta(delta_x, delta_y) => (
-                            (delta_x * LINE_WIDTH) as f64,
-                            (delta_y * LINE_HEIGHT) as f64,
-                            WheelMode::DeltaPixel,
-                        ),
-                        MouseScrollDelta::PixelDelta(delta) => {
-                            (delta.x, delta.y, WheelMode::DeltaPixel)
-                        },
-                    };
-
-                    // Create wheel event before snapping to the major axis of movement
-                    let delta = WheelDelta {
-                        x: delta_x,
-                        y: delta_y,
-                        z: 0.0,
-                        mode,
-                    };
                     let point = self.webview_relative_mouse_point.get();
-                    webview.notify_input_event(InputEvent::Wheel(WheelEvent::new(
+                    webview.notify_input_event(InputEvent::Wheel(self.wheel_event_from_winit(
                         delta,
                         point.into(),
                     )));
