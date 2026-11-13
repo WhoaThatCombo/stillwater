@@ -40,7 +40,8 @@
     "bottom", "left", "margin-top", "margin-right", "margin-bottom", "margin-left", "padding-top",
     "padding-right", "padding-bottom", "padding-left", "border-top-width", "border-right-width",
     "border-bottom-width", "border-left-width", "overflow-x", "overflow-y", "object-fit",
-    "transform", "opacity", "visibility", "z-index", "contain", "float",
+    "transform", "opacity", "visibility", "z-index", "contain", "float", "pointer-events",
+    "will-change", "clip-path", "backdrop-filter", "isolation", "mix-blend-mode",
     "grid-template-columns", "grid-template-rows",
   ];
   const DEFAULTS = {
@@ -50,6 +51,8 @@
     "right": "auto", "bottom": "auto", "left": "auto", "object-fit": "fill", "transform": "none",
     "opacity": "1", "visibility": "visible", "z-index": "auto", "contain": "none",
     "float": "none", "grid-template-columns": "none", "grid-template-rows": "none",
+    "pointer-events": "auto", "will-change": "auto", "clip-path": "none",
+    "backdrop-filter": "none", "isolation": "auto", "mix-blend-mode": "normal",
   };
   const styleOf = (style, all) => PROPS
     .map((name) => [name, style.getPropertyValue(name)])
@@ -135,6 +138,36 @@
   lines.push("", "== Everything at the point, topmost first");
   for (const element of atPoint.slice(0, 40)) {
     lines.push("  " + (element === target ? "> " : "") + tagOf(element) + " " + rectOf(element));
+  }
+
+  // Boxes that cover the point but that the hit test passed over: an overlay that is drawn
+  // there but doesn't take clicks shows up here (deepest first, with its ancestors).
+  const hit = new Set(atPoint);
+  const depthOf = (element) => {
+    let depth = 0;
+    for (let e = element; e; e = e.parentElement) depth++;
+    return depth;
+  };
+  const skipped = [];
+  for (const element of document.querySelectorAll("body *")) {
+    if (hit.has(element)) continue;
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    if (X < rect.left || X > rect.right || Y < rect.top || Y > rect.bottom) continue;
+    skipped.push(element);
+    if (skipped.length > 2000) break;
+  }
+  skipped.sort((a, b) => depthOf(b) - depthOf(a));
+  lines.push("", "== Boxes covering the point that the hit test passed over (" + skipped.length + ", deepest first)");
+  const shownChains = new Set();
+  for (const element of skipped.slice(0, 6)) {
+    const chain = [];
+    for (let e = element; e && chain.length < 10; e = e.parentElement) chain.push(e);
+    const key = chain.map(tagOf).join("<");
+    if (shownChains.has(key)) continue;
+    shownChains.add(key);
+    lines.push("-- " + tagOf(element) + " and its ancestors (innermost first)");
+    chain.forEach((e) => describe(e, 1, false));
   }
 
   lines.push("", "== The element under the pointer (marked > above) and its 12 nearest ancestors (outermost first)");

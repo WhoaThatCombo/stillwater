@@ -760,6 +760,19 @@ impl BoxFragment {
         }
 
         let style = self.style();
+        // A box that is both sticky and transformed is shifted by its sticky offset in its
+        // parent's coordinate space and transformed inside that, as in other engines: its
+        // sticky frame is the parent of its reference frame. (Inside the reference frame the
+        // sticky frame has no scroll frame to stick to, so the box scrolled away.)
+        let sticky_spatial_id = self.build_sticky_frame_if_necessary(
+            stacking_context_tree,
+            containing_block.scroll_node_id,
+            &containing_block.rect,
+            &containing_block_info
+                .for_non_absolute_descendants
+                .scroll_frame_size,
+            containing_block.established_scroll_frame,
+        );
         let frame_origin_for_query = self
             .cumulative_border_box_rect(
                 CumulativeContentRectCalculation::AlreadyDoneWithStackingContextTree,
@@ -771,6 +784,7 @@ impl BoxFragment {
             frame_origin_for_query,
             parent_info
                 .perspective_node
+                .or(sticky_spatial_id)
                 .unwrap_or(containing_block.scroll_node_id),
             style.used_transform_style(self.base.flags).to_webrender(),
             reference_frame_data.transform,
@@ -847,13 +861,18 @@ impl BoxFragment {
         let new_scroll_frame_size = containing_block_info
             .for_non_absolute_descendants
             .scroll_frame_size;
-        let spatial_id = self.build_sticky_frame_if_necessary(
-            stacking_context_tree,
-            containing_block.scroll_node_id,
-            &containing_block.rect,
-            &new_scroll_frame_size,
-            containing_block.established_scroll_frame,
-        );
+        // A transformed box made its sticky frame outside its reference frame.
+        let spatial_id = if reference_frame_info.is_some() {
+            None
+        } else {
+            self.build_sticky_frame_if_necessary(
+                stacking_context_tree,
+                containing_block.scroll_node_id,
+                &containing_block.rect,
+                &new_scroll_frame_size,
+                containing_block.established_scroll_frame,
+            )
+        };
 
         let clip_id = with_style.build_clip_frame_if_necessary(
             stacking_context_tree,
