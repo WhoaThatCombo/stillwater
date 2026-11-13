@@ -228,6 +228,7 @@
       swallow(event);
       stopPicking();
       picked = false;
+      highlight(selected);
     }
   }
   var PICK_EVENTS = [
@@ -833,8 +834,10 @@
       return pathTo(nodeOf(p.id));
     },
     pick: function (p) {
-      if (p.stop) stopPicking();
-      else startPicking();
+      if (p.stop) {
+        stopPicking();
+        highlight(selected);
+      } else startPicking();
       return picking;
     },
     inspectAt: function (p) {
@@ -861,7 +864,6 @@
         result.pickCancelled = true;
       }
       picked = null;
-      if (!picking && highlighted !== selected) highlight(selected);
       return result;
     },
     setAttributes: setAttributes,

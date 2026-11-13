@@ -132,7 +132,9 @@ impl WebViewDelegate for PaneDelegate {
                 self.shared.waker.wake_by_ref();
             },
             // The inspector's own script errors.
-            None if matches!(level, servo::ConsoleLogLevel::Error) => {
+            None if matches!(level, servo::ConsoleLogLevel::Error) &&
+                !crate::desktop::incognito::active() =>
+            {
                 crate::desktop::diagnostics::log(format!("inspector page: {message}"))
             },
             None => {},
