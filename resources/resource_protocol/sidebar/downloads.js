@@ -174,11 +174,34 @@
       : active === 1 ? "Downloads (1 downloading)" : `Downloads (${active} downloading)`;
   }
 
+  // Progress pushes arrive several times a second. A row is rebuilt only when something other
+  // than its byte counts changed; otherwise the kept row gets the new numbers in place, so the
+  // buttons under the pointer aren't replaced between a press and its release, and keyboard
+  // focus, hover and the open menu stay put.
+  const keptRows = new Map(); // key -> { sig, row }
+  function keptItem(item) {
+    const { received, speed, ...rest } = item;
+    const sig = JSON.stringify([rest, confirmOpen === item.key]);
+    const kept = keptRows.get(item.key);
+    if (kept && kept.sig === sig) {
+      kept.row.querySelector(".dl-detail").textContent = detail(item);
+      const fill = kept.row.querySelector(".dl-bar-fill");
+      if (fill && item.total) fill.style.width = `${Math.min(100, (100 * item.received) / item.total)}%`;
+      return kept.row;
+    }
+    const row = renderItem(item);
+    keptRows.set(item.key, { sig, row });
+    return row;
+  }
+
   function render() {
     renderButton();
     if (panel.hidden) return;
     const data = downloads();
-    $("dl-list").replaceChildren(...data.items.map(renderItem));
+    placeRows($("dl-list"), data.items.map(keptItem));
+    for (const key of keptRows.keys()) {
+      if (!data.items.some((item) => item.key === key)) keptRows.delete(key);
+    }
     $("dl-empty").hidden = data.items.length > 0;
     $("dl-ask").setAttribute("aria-pressed", String(!!data.askWhereToSave));
     $("dl-folder").textContent = data.askWhereToSave

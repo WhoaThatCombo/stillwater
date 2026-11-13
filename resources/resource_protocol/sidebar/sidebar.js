@@ -500,11 +500,42 @@ function renderSplitRow(split) {
   return row;
 }
 
+// Essentials, pinned tabs and the spaces strip are rebuilt only when what they show changed,
+// like the tab rows (`keyedRow`): a state push for something else (a title elsewhere, download
+// progress, the ad-block count) would otherwise replace every tile and icon under the pointer,
+// dropping hover and keyboard focus and decoding each favicon again. What is only a class
+// (active, loading, unloaded) is set on the kept elements instead (`syncPins`).
+const withoutFlags = (key, value) => (key === "active" || key === "loading" || key === "preloading" ? undefined : value);
+let essentialsSig = "";
+let pinnedSig = "";
+let spacesSig = "";
+function syncPins() {
+  const pinned = state.pinned || { folders: [], pins: [] };
+  const byId = new Map([...pinned.pins, ...pinned.folders.flatMap((folder) => folder.pins)].map((pin) => [String(pin.pinId), pin]));
+  for (const row of document.querySelectorAll("#pinned .tab[data-pin]")) {
+    const pin = byId.get(row.dataset.pin);
+    if (!pin) continue;
+    row.classList.toggle("selected", !!pin.active);
+    row.classList.toggle("loading", !!pin.loading);
+    row.classList.toggle("unloaded", pin.loaded === false || !!pin.preloading);
+  }
+  const tiles = new Map((state.essentials || []).map((pin) => [String(pin.pinId), pin]));
+  for (const tile of document.querySelectorAll("#essentials .essential")) {
+    const pin = tiles.get(tile.dataset.pin);
+    if (!pin) continue;
+    tile.classList.toggle("selected", !!pin.active);
+    tile.classList.toggle("unloaded", !(pin.loaded && !pin.preloading));
+  }
+}
+
 // Essentials: square favicon tiles at the top.
 function renderEssentials() {
   const essentials = state.essentials || [];
   const grid = $("essentials");
   grid.hidden = essentials.length === 0;
+  const sig = JSON.stringify(essentials, withoutFlags);
+  if (sig === essentialsSig) return;
+  essentialsSig = sig;
   grid.replaceChildren(...essentials.map((pin) => {
     const tile = document.createElement("button");
     tile.className = "essential" + (pin.active ? " selected" : "") + (pin.loaded && !pin.preloading ? "" : " unloaded");
@@ -530,6 +561,9 @@ function renderEssentials() {
 // This space's pinned section: folders (collapsible), then loose pins.
 function renderPinned() {
   const pinned = state.pinned || { folders: [], pins: [] };
+  const sig = JSON.stringify(pinned, withoutFlags);
+  if (sig === pinnedSig) return;
+  pinnedSig = sig;
   const rows = [];
   for (const folder of pinned.folders) {
     const header = document.createElement("div");
@@ -588,7 +622,8 @@ function renderWorkspaces() {
   const spaces = state.workspaces.enabled !== false;
   document.body.classList.toggle("no-spaces", !spaces);
 
-  const strip = state.workspaces.list.map((space, index) => {
+  const sig = JSON.stringify([state.workspaces.list, workspace.id]);
+  const strip = sig === spacesSig ? null : state.workspaces.list.map((space, index) => {
     const button = document.createElement("button");
     button.className = "workspace" + (space.id === workspace.id ? " active" : "");
     button.title = `${space.name} (Ctrl+Alt+${index + 1})`;
@@ -602,7 +637,10 @@ function renderWorkspaces() {
   add.title = "New space";
   add.textContent = "";
   add.addEventListener("click", () => send("ws-new"));
-  $("workspaces").replaceChildren(...strip, add);
+  if (strip) {
+    spacesSig = sig;
+    $("workspaces").replaceChildren(...strip, add);
+  }
   root.style.setProperty("--sidebar-bg", state.background);
   setFadeColours();
 }
@@ -990,6 +1028,7 @@ function render() {
   if (!document.querySelector(".rename-input")) {
     renderEssentials();
     renderPinned();
+    syncPins();
     const rows = openTabs().map((tab) => keyedRow(tab));
     if (state.split) rows.push(renderSplitRow(state.split));
     placeRows(tabs, rows);
