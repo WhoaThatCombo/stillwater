@@ -1836,10 +1836,14 @@ impl Document {
             // let doc be the VisualViewport’s associated document and target be the
             // VisualViewport. Otherwise, box belongs to an element and let doc be the
             // element’s node document and target be the element.
-            let Some(element) = target.downcast::<Element>() else {
-                continue;
+            // Stillwater: the viewport's scrolls are queued with the Document as target; they
+            // were skipped here, so a page never got `scrollend` (sites that turn pointer
+            // events off while scrolling, like X, never turned them back on).
+            let document = match (target.downcast::<Element>(), target.downcast::<Document>()) {
+                (Some(element), _) => element.owner_document(),
+                (None, Some(document)) => DomRoot::from_ref(document),
+                (None, None) => continue,
             };
-            let document = element.owner_document();
 
             // Step 1.2: If box belongs to a snap container, snapcontainer, run the
             // update scrollsnapchange targets steps for snapcontainer.
